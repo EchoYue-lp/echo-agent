@@ -232,17 +232,13 @@ impl SkillTelemetryStore {
                 Ok(Some(telemetry))
             }
             Ok(None) => Ok(None),
-            Err(_) => Ok(None),
+            Err(error) => Err(error),
         }
     }
 
     /// List telemetry for all skills.
     pub async fn list_all(&self) -> echo_core::error::Result<Vec<SkillTelemetry>> {
-        let items = self
-            .store
-            .list(&["agent", "skill_telemetry"])
-            .await
-            .unwrap_or_default();
+        let items = self.store.list(&["agent", "skill_telemetry"]).await?;
 
         let mut result = Vec::new();
         for item in items {
@@ -410,5 +406,133 @@ mod tests {
         t.record(&make_record("coding", true, 1000));
         t.record(&make_record("coding", false, 1000));
         assert!((t.recent_success_rate() - 0.6).abs() < f64::EPSILON);
+    }
+    // 候选：并入 echo-state/src/skill_telemetry.rs 的既有 tests module。
+    // 精确故障Store包原InMemoryStore，无新的业务Store；未编译、未运行。
+    struct ReadFaultStore {
+        inner: crate::memory::InMemoryStore,
+        fail_get: std::sync::atomic::AtomicBool,
+        fail_list: std::sync::atomic::AtomicBool,
+        puts: std::sync::atomic::AtomicUsize,
+    }
+
+    impl echo_core::memory::Store for ReadFaultStore {
+        fn put<'a>(
+            &'a self,
+            ns: &'a [&'a str],
+            key: &'a str,
+            value: serde_json::Value,
+        ) -> futures::future::BoxFuture<'a, echo_core::error::Result<()>> {
+            self.puts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.inner.put(ns, key, value)
+        }
+        fn get<'a>(
+            &'a self,
+            ns: &'a [&'a str],
+            key: &'a str,
+        ) -> futures::future::BoxFuture<
+            'a,
+            echo_core::error::Result<Option<echo_core::memory::StoreItem>>,
+        > {
+            if self
+                .fail_get
+                .swap(false, std::sync::atomic::Ordering::SeqCst)
+            {
+                return Box::pin(async {
+                    Err(echo_core::error::ReactError::Other(
+                        "get unavailable".into(),
+                    ))
+                });
+            }
+            self.inner.get(ns, key)
+        }
+        fn search<'a>(
+            &'a self,
+            ns: &'a [&'a str],
+            query: &'a str,
+            limit: usize,
+        ) -> futures::future::BoxFuture<
+            'a,
+            echo_core::error::Result<Vec<echo_core::memory::StoreItem>>,
+        > {
+            self.inner.search(ns, query, limit)
+        }
+        fn delete<'a>(
+            &'a self,
+            ns: &'a [&'a str],
+            key: &'a str,
+        ) -> futures::future::BoxFuture<'a, echo_core::error::Result<bool>> {
+            self.inner.delete(ns, key)
+        }
+        fn list_namespaces<'a>(
+            &'a self,
+            prefix: Option<&'a [&'a str]>,
+        ) -> futures::future::BoxFuture<'a, echo_core::error::Result<Vec<Vec<String>>>> {
+            self.inner.list_namespaces(prefix)
+        }
+        fn list<'a>(
+            &'a self,
+            ns: &'a [&'a str],
+        ) -> futures::future::BoxFuture<
+            'a,
+            echo_core::error::Result<Vec<echo_core::memory::StoreItem>>,
+        > {
+            if self.fail_list.load(std::sync::atomic::Ordering::SeqCst) {
+                return Box::pin(async {
+                    Err(echo_core::error::ReactError::Other(
+                        "list unavailable".into(),
+                    ))
+                });
+            }
+            self.inner.list(ns)
+        }
+    }
+
+    #[tokio::test]
+    async fn telemetry_get_failure_cannot_overwrite_existing_aggregate()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        use echo_core::memory::Store;
+        let raw = std::sync::Arc::new(ReadFaultStore {
+            inner: crate::memory::InMemoryStore::new(),
+            fail_get: std::sync::atomic::AtomicBool::new(true),
+            fail_list: std::sync::atomic::AtomicBool::new(false),
+            puts: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let mut old = SkillTelemetry::new("original-skill");
+        old.activation_count = 100;
+        let original = serde_json::to_value(old)?;
+        raw.inner
+            .put(
+                &["agent", "skill_telemetry"],
+                "original-skill",
+                original.clone(),
+            )
+            .await?;
+        let telemetry = SkillTelemetryStore::new(raw.clone());
+        let result = telemetry
+            .record_execution(&make_record("original-skill", true, 3))
+            .await;
+        assert!(result.is_err(), "get failure was treated as absent");
+        assert_eq!(raw.puts.load(std::sync::atomic::Ordering::SeqCst), 0);
+        let saved = raw
+            .inner
+            .get(&["agent", "skill_telemetry"], "original-skill")
+            .await?
+            .ok_or("original aggregate disappeared")?;
+        assert_eq!(saved.value, original);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn telemetry_list_failure_is_not_empty_success()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let raw = std::sync::Arc::new(ReadFaultStore {
+            inner: crate::memory::InMemoryStore::new(),
+            fail_get: std::sync::atomic::AtomicBool::new(false),
+            fail_list: std::sync::atomic::AtomicBool::new(true),
+            puts: std::sync::atomic::AtomicUsize::new(0),
+        });
+        assert!(SkillTelemetryStore::new(raw).list_all().await.is_err());
+        Ok(())
     }
 }

@@ -1,0 +1,98 @@
+{
+  "rounds": [
+    {
+      "id": "msg_round_one",
+      "type": "message",
+      "role": "assistant",
+      "model": "fixture-model",
+      "content": [
+        {
+          "type": "thinking",
+          "thinking": "签名推理中文😀",
+          "signature": "sig-中文-opaque=="
+        },
+        {
+          "type": "text",
+          "text": "先读取两份资料。"
+        },
+        {
+          "type": "tool_use",
+          "id": "call_a",
+          "name": "lookup",
+          "input": {
+            "path": "中文.md"
+          }
+        },
+        {
+          "type": "redacted_thinking",
+          "data": "redacted-opaque-原件=="
+        },
+        {
+          "type": "tool_use",
+          "id": "call_b",
+          "name": "lookup",
+          "input": {
+            "path": "other.md"
+          }
+        },
+        {
+          "type": "text",
+          "text": "等待真实结果。"
+        }
+      ],
+      "stop_reason": "tool_use",
+      "stop_sequence": null,
+      "usage": {
+        "input_tokens": 11,
+        "output_tokens": 7,
+        "cache_creation_input_tokens": 2,
+        "cache_read_input_tokens": 3,
+        "service_tier": "standard"
+      }
+    },
+    {
+      "id": "msg_round_two",
+      "type": "message",
+      "role": "assistant",
+      "model": "fixture-model",
+      "content": [
+        {
+          "type": "text",
+          "text": "继续检查。"
+        },
+        {
+          "type": "tool_use",
+          "id": "call_c",
+          "name": "lookup",
+          "input": {
+            "path": "third.md"
+          }
+        }
+      ],
+      "stop_reason": "tool_use",
+      "stop_sequence": null,
+      "usage": {
+        "input_tokens": 18,
+        "output_tokens": 9
+      }
+    },
+    {
+      "id": "msg_round_three",
+      "type": "message",
+      "role": "assistant",
+      "model": "fixture-model",
+      "content": [
+        {
+          "type": "text",
+          "text": "完成😀"
+        }
+      ],
+      "stop_reason": "stop_sequence",
+      "stop_sequence": "STOP",
+      "usage": {
+        "input_tokens": 23,
+        "output_tokens": 4
+      }
+    }
+  ]
+}

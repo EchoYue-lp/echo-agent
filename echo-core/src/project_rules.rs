@@ -552,10 +552,16 @@ mod tests {
         let child = root.join("src");
         fs::create_dir_all(root.join(".git"))?;
         fs::create_dir_all(&child)?;
-        write(&root.join(".echo-agent/AGENT.md"), "native")?;
-        write(&root.join("CLAUDE.md"), "claude")?;
-        write(&root.join("AGENTS.md"), "root agents")?;
-        write(&child.join("AGENTS.override.md"), "leaf override")?;
+        write(
+            &root.join(".echo-agent/AGENT.md"),
+            "EXCLUDED_NATIVE_PAYLOAD",
+        )?;
+        write(&root.join("CLAUDE.md"), "EXCLUDED_CLAUDE_PAYLOAD")?;
+        write(&root.join("AGENTS.md"), "AGENTS_ONLY_ROOT_PAYLOAD")?;
+        write(
+            &child.join("AGENTS.override.md"),
+            "AGENTS_ONLY_LEAF_PAYLOAD",
+        )?;
 
         let resolved = InstructionResolver::new(&child)
             .project_root(&root)
@@ -563,10 +569,31 @@ mod tests {
             .resolve();
 
         assert_eq!(resolved.sources.len(), 2);
-        assert!(resolved.content.contains("root agents"));
-        assert!(resolved.content.contains("leaf override"));
-        assert!(!resolved.content.contains("native"));
-        assert!(!resolved.content.contains("claude"));
+        let canonical_root = canonical_or_original(&root, None)?;
+        assert_eq!(
+            resolved.project_root.as_deref(),
+            Some(canonical_root.as_path())
+        );
+        assert_eq!(
+            resolved.sources.as_slice(),
+            &[
+                InstructionSource {
+                    path: canonical_root.join("AGENTS.md"),
+                    kind: "agents".to_string(),
+                    precedence: 0,
+                },
+                InstructionSource {
+                    path: canonical_root.join("src/AGENTS.override.md"),
+                    kind: "agents_override".to_string(),
+                    precedence: 1,
+                },
+            ]
+        );
+        // 注释保留真实源路径；排除判断针对夹具正文，避免路径中的同名单词误命中。
+        assert!(resolved.content.contains("AGENTS_ONLY_ROOT_PAYLOAD"));
+        assert!(resolved.content.contains("AGENTS_ONLY_LEAF_PAYLOAD"));
+        assert!(!resolved.content.contains("EXCLUDED_NATIVE_PAYLOAD"));
+        assert!(!resolved.content.contains("EXCLUDED_CLAUDE_PAYLOAD"));
         Ok(())
     }
 }

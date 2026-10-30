@@ -38,14 +38,6 @@ pub(crate) async fn run_think(
         run_id: snap.current_run_id.clone(),
         turn_id: snap.current_turn_id.clone(),
     };
-    // 原restore/reconcile及compact已完成；这里只转换本次模型请求的克隆副本。
-    // 持久context/cursor/CAS仍核原消息，来源由宿主原projector给出，非名称拦截。
-    let messages = crate::state::legacy_control_history::project_recovered_model_messages(
-        snap.pre_model_context_projector.as_deref(),
-        &projection_context,
-        messages,
-    )
-    .await?;
     let agent = &snap.config.agent_name;
     for cb in snap.config.callbacks.iter() {
         cb.on_think_start(agent, &messages).await;
@@ -195,12 +187,17 @@ pub(crate) async fn run_think(
     let mut llm_stream = match create_llm_stream(snap, request).await {
         Ok(stream) => Box::pin(stream),
         Err(error) => {
-            let terminal = AgentEvent::from_error("react_loop", &error)?;
-            if snap
+            let cancelled_at_failure = snap
                 .cancel_token
                 .as_ref()
-                .is_some_and(crate::agent::CancellationToken::is_cancelled)
-            {
+                .is_some_and(crate::agent::CancellationToken::is_cancelled);
+            super::retain_provider_response_observation(
+                context,
+                super::incomplete_response_observation(&error),
+            )
+            .await;
+            let terminal = AgentEvent::from_error("react_loop", &error)?;
+            if cancelled_at_failure {
                 let reason = "Agent execution cancelled before model response";
                 super::finalize::settle_terminal_projection(
                     snap,
@@ -236,8 +233,8 @@ pub(crate) async fn run_think(
     let mut assistant_blocks = Vec::new();
     let mut tool_call_map: super::super::processor::ToolCallFragments = HashMap::new();
     let mut last_usage = None;
+    let mut provider_response = None;
     let mut finish_reason = None::<String>;
-    let mut in_reasoning = false;
     let mut legacy_reasoning_open = false;
 
     loop {
@@ -249,6 +246,7 @@ pub(crate) async fn run_think(
                     None => std::future::pending().await,
                 }
             } => {
+                super::retain_provider_response_observation(context, provider_response.as_ref()).await;
                 super::finalize::settle_terminal_projection(
                     snap,
                     context,
@@ -270,15 +268,37 @@ pub(crate) async fn run_think(
         let Some(cr) = next else {
             break;
         };
+        let observation_error = match &cr {
+            Ok(chunk) => chunk.choices.iter().find_map(|choice| {
+                choice
+                    .delta
+                    .provider_response
+                    .as_ref()
+                    .and_then(|observation| {
+                        observe_provider_response(&mut provider_response, observation).err()
+                    })
+            }),
+            Err(_) => None,
+        };
+        let cr = observation_error.map_or(cr, Err);
         let chunk = match cr {
             Ok(chunk) => chunk,
             Err(error) => {
-                let terminal = AgentEvent::from_error("react_loop", &error)?;
-                if snap
+                let cancelled_at_failure = snap
                     .cancel_token
                     .as_ref()
-                    .is_some_and(crate::agent::CancellationToken::is_cancelled)
+                    .is_some_and(crate::agent::CancellationToken::is_cancelled);
+                if let Some(observation) = super::incomplete_response_observation(&error)
+                    && let Err(rejected) =
+                        observe_provider_response(&mut provider_response, observation)
                 {
+                    // 错误本身仍是首因；foreign尾部观察拒绝覆盖本请求，诊断不带原件。
+                    tracing::warn!(error = %rejected, "Rejected incomplete response metadata; original failure retained");
+                }
+                super::retain_provider_response_observation(context, provider_response.as_ref())
+                    .await;
+                let terminal = AgentEvent::from_error("react_loop", &error)?;
+                if cancelled_at_failure {
                     super::finalize::settle_terminal_projection(
                         snap,
                         context,
@@ -310,15 +330,19 @@ pub(crate) async fn run_think(
                     Some(&error.to_string()),
                 )
                 .await;
-                emit_partial_content_before_failure(
-                    snap,
-                    tx,
-                    &content_buffer,
-                    &assistant_blocks,
-                    &request_id,
-                    block_sequence,
-                )
-                .await;
+                if !matches!(&error, crate::error::ReactError::Llm(error)
+                    if matches!(error.as_ref(), crate::error::LlmError::IncompleteResponse { .. }))
+                {
+                    emit_partial_content_before_failure(
+                        snap,
+                        tx,
+                        &content_buffer,
+                        &assistant_blocks,
+                        &request_id,
+                        block_sequence,
+                    )
+                    .await;
+                }
                 let _ = tx.send(Ok(terminal)).await;
                 return Ok(ThinkOutcome::TerminalSettled {
                     outcome: crate::agent::AgentSteerTurnOutcome::Failed,
@@ -392,23 +416,27 @@ pub(crate) async fn run_think(
             }
         }
         // 复用既有工具碎片组装；旧Think/Token是兼容观察，不能再次投影同一正文/推理。
-        let _ = process_stream_chunk(
+        process_stream_chunk(
             &chunk,
             &mut content_buffer,
             &mut reasoning_buffer,
             &mut tool_call_map,
-            &mut in_reasoning,
-            false,
         );
     }
 
     match finish_reason.as_deref() {
         Some("stop" | "tool_calls" | "function_call" | "continue") => {}
         Some(reason) => {
-            let error =
-                crate::error::ReactError::Llm(Box::new(crate::error::LlmError::InvalidResponse(
-                    format!("model stream ended with non-success finish reason '{reason}'"),
-                )));
+            let error = incomplete_model_response(
+                &content_buffer,
+                &reasoning_buffer,
+                &reasoning_blocks,
+                &assistant_blocks,
+                &tool_call_map,
+                provider_response.as_ref(),
+                Some(reason),
+            );
+            super::retain_provider_response_observation(context, provider_response.as_ref()).await;
             super::finalize::settle_terminal_projection(snap, context, Some(error.to_string()), tx)
                 .await?;
             snap.finalize_run(
@@ -417,26 +445,22 @@ pub(crate) async fn run_think(
                 Some(&error.to_string()),
             )
             .await;
-            emit_partial_content_before_failure(
-                snap,
-                tx,
-                &content_buffer,
-                &assistant_blocks,
-                &request_id,
-                block_sequence,
-            )
-            .await;
-            let _ = tx.send(Err(error)).await;
+            let _ = tx.send(AgentEvent::from_error("react_loop", &error)).await;
             return Ok(ThinkOutcome::TerminalSettled {
                 outcome: crate::agent::AgentSteerTurnOutcome::Failed,
             });
         }
         None => {
-            let error =
-                crate::error::ReactError::Llm(Box::new(crate::error::LlmError::InvalidResponse(
-                    "model stream ended without a finish reason; response may be truncated"
-                        .to_string(),
-                )));
+            let error = incomplete_model_response(
+                &content_buffer,
+                &reasoning_buffer,
+                &reasoning_blocks,
+                &assistant_blocks,
+                &tool_call_map,
+                provider_response.as_ref(),
+                None,
+            );
+            super::retain_provider_response_observation(context, provider_response.as_ref()).await;
             super::finalize::settle_terminal_projection(snap, context, Some(error.to_string()), tx)
                 .await?;
             snap.finalize_run(
@@ -445,16 +469,7 @@ pub(crate) async fn run_think(
                 Some(&error.to_string()),
             )
             .await;
-            emit_partial_content_before_failure(
-                snap,
-                tx,
-                &content_buffer,
-                &assistant_blocks,
-                &request_id,
-                block_sequence,
-            )
-            .await;
-            let _ = tx.send(Err(error)).await;
+            let _ = tx.send(AgentEvent::from_error("react_loop", &error)).await;
             return Ok(ThinkOutcome::TerminalSettled {
                 outcome: crate::agent::AgentSteerTurnOutcome::Failed,
             });
@@ -567,7 +582,14 @@ pub(crate) async fn run_think(
                     AgentEvent::AssistantMessage {
                         block: block.clone()
                     },
-                    ThinkOutcome::Abandoned
+                    {
+                        super::retain_provider_response_observation(
+                            context,
+                            provider_response.as_ref(),
+                        )
+                        .await;
+                        ThinkOutcome::Abandoned
+                    }
                 );
             }
         }
@@ -681,10 +703,14 @@ pub(crate) async fn run_think(
             cache_creation_prompt_tokens,
             usage_reported,
         },
-        ThinkOutcome::Abandoned
+        {
+            super::retain_provider_response_observation(context, provider_response.as_ref()).await;
+            ThinkOutcome::Abandoned
+        }
     );
 
     Ok(ThinkOutcome::Continue(Box::new(ThinkOutput {
+        provider_response,
         content_buffer,
         candidate_answer,
         continue_response,
@@ -697,6 +723,81 @@ pub(crate) async fn run_think(
         ct,
         usage_reported,
     })))
+}
+
+fn observe_provider_response(
+    current: &mut Option<crate::llm::types::ProviderResponseMetadata>,
+    observation: &crate::llm::types::ProviderResponseMetadata,
+) -> Result<()> {
+    if current.as_ref().is_some_and(|previous| {
+        previous.protocol != observation.protocol
+            || previous.provider != observation.provider
+            || previous
+                .request_id
+                .as_ref()
+                .is_some_and(|request_id| observation.request_id.as_ref() != Some(request_id))
+    }) {
+        return Err(crate::error::LlmError::InvalidResponse(
+            "provider response observation changed its request identity".into(),
+        )
+        .into());
+    }
+    // 协议reducer给出完整快照；这里只替换同请求观察，不重建usage或再次累计。
+    *current = Some(observation.clone());
+    Ok(())
+}
+
+fn incomplete_model_response(
+    content: &str,
+    reasoning: &str,
+    reasoning_blocks: &[ReasoningBlock],
+    assistant_blocks: &[echo_core::agent::AssistantMessageBlock],
+    tool_calls: &super::super::processor::ToolCallFragments,
+    observation: Option<&crate::llm::types::ProviderResponseMetadata>,
+    finish_reason: Option<&str>,
+) -> crate::error::ReactError {
+    if content.is_empty()
+        && reasoning.is_empty()
+        && reasoning_blocks.is_empty()
+        && assistant_blocks.is_empty()
+        && tool_calls.is_empty()
+        && observation.is_none()
+    {
+        return crate::error::LlmError::InvalidResponse(match finish_reason {
+            Some(reason) => format!("model stream ended with non-success finish reason '{reason}'"),
+            None => "model stream ended without a finish reason; response may be truncated".into(),
+        })
+        .into();
+    }
+    let mut partial = super::with_reasoning_content(
+        Message::assistant(content.to_string()),
+        reasoning.to_string(),
+        reasoning_blocks.to_vec(),
+    );
+    partial.assistant_blocks = (!assistant_blocks.is_empty()).then(|| assistant_blocks.to_vec());
+    partial.provider_response = observation.cloned();
+    let mut ordered = tool_calls.iter().collect::<Vec<_>>();
+    ordered.sort_by_key(|(index, _)| **index);
+    // 原碎片只进入失败载体，不解析/修复参数、不生成调用ID、不得交给工具执行器。
+    let calls = ordered
+        .into_iter()
+        .map(
+            |(_, (id, name, arguments, source))| crate::llm::types::ToolCall {
+                provider_source: source.clone(),
+                id: id.clone(),
+                call_type: "function".into(),
+                function: crate::llm::types::FunctionCall {
+                    name: name.clone(),
+                    arguments: arguments.clone(),
+                },
+            },
+        )
+        .collect::<Vec<_>>();
+    partial.tool_calls = (!calls.is_empty()).then_some(calls);
+    crate::error::LlmError::IncompleteResponse {
+        partial: Box::new(partial),
+    }
+    .into()
 }
 
 async fn emit_partial_content_before_failure(
@@ -763,6 +864,12 @@ fn build_llm_request(
     messages: Vec<Message>,
     final_only: bool,
 ) -> crate::llm::ChatRequest {
+    // 排除整条失败观察；普通消息保D1到适配器核对native来源后再从HTTP wire剥离。
+    // 不改原Context，也不提前抹掉来源一致性证据；工具及签名reasoning仍走原协议回传。
+    let messages: Vec<_> = messages
+        .into_iter()
+        .filter(|message| !message.is_provider_response_observation_only())
+        .collect();
     let tools = tools_for_request(snap, final_only);
     let layout = echo_core::llm::cache::PromptCacheLayout::from_messages(
         &messages,
@@ -785,7 +892,7 @@ fn build_llm_request(
         max_tokens: snap.config.max_tokens,
         tools,
         tool_choice: (final_only && snap.config.supports_tool_choice_none)
-            .then(|| "none".to_string()),
+            .then_some(crate::llm::ToolChoice::None),
         response_format,
         thinking: snap.thinking.clone(),
         cancel_token: snap.cancel_token.clone(),
@@ -811,7 +918,7 @@ pub(crate) async fn create_llm_stream(
     if request
         .response_format
         .as_ref()
-        .is_some_and(crate::llm::ResponseFormat::is_json)
+        .is_some_and(|format| matches!(format, crate::llm::ResponseFormat::JsonSchema { .. }))
         && !snap.config.supports_structured_output
     {
         return Err(crate::error::ConfigError::UnMatchConfigError(
@@ -885,6 +992,7 @@ pub(crate) async fn create_llm_stream(
                                 .transpose()?;
                             let chunk = crate::llm::ChatChunk {
                                 delta: crate::llm::types::DeltaMessage {
+                                    provider_response: message.provider_response,
                                     role: Some("assistant".into()),
                                     content: message.content.as_text(),
                                     reasoning_content: message.reasoning_content,

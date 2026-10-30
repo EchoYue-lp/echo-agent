@@ -1054,6 +1054,16 @@ mod tests {
         team: bool,
         readonly: bool,
     ) -> crate::error::Result<()> {
+        assert_actual_depth_chain_with_background(mode, maximum, team, readonly, false).await
+    }
+
+    async fn assert_actual_depth_chain_with_background(
+        mode: &'static str,
+        maximum: u8,
+        team: bool,
+        readonly: bool,
+        background: bool,
+    ) -> crate::error::Result<()> {
         let registry = Arc::new(SubagentRegistry::new());
         let mut events = registry.event_bus().subscribe();
         let mut actors = Vec::new();
@@ -1134,10 +1144,12 @@ mod tests {
             Arc::clone(&registry),
             SubagentExecutorConfig::default(),
         ));
+        let cancellation = CancellationToken::new();
+        let (effect_tx, mut effect_rx) = tokio::sync::mpsc::unbounded_channel();
         let dispatch = if readonly {
-            AgentDispatchTool::read_only(executor, "primary", CancellationToken::new())
+            AgentDispatchTool::read_only(executor, "primary", cancellation.clone())
         } else {
-            AgentDispatchTool::new(executor, "primary", CancellationToken::new())
+            AgentDispatchTool::new(executor, "primary", cancellation.clone())
         };
         let result = dispatch
             .execute_with_context(
@@ -1145,10 +1157,29 @@ mod tests {
                     ("agent_name".into(), json!(target)),
                     ("task".into(), json!("bounded chain")),
                     ("mode".into(), json!(if team { "team" } else { mode })),
+                    ("background".into(), json!(background)),
                 ]
                 .into_iter()
                 .collect(),
                 &ToolContext {
+                    // 沿原 background effect sink 等其原 handle.join()，不拿 started/事件当EOF。
+                    effect_sink: background.then(|| {
+                        let sender = effect_tx.clone();
+                        let root_target = target.to_string();
+                        Arc::new(move |effect| {
+                            let sender = sender.clone();
+                            let root_target = root_target.clone();
+                            Box::pin(async move {
+                                if matches!(&effect, echo_core::tools::ToolEffect::SubagentRun {
+                                    agent_name, task, ..
+                                } if agent_name == &root_target && task == "bounded chain")
+                                {
+                                    let _ = sender.send(effect);
+                                }
+                            })
+                                as futures::future::BoxFuture<'static, ()>
+                        }) as echo_core::tools::ToolEffectSinkFn
+                    }),
                     tool_access: readonly.then_some(ToolAccess::ReadOnly),
                     tool_visibility: readonly.then(|| {
                         Arc::new(echo_core::tools::ToolVisibilityState::new(
@@ -1168,7 +1199,43 @@ mod tests {
                 },
             )
             .await?;
+        drop(effect_tx);
         assert_eq!(result.success, !team || maximum > 1);
+        if background {
+            // 复用本模块原 background_effect_settles_once 控制的3秒fixture界限。
+            // 超时只取消原token，仍等同一原sink（其后已真实join），不遗留后台source。
+            let (late, effect) =
+                match tokio::time::timeout(std::time::Duration::from_secs(3), effect_rx.recv())
+                    .await
+                {
+                    Ok(effect) => (false, effect),
+                    Err(_) => {
+                        cancellation.cancel();
+                        (true, effect_rx.recv().await)
+                    }
+                };
+            let effect = effect.ok_or_else(|| {
+                crate::error::ReactError::Other(
+                    "original background result sink closed without physical settlement".into(),
+                )
+            })?;
+            assert!(
+                !late,
+                "original background settled only after its existing fixture deadline"
+            );
+            assert_eq!(
+                effect,
+                echo_core::tools::ToolEffect::SubagentRun {
+                    agent_name: target.to_string(),
+                    task: "bounded chain".into(),
+                    outcome: "completed".into(),
+                }
+            );
+            assert!(
+                effect_rx.try_recv().is_err(),
+                "original background result delivered twice"
+            );
+        }
         let first_concrete_depth = if team { 2 } else { 1 };
         for (depth, name, requests, observations) in &actors {
             let observed = observations
@@ -1235,6 +1302,15 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn readonly_background_fork_keeps_actual_depth_and_scope_until_original_join()
+    -> crate::error::Result<()> {
+        for maximum in [1, 2, 3, 4] {
+            assert_actual_depth_chain_with_background("fork", maximum, false, true, true).await?;
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn direct_dispatch_stamps_actual_child_policy_once() -> crate::error::Result<()> {
         for mode in ["sync", "fork", "teammate"] {
             for maximum in [1, 2, 3, 4] {
@@ -1268,15 +1344,13 @@ mod tests {
     async fn primary_explicit_policy_masks_model_search_and_forced_dispatch()
     -> crate::error::Result<()> {
         use futures::StreamExt;
-        // Legacy false, value false, and explicit None overriding legacy false
-        // use the same real primary Agent, without inventing a primary role.
-        for (legacy_false, explicit, hard_scope_only_dispatch) in [
-            (false, Some(Some(false)), false),
-            (true, None, false),
-            (true, Some(None), false),
-            (false, Some(None), false),
-            (false, Some(Some(true)), false),
-            (false, Some(Some(false)), true),
+        // 真实 primary Agent 的当前 value-scoped policy 与 hard scope；
+        // 旧共享 setter 优先级两分支已退役，不移植为第二份 policy 权威。
+        for (policy, hard_scope_only_dispatch) in [
+            (Some(false), false),
+            (None, false),
+            (Some(true), false),
+            (Some(false), true),
         ] {
             let registry = Arc::new(SubagentRegistry::new());
             let child = MockAgent::new("child").with_response("child complete");
@@ -1325,65 +1399,32 @@ mod tests {
                 delegate_depth: 0,
                 max_delegate_depth: 3,
             };
-            if legacy_false {
-                crate::agent::Agent::set_external_context(
-                    &agent,
-                    &echo_core::tools::ExternalRunContext {
-                        delegation_policy: Some(stopped),
+            let actual_policy = policy.map(|enabled| {
+                if enabled {
+                    NestedDelegationPolicy {
+                        can_spawn_subagents: true,
+                        delegate_depth: 0,
+                        max_delegate_depth: 1,
+                    }
+                } else {
+                    stopped
+                }
+            });
+            let mut stream = crate::agent::Agent::execute_stream_message_with_invocation_context(
+                &agent,
+                Message::user("primary bounded turn".into()),
+                CancellationToken::new(),
+                echo_core::agent::AgentInvocationContext {
+                    runtime: Some(echo_core::tools::ExternalRunContext {
+                        delegation_policy: actual_policy,
                         ..Default::default()
-                    },
-                );
-            }
-            let actual_policy = explicit
-                .flatten()
-                .map(|enabled| {
-                    if enabled {
-                        NestedDelegationPolicy {
-                            can_spawn_subagents: true,
-                            delegate_depth: 0,
-                            max_delegate_depth: 1,
-                        }
-                    } else {
-                        stopped
-                    }
-                })
-                .or_else(|| {
-                    if explicit.is_none() && legacy_false {
-                        Some(stopped)
-                    } else {
-                        None
-                    }
-                });
-            let mut stream = if let Some(explicit) = explicit {
-                let policy = explicit.map(|enabled| {
-                    if enabled {
-                        NestedDelegationPolicy {
-                            can_spawn_subagents: true,
-                            delegate_depth: 0,
-                            max_delegate_depth: 1,
-                        }
-                    } else {
-                        stopped
-                    }
-                });
-                crate::agent::Agent::execute_stream_with_invocation_context(
-                    &agent,
-                    "primary bounded turn",
-                    CancellationToken::new(),
-                    echo_core::agent::AgentInvocationContext {
-                        runtime: Some(echo_core::tools::ExternalRunContext {
-                            delegation_policy: policy,
-                            ..Default::default()
-                        }),
-                        allowed_tools: hard_scope_only_dispatch
-                            .then(|| std::collections::HashSet::from(["agent_tool".into()])),
-                        ..Default::default()
-                    },
-                )
-                .await?
-            } else {
-                crate::agent::Agent::execute_stream(&agent, "legacy bounded turn").await?
-            };
+                    }),
+                    allowed_tools: hard_scope_only_dispatch
+                        .then(|| std::collections::HashSet::from(["agent_tool".into()])),
+                    ..Default::default()
+                },
+            )
+            .await?;
             while let Some(event) = stream.next().await {
                 event?;
             }

@@ -13,7 +13,7 @@
 //! | 结构化输出 | `extract<T>()` 提取结构化数据 |
 //! | 长期记忆 | `SqliteStore` 持久化研究历史 |
 //! | Token 预算 | `max_tool_output_tokens` 控制内容长度 |
-//! | 流式输出 | `execute_stream()` 实时显示进度 |
+//! | 流式输出 | 原生消息块区分推理与正文，真实 EOF 后核验结果 |
 //! | Agent 编排 | 主编排 Agent + 研究子 Agent |
 //!
 //! ## 运行方式
@@ -26,6 +26,8 @@
 //! RUST_LOG=info QWEN_API_KEY=your_key cargo run -p echo-agent-learning --example demo49_research_agent --features "web,sqlite,files,subagent"
 //! ```
 
+use echo_agent::agent::{AgentOutputProjection, AssistantPhase, ExecutionStatusKind};
+use echo_agent::error::{AgentError, AgentTerminalKind, ReactError};
 use echo_agent::memory::SqliteStore;
 use echo_agent::prelude::*;
 use echo_agent::skills::builtin::FileSystemSkill;
@@ -262,13 +264,88 @@ async fn demo_simple_research() -> Result<()> {
     let mut stream = agent.execute_stream(task).await?;
     let mut used_search = false;
     let mut used_fetch = false;
-    let mut final_answer = String::new();
+    let owner_run = agent.current_run_id();
+    let mut output = AgentOutputProjection::default();
+    let mut first_error = None;
+    let mut unresolved = None::<ReactError>;
+    let same_source = |error: &ReactError, projection: &AgentOutputProjection| {
+        matches!(error, ReactError::ExecutionNotSettled { run_id, execution_id }
+            if owner_run.as_deref() == Some(run_id.as_str())
+                && execution_id.as_deref().is_some()
+                && execution_id.as_deref() == projection.execution_id())
+    };
 
+    // 保留工具/任务行为，所有观察均来自这条原 source，并读到真实 EOF。
     while let Some(event) = stream.next().await {
-        match event? {
-            AgentEvent::ThinkStart => print!("🤔 "),
-            AgentEvent::ThinkEnd { .. } => println!(),
-            AgentEvent::ToolCall { invocation, .. } => {
+        let observed = match event {
+            Err(error @ ReactError::ExecutionNotSettled { .. }) => {
+                // 未结算观察不是终态；foreign 观察不会被这条 source 的完成覆盖。
+                if unresolved
+                    .as_ref()
+                    .is_none_or(|prior| same_source(prior, &output))
+                {
+                    unresolved = Some(error);
+                }
+                Ok(())
+            }
+            Ok(AgentEvent::ExecutionStatus(status)) => {
+                output.observe_status(&status).map(|changed| {
+                    if changed
+                        && matches!(
+                            status.status,
+                            ExecutionStatusKind::Settled
+                                | ExecutionStatusKind::Failed
+                                | ExecutionStatusKind::Cancelled
+                        )
+                        && unresolved
+                            .as_ref()
+                            .is_some_and(|prior| same_source(prior, &output))
+                    {
+                        unresolved = None;
+                    }
+                    if let Some(error) = output.terminal_failure() {
+                        first_error.get_or_insert(error);
+                    }
+                })
+            }
+            Ok(AgentEvent::AssistantMessage { block }) => {
+                output.observe_block(&block).map(|delta| {
+                    if let Some(delta) = delta {
+                        // 只显示投影后的可见文本；签名、密文和重放载体不直接输出。
+                        match delta.block.phase {
+                            AssistantPhase::Reasoning if !delta.text.is_empty() => {
+                                println!("\n[推理] {}", delta.text)
+                            }
+                            AssistantPhase::Commentary if !delta.text.is_empty() => {
+                                println!("\n[进度] {}", delta.text)
+                            }
+                            AssistantPhase::Reasoning | AssistantPhase::Commentary => {}
+                            _ => {
+                                print!("{}", delta.text);
+                                std::io::stdout().flush().ok();
+                            }
+                        }
+                    }
+                })
+            }
+            Ok(AgentEvent::LlmUsage {
+                model,
+                prompt_tokens,
+                completion_tokens,
+                total_tokens,
+                usage_reported,
+                ..
+            }) => {
+                if usage_reported {
+                    println!(
+                        "\n[LLM 用量] model={model}, prompt={prompt_tokens}, completion={completion_tokens}, total={total_tokens}"
+                    );
+                } else {
+                    println!("\n[LLM 用量] model={model}，上游未报告用量");
+                }
+                Ok(())
+            }
+            Ok(AgentEvent::ToolCall { invocation, .. }) => {
                 let name = invocation.name;
                 if name == "web_search" {
                     used_search = true;
@@ -277,22 +354,43 @@ async fn demo_simple_research() -> Result<()> {
                     used_fetch = true;
                 }
                 println!("🔧 使用工具: {}", name);
+                Ok(())
             }
-            AgentEvent::ToolResult { result, .. } => {
+            Ok(AgentEvent::ToolResult { result, .. }) => {
                 let preview: String = result.output.chars().take(150).collect();
                 println!("   ✓ 结果: {}...", preview);
+                Ok(())
             }
-            AgentEvent::AssistantMessage { block } => {
-                print!("[消息块 {:?}] {}", block.phase, block.delta);
-                std::io::stdout().flush().ok();
+            Ok(AgentEvent::FinalAnswer(answer)) => output.confirm_answer(&answer),
+            Ok(AgentEvent::Error { failure, .. }) => Err(match failure.terminal_kind {
+                AgentTerminalKind::Cancelled => AgentError::Cancelled(failure.message).into(),
+                AgentTerminalKind::TimedOut => AgentError::Timeout(failure.message).into(),
+                AgentTerminalKind::PermissionDenied => {
+                    AgentError::PermissionDenied(failure.message).into()
+                }
+                _ => ReactError::Other(failure.message),
+            }),
+            Ok(AgentEvent::Cancelled) => {
+                Err(AgentError::Cancelled("原生 Agent source 已取消".into()).into())
             }
-            AgentEvent::FinalAnswer(answer) => {
-                // 确认事件只更新最终结果，不由Token/消息块猜测执行结束。
-                println!("\n[最终确认] {}", answer);
-                final_answer = answer;
-            }
-            _ => {}
+            Err(error) => Err(error),
+            _ => Ok(()),
+        };
+        if let Err(error) = observed {
+            first_error.get_or_insert(error);
         }
+    }
+    if let Some(error) = unresolved {
+        return Err(error);
+    }
+    if let Some(error) = first_error {
+        return Err(error);
+    }
+    let final_answer = output.finish()?;
+    // 原 source EOF 后只补尚未展示的安全最终正文，确认通知本身不重印。
+    if let Some(missing) = output.take_final_presentation()? {
+        print!("{missing}");
+        std::io::stdout().flush().ok();
     }
 
     if !used_search || !used_fetch {

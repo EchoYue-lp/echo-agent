@@ -119,14 +119,12 @@ Provider adapters or applications that discover exact-model data use
 three-argument `resolve` remain compatibility entry points; they immediately
 translate their values into sourced records and use the same resolver.
 
-`ModelFactInputs` is the serializable sidecar for existing `LlmConfig` and
-`ModelConfig` values. `SourcedLlmConfig` and `SourcedModelConfig` preserve provider,
-exact-model, and ordered caller records without changing the existing public config
-struct shapes. A legacy `ModelConfig::context_window` is converted to a sourced
-caller override. Concrete clients publish an adapter-specific
-`protocol_capabilities` baseline; configurable provider labels cannot change that
-wire contract. Their existing `capabilities` method returns the fresh resolved
-profile instead of the protocol baseline.
+`ModelFactInputs` 保存 provider、exact-model 与有序 caller 来源事实；当前
+`ModelConfig.facts` 直接携带这些事实，`SourcedLlmConfig` 继续服务原 client 构建与刷新。
+`ModelConfig` 新增 `facts` 字段，旧 `SourcedModelConfig { config, facts }` 侧车形状退役。
+当前 `ModelConfig::context_window` 仍形成带原 provenance 的 caller override，清除两类
+输入互不抹除。`protocol_capabilities` 继续是 adapter 固有 wire baseline，`capabilities`
+仍返回 freshness 解析后的 profile；可配置 provider 名称不能改写协议事实。
 
 Use `ReactAgentBuilder::sourced_llm_config` for the LLM sidecar. Every run snapshot resolves
 the current client again and retains `model_fact_sources` and `ignored_model_facts`, so an

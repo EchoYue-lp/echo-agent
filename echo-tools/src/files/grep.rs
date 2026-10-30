@@ -200,6 +200,11 @@ impl Tool for GrepTool {
                         .map(|artifacts| artifacts.root_dir.clone())
                 });
 
+            let canonical_roots = if preferred_root.is_some() {
+                Some(canonicalize_roots(file_system, cancel, &allowed_roots)?)
+            } else {
+                None
+            };
             let search_path = if let Some(ref base) = preferred_root {
                 let resolved = if Path::new(path_str).is_absolute() {
                     PathBuf::from(path_str)
@@ -214,7 +219,9 @@ impl Tool for GrepTool {
                     Err(echo_core::error::ReactError::Io(_)) => resolved.clone(),
                     Err(error) => return Err(error),
                 };
-                let within_scope = canonicalize_roots(file_system, cancel, &allowed_roots)?
+                let within_scope = canonical_roots
+                    .as_deref()
+                    .unwrap_or_default()
                     .iter()
                     .any(|root| resolved_canon.starts_with(root));
                 if !within_scope {
@@ -254,9 +261,9 @@ impl Tool for GrepTool {
                     file_system,
                     cancel,
                     &search_path,
+                    canonical_roots.as_deref(),
                     &regex,
-                    glob_filter,
-                    context_lines,
+                    (glob_filter, context_lines),
                     &mut results,
                 )?;
             }
@@ -385,12 +392,13 @@ fn walk_and_search(
     file_system: &dyn echo_core::tools::filesystem::FileSystem,
     cancel: Option<&echo_core::agent::CancellationToken>,
     dir: &Path,
+    allowed_roots: Option<&[PathBuf]>,
     regex: &regex::Regex,
-    glob_filter: Option<&str>,
-    context_lines: usize,
+    display_options: (Option<&str>, usize),
     results: &mut Vec<String>,
 ) -> Result<()> {
     super::check_file_cancel(cancel, "grep")?;
+    let (glob_filter, context_lines) = display_options;
     let entries = match file_system.read_dir(dir) {
         Ok(e) => e,
         Err(echo_core::error::ReactError::Io(_)) => return Ok(()),
@@ -421,14 +429,33 @@ fn walk_and_search(
 
     for path in entry_paths {
         super::check_file_cancel(cancel, "grep")?;
+        if let Some(roots) = allowed_roots {
+            // 原 Grep root 集合选择范围；target namespace 与目录根分别校验。
+            let canonical = match file_system.canonicalize(&path) {
+                Ok(path) => path,
+                Err(error) if super::is_io_kind(&error, std::io::ErrorKind::NotFound) => continue,
+                Err(error) => return Err(error),
+            };
+            let root = roots
+                .iter()
+                .find(|root| canonical.starts_with(root))
+                .ok_or_else(|| ToolError::InvalidParameter {
+                    name: "path".to_string(),
+                    message: format!(
+                        "Path '{}' is outside the allowed directory scope",
+                        path.display()
+                    ),
+                })?;
+            super::resolve_path_buf(file_system, "grep", &canonical, &Some(root.clone()))?;
+        }
         if file_system.is_dir(&path)? {
             walk_and_search(
                 file_system,
                 cancel,
                 &path,
+                allowed_roots,
                 regex,
-                glob_filter,
-                context_lines,
+                display_options,
                 results,
             )?;
         } else if file_system.is_file(&path)? {

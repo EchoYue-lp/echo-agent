@@ -175,6 +175,208 @@ pub fn translate_thinking_openai_compat(
     }
 }
 
+/// Chat 请求的严格适配入口。Responses 继续使用上面的原入口，避免
+/// 本线修复改变其它协议的合同。显式配置无法表达时返回错误，而非 warn/drop。
+pub(crate) fn translate_chat_thinking(
+    model_name: &str,
+    provider: &str,
+    thinking_protocol: ThinkingProtocol,
+    thinking: &Option<ThinkingConfig>,
+) -> echo_core::error::Result<OpenAiCompatThinking> {
+    use echo_core::error::LlmError;
+    let model = model_name.to_ascii_lowercase();
+    let unsupported = |reason: &str| {
+        LlmError::SerializationError(format!(
+            "Chat Completions thinking for {provider}/{model_name}: {reason}"
+        ))
+    };
+    let Some(cfg) = thinking else {
+        return Ok(OpenAiCompatThinking {
+            drop_temperature: (provider == "deepseek"
+                && thinking_protocol == ThinkingProtocol::DeepseekReasoningEffort)
+                || (matches!(provider, "openai" | "azure-openai")
+                    && thinking_protocol == ThinkingProtocol::OpenaiReasoningEffort
+                    && (model.starts_with("o1")
+                        || model.starts_with("o3")
+                        || model.starts_with("o4")
+                        || model.starts_with("gpt-5"))),
+            ..Default::default()
+        });
+    };
+    if matches!(cfg, ThinkingConfig::BudgetTokens(0)) {
+        return Err(
+            unsupported("reasoning budget must be positive; use Disabled to disable").into(),
+        );
+    }
+    let disabled = matches!(
+        cfg,
+        ThinkingConfig::Disabled | ThinkingConfig::Level(ThinkingLevel::None)
+    );
+    let effort = || {
+        if disabled {
+            "none"
+        } else {
+            cfg.to_reasoning_effort().unwrap_or("high")
+        }
+    };
+    if matches!(provider, "google" | "gemini")
+        && thinking_protocol == ThinkingProtocol::OpenaiReasoningEffort
+        && model.starts_with("gemini-")
+    {
+        let level = effort();
+        // Gemini compatibility supports reasoning_effort rather than native think.
+        // Unsupported effort values must not silently fall back to the model default.
+        let accepted = if model.starts_with("gemini-2.5") {
+            matches!(level, "none" | "low" | "medium" | "high")
+        } else if model.starts_with("gemini-3") && model.contains("flash") {
+            matches!(level, "minimal" | "low" | "medium" | "high")
+        } else if model.starts_with("gemini-3") && model.contains("pro") {
+            matches!(level, "low" | "high")
+        } else {
+            false
+        };
+        if !accepted || (model.contains("pro") && level == "none") {
+            return Err(unsupported(
+                "this Gemini model does not support the requested reasoning_effort",
+            )
+            .into());
+        }
+        return Ok(OpenAiCompatThinking {
+            reasoning_effort: Some(level.into()),
+            ..Default::default()
+        });
+    }
+    match thinking_protocol {
+        ThinkingProtocol::None
+        | ThinkingProtocol::ModelManaged
+        | ThinkingProtocol::AnthropicAdaptive
+        | ThinkingProtocol::AnthropicEffort
+        | ThinkingProtocol::AnthropicThinkingBudget => Err(unsupported(
+            "resolved model/protocol exposes no compatible request-side control",
+        )
+        .into()),
+        ThinkingProtocol::OllamaThink => {
+            // /v1/chat/completions 与 /api/chat 不同：前者使用 reasoning_effort。
+            // bool-only 模型 recognized effort -> true；none -> false；GPT-OSS
+            // 仅 low/medium/high，无法兑现 max 时显式拒绝。
+            let level = effort();
+            if model.starts_with("gpt-oss")
+                && !matches!(
+                    level,
+                    "none" | "low" | "medium" | "high" | "minimal" | "xhigh"
+                )
+            {
+                return Err(unsupported("GPT-OSS supports low/medium/high (and documented compatibility aliases), not max").into());
+            }
+            Ok(OpenAiCompatThinking {
+                reasoning_effort: Some(level.into()),
+                ..Default::default()
+            })
+        }
+        ThinkingProtocol::OpenaiReasoningEffort => {
+            if disabled
+                && (model.starts_with("o1")
+                    || model.starts_with("o3")
+                    || model.starts_with("o4")
+                    || model == "gpt-5"
+                    || model.starts_with("gpt-5-"))
+            {
+                return Err(unsupported("this reasoning model has no none/off switch").into());
+            }
+            Ok(OpenAiCompatThinking {
+                reasoning_effort: Some(effort().into()),
+                drop_temperature: matches!(provider, "openai" | "azure-openai")
+                    && (model.starts_with("o1")
+                        || model.starts_with("o3")
+                        || model.starts_with("o4")
+                        || model.starts_with("gpt-5")),
+                ..Default::default()
+            })
+        }
+        ThinkingProtocol::DeepseekReasoningEffort => {
+            let level = match effort() {
+                "minimal" | "low" => "low",
+                "max" => "max",
+                _ => "high",
+            };
+            Ok(OpenAiCompatThinking {
+                thinking_type: Some(ThinkingTypeBlock {
+                    block_type: if disabled { "disabled" } else { "enabled" }.into(),
+                }),
+                reasoning_effort: (!disabled).then(|| level.into()),
+                drop_temperature: provider == "deepseek" && !disabled,
+                ..Default::default()
+            })
+        }
+        ThinkingProtocol::GlmReasoningEffort => {
+            if model.starts_with("glm-5.3") {
+                let level = cfg.to_glm_reasoning_effort().unwrap_or("max");
+                if !matches!(level, "low" | "high" | "max") {
+                    return Err(unsupported(
+                        "GLM-5.3 only accepts enabled thinking with low/high/max",
+                    )
+                    .into());
+                }
+            }
+            Ok(OpenAiCompatThinking {
+                thinking_type: Some(ThinkingTypeBlock {
+                    block_type: if disabled { "disabled" } else { "enabled" }.into(),
+                }),
+                reasoning_effort: (!disabled)
+                    .then(|| cfg.to_glm_reasoning_effort().unwrap_or("high").into()),
+                ..Default::default()
+            })
+        }
+        ThinkingProtocol::EnableThinkingFlag => {
+            let dashscope = matches!(
+                provider,
+                "dashscope" | "qwen" | "aliyun" | "alibaba" | "modelstudio" | "bailian"
+            );
+            let thinking_only = dashscope
+                && (model.contains("-thinking")
+                    || matches!(
+                        model.as_str(),
+                        "qwen3.8-2.4t-a95b" | "qwen3.7-max-preview" | "qwen3.7-max-2026-05-17"
+                    ));
+            if disabled && thinking_only {
+                return Err(unsupported(
+                    "this exact DashScope model is thinking-only and cannot disable thinking",
+                )
+                .into());
+            }
+            if dashscope && model == "qwen3.8-omni-flash" {
+                return Ok(OpenAiCompatThinking {
+                    enable_thinking: Some(!disabled),
+                    reasoning_effort: (!disabled
+                        && !matches!(cfg, ThinkingConfig::BudgetTokens(_)))
+                    .then(|| effort().into()),
+                    thinking_budget: if let ThinkingConfig::BudgetTokens(n) = cfg {
+                        Some(*n)
+                    } else {
+                        None
+                    },
+                    ..Default::default()
+                });
+            }
+            Ok(OpenAiCompatThinking {
+                enable_thinking: Some(!disabled),
+                thinking_budget: if let ThinkingConfig::BudgetTokens(n) = cfg {
+                    Some(*n)
+                } else {
+                    None
+                },
+                ..Default::default()
+            })
+        }
+        ThinkingProtocol::ThinkingType => Ok(OpenAiCompatThinking {
+            thinking_type: Some(ThinkingTypeBlock {
+                block_type: if disabled { "disabled" } else { "enabled" }.into(),
+            }),
+            ..Default::default()
+        }),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -517,5 +719,118 @@ mod tests {
             !r.drop_temperature,
             "no thinking config must keep temperature"
         );
+    }
+    #[test]
+    fn strict_chat_thinking_uses_vendor_transport_not_native_ollama() -> echo_core::error::Result<()>
+    {
+        let ollama = translate_chat_thinking(
+            "qwen3:32b",
+            "ollama",
+            ThinkingProtocol::OllamaThink,
+            &Some(ThinkingConfig::Disabled),
+        )?;
+        assert_eq!(ollama.reasoning_effort.as_deref(), Some("none"));
+        assert!(ollama.ollama_think.is_none());
+        let deepseek = translate_chat_thinking(
+            "deepseek-v4-pro",
+            "deepseek",
+            ThinkingProtocol::DeepseekReasoningEffort,
+            &Some(ThinkingConfig::Level(ThinkingLevel::Xhigh)),
+        )?;
+        assert_eq!(deepseek.reasoning_effort.as_deref(), Some("high"));
+        let qwen = translate_chat_thinking(
+            "qwen3-plus",
+            "bailian",
+            ThinkingProtocol::EnableThinkingFlag,
+            &Some(ThinkingConfig::BudgetTokens(4096)),
+        )?;
+        assert_eq!(qwen.enable_thinking, Some(true));
+        assert_eq!(qwen.thinking_budget, Some(4096));
+        assert!(
+            translate_chat_thinking(
+                "glm-5.3",
+                "zhipu",
+                ThinkingProtocol::GlmReasoningEffort,
+                &Some(ThinkingConfig::Disabled)
+            )
+            .is_err()
+        );
+        assert!(
+            translate_chat_thinking(
+                "custom",
+                "custom",
+                ThinkingProtocol::None,
+                &Some(ThinkingConfig::medium())
+            )
+            .is_err()
+        );
+        assert!(
+            translate_chat_thinking(
+                "managed",
+                "custom",
+                ThinkingProtocol::ModelManaged,
+                &Some(ThinkingConfig::Disabled)
+            )
+            .is_err()
+        );
+        Ok(())
+    }
+    #[test]
+    fn strict_chat_thinking_respects_resolved_negative_and_qwen_exact_conditions()
+    -> echo_core::error::Result<()> {
+        for provider in ["custom", "gemini", "ollama"] {
+            for protocol in [ThinkingProtocol::None, ThinkingProtocol::ModelManaged] {
+                assert!(
+                    translate_chat_thinking(
+                        "gemini-2.5-flash",
+                        provider,
+                        protocol,
+                        &Some(ThinkingConfig::medium())
+                    )
+                    .is_err()
+                );
+            }
+        }
+        for model in [
+            "qwen3.8-2.4t-a95b",
+            "qwen3.7-max-preview",
+            "qwen3.7-max-2026-05-17",
+        ] {
+            assert!(
+                translate_chat_thinking(
+                    model,
+                    "bailian",
+                    ThinkingProtocol::EnableThinkingFlag,
+                    &Some(ThinkingConfig::Disabled)
+                )
+                .is_err()
+            );
+        }
+        // 同一模型名不覆盖其它服务显式提供的能力事实。
+        let custom = translate_chat_thinking(
+            "qwen3.7-max-preview",
+            "custom",
+            ThinkingProtocol::EnableThinkingFlag,
+            &Some(ThinkingConfig::Disabled),
+        )?;
+        assert_eq!(custom.enable_thinking, Some(false));
+        let omni = translate_chat_thinking(
+            "qwen3.8-omni-flash",
+            "bailian",
+            ThinkingProtocol::EnableThinkingFlag,
+            &Some(ThinkingConfig::Level(ThinkingLevel::High)),
+        )?;
+        assert_eq!(omni.enable_thinking, Some(true));
+        assert_eq!(omni.reasoning_effort.as_deref(), Some("high"));
+        assert!(omni.thinking_budget.is_none());
+        let omni_budget = translate_chat_thinking(
+            "qwen3.8-omni-flash",
+            "bailian",
+            ThinkingProtocol::EnableThinkingFlag,
+            &Some(ThinkingConfig::BudgetTokens(4096)),
+        )?;
+        assert_eq!(omni_budget.thinking_budget, Some(4096));
+        assert!(omni_budget.reasoning_effort.is_none());
+        Ok(())
     }
 }

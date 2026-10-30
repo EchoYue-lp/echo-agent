@@ -1,185 +1,203 @@
-# 流式输出（Streaming）
+# 流式输出与原生执行
 
-## 是什么
+## 当前入口
 
-流式输出（Streaming）让 Agent 在 LLM 生成内容的同时，以typed消息块、真实工具和运行状态向调用方传递事实。明确进度和工具事实能持续展示；最终候选在配置校验与结算前按合同缓冲。
+`execute()` / `chat()` 返回 `String`，对应的流式入口返回
+`BoxStream<'_, Result<AgentEvent>>`。两种返回形式共用原 typed producer、ReAct、
+校验、取消与物理收尾；String 便利方法读取同一原流至 EOF 后投影最终结果。
+`chat` 保留多轮上下文，不能因为请求的是 String 就换成 fresh execute。
 
----
+返回形式不决定模型 HTTP 传输。`model_streaming(true)` 是默认值；显式
+`model_streaming(false)` 让同一执行调用 `LlmClient::chat`，完整响应仍保留原生块、
+工具来源、reasoning 与实际 usage，随后走同一候选校验和结算路径。它不是第二套执行器。
 
-## 解决什么问题
+## 当前事件
 
-阻塞式调用的问题：
-- **长等待**：复杂任务推理时间长，用户界面冻结数十秒
-- **无反馈**：用户不知道 Agent 在"想什么"
-- **体验割裂**：与现代 AI 对话产品（ChatGPT、Claude）的流畅体验差距明显
+| 事件 | 含义 |
+| --- | --- |
+| `AssistantMessage { block }` | 保留请求、块身份、序号、明确阶段与增量；缺阶段保持 Unknown |
+| `ExecutionStatus` | 原 source 的 Started/运行观察及真正终态，不由展示文本推断 |
+| `ToolCall` / `ToolResult` | 保留 call_id、真实调用与完整结果/资源引用 |
+| `LlmUsage` | 每次模型响应的实际报告；未报告时不能把零当成已知用量 |
+| `FinalAnswer(String)` | 当前运行时批准的最终正文通知；不代表原 source 已读到 EOF |
 
-流式输出解决了：
-- 及时展示已经允许公开的消息块、真实工具与等待状态；不承诺固定首字延迟
-- provider reasoning/公开摘要独立于普通正文与工具显示
-- 可以在生成过程中提前终止
+Core 的旧 AgentEvent Token/ThinkStart/ThinkEnd 和旧 String source fallback 已退役。
+provider 原生 reasoning wire、签名/加密回放块及真实 `on_think_*` 回调继续保留。
+显示推理时只取投影后的可见文字，不直接打印完整 block、签名或密文。
 
----
+## 读取同一原流到 EOF
 
-## 事件类型
+下面沿用当前 [demo17_chat.rs](../../echo-agent-learning/examples/demo17_chat.rs) 的
+原生投影模式，改为一次 fresh execute。首因和未结算观察保留原值，所有事件都继续
+从同一 source 读取。只有投影接受的同 run/execution 新终态才能解除匹配观察，
+foreign 状态或正文不能解除它。每段正文只展示一次；EOF 后补同 request 尚未显示的
+安全最终正文，FinalAnswer 通知本身不重复打印。
 
-以下仅简化展示主要事件 payload，省略身份 metadata 和其它生命周期变体。
-`execute_stream()` 返回 `BoxStream<'_, Result<AgentEvent>>`，包含以下事件：
-
-```rust
-pub enum AgentEvent {
-    AssistantMessage { block: AssistantMessageBlock }, // 原生身份/阶段/增量
-    ExecutionStatus(ExecutionStatus),              // 最后runtime结算事实
-    ToolCall { invocation: ToolInvocation },    // LLM 决定调用某个工具
-    ToolResult { name: String, result: ToolResult }, // 工具执行完毕，返回结果
-    FinalAnswer(String),                        // 受检最终正文确认；最后status仍须消费
-}
-```
-
----
-
-## 使用方式
-
-```rust
+```rust,no_run
+use echo_agent::agent::{Agent, AgentEvent, AgentOutputProjection, AssistantPhase, ExecutionStatusKind};
+use echo_agent::error::{AgentError, AgentTerminalKind, ReactError};
 use echo_agent::prelude::*;
 use futures::StreamExt;
+use std::io::Write;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let config = AgentConfig::new("qwen3-max", "assistant", "你是一个助手")
-        .enable_tool(true);
-
-    let mut agent = ReactAgent::new(config);
-    agent.add_tool(Box::new(CalculatorTool));
-
-    // 流式执行
-    let mut stream = agent.execute_stream("计算 (3 + 4) * 5 并解释步骤").await?;
-
+    let agent = ReactAgentBuilder::new()
+        .model("qwen3-max")
+        .system_prompt("你是一个有帮助的助手，请用中文回答。")
+        .build()?;
+    let mut stream = agent.execute_stream("解释 Rust 的异步编程").await?;
+    let owner_run = agent.current_run_id();
+    let mut output = AgentOutputProjection::default();
     let mut first_error = None;
-    while let Some(event) = stream.next().await {
-        match event {
-            Ok(AgentEvent::AssistantMessage { block }) => {
-                print!("[{:?}] {}", block.phase, block.delta); // 教学追踪事件；业务正文按批准投影呈现
-                std::io::Write::flush(&mut std::io::stdout()).ok();
-            }
-            Ok(AgentEvent::ToolCall { invocation, .. }) => {
-                println!("\n[调用工具] {} {:?}", invocation.name, invocation.args);
-            }
-            Ok(AgentEvent::ToolResult { name, result, .. }) => {
-                println!("[工具结果] {} -> {}", name, result.output);
-            }
-            Ok(AgentEvent::FinalAnswer(answer)) => {
-                println!("\n[最终答案] {}", answer);
-            }
-            Err(error) => {
-                // 展示每条观察，保留首个错误原值；继续消费同一 source 的清理与 EOF。
-                eprintln!("[流错误 / 观察] {error}");
-                if first_error.is_none() {
-                    first_error = Some(error);
-                }
-            }
-            Ok(event) => println!("[生命周期] {event:?}"),
-        }
-    }
-    match first_error {
-        Some(error) => Err(error),
-        None => Ok(()),
-    }
-}
-```
-
----
-
-## 原生块与执行终态
-
-新执行仅以 `AssistantMessage` 的明确 phase/身份/增量区分 reasoning、普通进度与正文，不再双发 Token/ThinkStart/ThinkEnd 副本。块 complete 只结束块；最终候选经 Guard/Critic/Stop、持久化、原 EOF 和 owner Join 后才发布，最后单次 `ExecutionStatus(Settled)` 才提供运行时完成事实。旧变体保留给历史读取与合理公开 custom Agent。应用不能把确认事件再次拼进已经呈现的正文。
-
-详细字段、恢复呈现资格与 TaskRun 边界见[原生消息合同](../zh/43-native-message-execution.md)。
-
-## 阻塞式 vs 流式对比
-
-```rust
-// 阻塞式：等待完整响应
-let answer: String = agent.execute("你好").await?;
-
-// 流式：实时接收事件
-let mut stream = agent.execute_stream("你好").await?;
-while let Some(event) = stream.next().await {
-    match event {
-        Ok(event) => println!("{event:?}"),
-        Err(error) => eprintln!("[流错误 / 观察] {error}"),
-    }
-}
-```
-
-两种方式的执行逻辑完全相同，仅输出方式不同。`execute()` 内部实际上是将流式事件聚合后返回最终 `FinalAnswer`。
-
----
-
-## 在 Web 服务中使用（Server-Sent Events）
-
-```rust
-use axum::{Router, response::Sse};
-use futures::stream::StreamExt;
-use echo_agent::prelude::*;
-
-async fn chat_stream(
-    task: String,
-) -> Sse<impl futures::Stream<Item = Result<axum::response::sse::Event, std::convert::Infallible>>> {
-    let mut agent = ReactAgent::new(/* config */);
-
-    let event_stream = async_stream::stream! {
-        match agent.execute_stream(&task).await {
-            Ok(mut agent_stream) => {
-                while let Some(event) = agent_stream.next().await {
-                    let data = match event {
-                        Ok(AgentEvent::Token(text)) => serde_json::json!({
-                            "type": "token", "data": text,
-                        }),
-                        Ok(AgentEvent::ToolCall { invocation, .. }) => serde_json::json!({
-                            "type": "tool_call", "name": invocation.name,
-                        }),
-                        Ok(AgentEvent::FinalAnswer(answer)) => serde_json::json!({
-                            "type": "answer", "data": answer,
-                        }),
-                        Err(error) => {
-                            // 发送错误给接收方，同时继续消费同一原始 producer。
-                            serde_json::json!({
-                                "type": "stream_error_or_observation", "message": error.to_string(),
-                            })
-                        }
-                        Ok(event) => serde_json::json!({
-                            "type": "lifecycle", "event": event,
-                        }),
-                    };
-                    yield Ok(axum::response::sse::Event::default().data(data.to_string()));
-                }
-            }
-            Err(error) => {
-                let data = serde_json::json!({
-                    "type": "setup_error_or_observation", "message": error.to_string(),
-                });
-                yield Ok(axum::response::sse::Event::default().data(data.to_string()));
-            }
-        }
+    let mut unresolved = None::<ReactError>;
+    let same_source = |error: &ReactError, projection: &AgentOutputProjection| {
+        matches!(error, ReactError::ExecutionNotSettled { run_id, execution_id }
+            if owner_run.as_deref() == Some(run_id.as_str())
+                && execution_id.as_deref().is_some()
+                && execution_id.as_deref() == projection.execution_id())
     };
 
-    Sse::new(event_stream)
+    // 持续读取同一原 source 到真实 EOF，再判断是否成功。
+    while let Some(event) = stream.next().await {
+        let observed = match event {
+            Err(error @ ReactError::ExecutionNotSettled { .. }) => {
+                // 未结算观察不是终态；foreign 观察不会被这条 source 的完成覆盖。
+                if unresolved
+                    .as_ref()
+                    .is_none_or(|prior| same_source(prior, &output))
+                {
+                    unresolved = Some(error);
+                }
+                Ok(())
+            }
+            Ok(AgentEvent::ExecutionStatus(status)) => {
+                output.observe_status(&status).map(|changed| {
+                    if changed
+                        && matches!(
+                            status.status,
+                            ExecutionStatusKind::Settled
+                                | ExecutionStatusKind::Failed
+                                | ExecutionStatusKind::Cancelled
+                        )
+                        && unresolved
+                            .as_ref()
+                            .is_some_and(|prior| same_source(prior, &output))
+                    {
+                        unresolved = None;
+                    }
+                    if let Some(error) = output.terminal_failure() {
+                        first_error.get_or_insert(error);
+                    }
+                })
+            }
+            Ok(AgentEvent::AssistantMessage { block }) => {
+                output.observe_block(&block).map(|delta| {
+                    if let Some(delta) = delta {
+                        // 只显示投影后的可见文本；签名、密文和重放载体不直接输出。
+                        match delta.block.phase {
+                            AssistantPhase::Reasoning if !delta.text.is_empty() => {
+                                println!("\n[推理] {}", delta.text)
+                            }
+                            AssistantPhase::Commentary if !delta.text.is_empty() => {
+                                println!("\n[进度] {}", delta.text)
+                            }
+                            AssistantPhase::Reasoning | AssistantPhase::Commentary => {}
+                            _ => {
+                                print!("{}", delta.text);
+                                std::io::stdout().flush().ok();
+                            }
+                        }
+                    }
+                })
+            }
+            Ok(AgentEvent::LlmUsage {
+                model,
+                prompt_tokens,
+                completion_tokens,
+                total_tokens,
+                usage_reported,
+                ..
+            }) => {
+                if usage_reported {
+                    println!(
+                        "\n[LLM 用量] model={model}, prompt={prompt_tokens}, completion={completion_tokens}, total={total_tokens}"
+                    );
+                } else {
+                    println!("\n[LLM 用量] model={model}，上游未报告用量");
+                }
+                Ok(())
+            }
+            Ok(AgentEvent::FinalAnswer(answer)) => output.confirm_answer(&answer),
+            Ok(AgentEvent::Error { failure, .. }) => Err(match failure.terminal_kind {
+                AgentTerminalKind::Cancelled => AgentError::Cancelled(failure.message).into(),
+                AgentTerminalKind::TimedOut => AgentError::Timeout(failure.message).into(),
+                AgentTerminalKind::PermissionDenied => {
+                    AgentError::PermissionDenied(failure.message).into()
+                }
+                _ => ReactError::Other(failure.message),
+            }),
+            Ok(AgentEvent::Cancelled) => {
+                Err(AgentError::Cancelled("原生 Agent source 已取消".into()).into())
+            }
+            Err(error) => Err(error),
+            _ => Ok(()),
+        };
+        if let Err(error) = observed {
+            first_error.get_or_insert(error);
+        }
+    }
+    if let Some(error) = unresolved {
+        return Err(error);
+    }
+    if let Some(error) = first_error {
+        return Err(error);
+    }
+    let final_answer = output.finish()?;
+    // 原 source EOF 后只补尚未展示的安全最终正文，确认通知本身不重印。
+    if let Some(missing) = output.take_final_presentation()? {
+        print!("{missing}");
+        std::io::stdout().flush().ok();
+    }
+    if final_answer.trim().is_empty() {
+        return Err(ReactError::Other(
+            "流式示例返回空答案".into(),
+        ));
+    }
+    Ok(())
 }
 ```
 
----
+这段代码按当前源码接口整理，本轮没有执行片段编译、模型调用或原生宿主验收。
+完整进度、工具和回调示例见 [demo11_callbacks.rs](../../echo-agent-learning/examples/demo11_callbacks.rs)，
+多轮入口见 [13-chat.md](./13-chat.md)。
 
-## 注意事项
+## 自定义 Agent 与完整调用值
 
-1. **工具执行不是流式的**：工具（`execute_tool()`）仍然是阻塞完成后才返回 `ToolResult` 事件，因为工具执行本身不产生增量输出
-2. **`FinalAnswer` 是业务结果**：继续消费同一原始 source 到物理 EOF；答案之后的生产者清理仍可能失败。默认取消和 invocation 适配器保留首个普通清理错误，同时继续持有并 drain 原始 source。
-3. **错误处理**：每个事件都是 `Result<AgentEvent>`。drain 时保留最早的失败或取消首因，后续清理错误不能覆盖它。`ExecutionNotSettled` 保留原始 run/execution 身份，是独立的非终态观察；仅有 EOF 不能清除该观察。
+自定义实现应接纳 `execute_stream_message_with_invocation_context` 和/或
+`chat_stream_message_with_invocation_context`，按实际支持能力实现各自 typed producer。
+Message、history、取消、资源、工作目录及工具上界按值进入同一次调用。未实现的入口
+在 source admission 前明确拒绝：当前默认错误分别为 `canonical typed execute invocation`
+和 `canonical typed chat invocation`；不会调用旧 String 方法补正文、猜 Started 或补成功。
+只有 fresh execute 的自定义 Agent 不会自动获得多轮 chat 能力。
 
-以上示例展示每个流错误或观察，并继续消费同一 source 到 EOF。返回首个错误时保留其
-原始值，不把 `ExecutionNotSettled` 变成终态失败，也不据此证明物理结算。需要持久化
-执行状态的应用应消费规范化 `AgentTurnDriver` receipt，而非从这些 UI 事件推断。
+## 在 SSE 或其它事件接收端中使用
 
-对应示例：`echo-agent-learning/examples/demo10_streaming.rs`
+接收端可序列化原生消息块、工具事实和运行观察，或显示同一投影产生的可见文字。
+`FinalAnswer` 是确认通知，不能被命名为“已关闭”或追加到已经显示的正文。
+投递失败/接收端断开是 delivery 结果，不能代替 producer 的执行/物理结算。
+需要规范化 turn receipt 的宿主使用现有 `AgentTurnDriver`，保留原 source 到 EOF；
+执行结果与投递结果分别判断，不为 UI 新建另一份执行 owner 或 turn summary。
+
+## 完成、失败与取消
+
+- 单块 `complete`、provider 的 `phase=final_answer` 和普通文字均不能证明执行完成。
+- 最终候选继续经过配置的 Guard/Critic、Stop、持久化和原 owner 的实际收尾；
+  只有真实 native status 与原 EOF 满足后才返回成功，尾部错误仍可阻止成功。
+- `ExecutionNotSettled` 是非终态观察；原 run/execution 不能被新身份或 foreign 状态替换。
+- 普通工具还可以发布进度与资源事件，不能把某个工具返回或工具日志当作 Agent 终态。
+
+完整字段与持久化约束见[原生消息与执行结算](../zh/43-native-message-execution.md)。
 
 ---
 

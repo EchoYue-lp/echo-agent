@@ -6,15 +6,16 @@
 use echo_core::agent::{AssistantMessageBlock, AssistantPhase};
 use echo_core::error::{LlmError, Result};
 use echo_core::llm::capabilities::{
-    ModelProfileResolution, ModelProfileResolver, ProviderCapabilityOverride,
+    ModelFactSource, ModelProfileResolution, ModelProfileResolver, ProviderCapabilityOverride,
 };
 use echo_core::llm::types::{
     ChatCompletionResponse, ContentPart, DeltaFunctionCall, DeltaMessage, DeltaToolCall,
-    FunctionCall, Message, MessageContent, ReasoningBlock, Role, ToolCall, Usage,
+    FunctionCall, Message, MessageContent, ProviderResponseMetadata, ReasoningBlock,
+    ResponseFormat, Role, ToolCall, Usage,
 };
 use echo_core::llm::{
     ChatChunk, ChatRequest, ChatResponse, LlmApiProtocol, LlmClient, LlmTimeouts,
-    ModelInputModality, ThinkingProtocol,
+    ModelInputModality, ThinkingProtocol, ToolChoice,
 };
 use futures::StreamExt;
 use futures::future::BoxFuture;
@@ -29,7 +30,7 @@ use futures::stream::BoxStream;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use tracing::{Instrument, info_span, warn};
+use tracing::{Instrument, info_span};
 
 pub struct AnthropicClient {
     client: Arc<Client>,
@@ -43,23 +44,239 @@ pub struct AnthropicClient {
 }
 
 impl AnthropicClient {
-    fn validate_request_features(&self, request: &ChatRequest) -> Result<()> {
-        if request.tool_choice.is_some() {
-            return Err(LlmError::InvalidResponse(
-                "Anthropic tool_choice translation is not implemented; refusing to silently ignore it"
-                    .to_string(),
-            )
-            .into());
-        }
-        if request.response_format.is_some() {
-            return Err(LlmError::InvalidResponse(
-                "Anthropic structured response format translation is not implemented; refusing to silently ignore it"
-                    .to_string(),
-            )
-            .into());
-        }
+    /// 只转换协议事实；模型支持沿现有 sourced resolver，不在适配器建立第二份配置。
+    fn validate_request_features(&self, request: &ChatRequest) -> Result<AnthropicControls> {
         validate_model_input_modalities(&self.model, &self.input_modalities, &request.messages)?;
-        Ok(())
+        let invalid = |feature: &str, reason: &str| {
+            LlmError::InvalidResponse(format!(
+                "Anthropic {feature} is unsupported for model '{}': {reason}",
+                self.model
+            ))
+        };
+        let resolution = self.model_profile_resolution();
+        let tools = request.tools.as_deref().unwrap_or_default();
+        if !tools.is_empty() && !resolution.profile.supports_tools {
+            return Err(invalid("tools", "resolved exact model disables tool support").into());
+        }
+        let tool_choice = request.tool_choice.as_ref().map(|choice| match choice {
+            ToolChoice::Auto => AnthropicToolChoice::Auto,
+            ToolChoice::None => AnthropicToolChoice::None,
+            ToolChoice::Required => AnthropicToolChoice::Any,
+            ToolChoice::Function { name } => AnthropicToolChoice::Tool { name: name.clone() },
+        });
+        if matches!(
+            request.tool_choice,
+            Some(ToolChoice::Required | ToolChoice::Function { .. })
+        ) && tools.is_empty()
+        {
+            return Err(invalid("tool_choice", "required/function requires exposed tools").into());
+        }
+        if let Some(ToolChoice::Function { name }) = &request.tool_choice
+            && (name.trim().is_empty() || !tools.iter().any(|tool| tool.function.name == *name))
+        {
+            return Err(invalid(
+                "tool_choice",
+                "selected function must be nonempty and exposed",
+            )
+            .into());
+        }
+        if let Some(choice) = request.tool_choice.as_ref() {
+            self.require_tool_choice_support(&resolution, choice)?;
+        }
+        for tool in tools {
+            if tool.tool_type != "function" || tool.function.name.trim().is_empty() {
+                return Err(
+                    invalid("tools", "only named client function tools are supported").into(),
+                );
+            }
+            if tool.function.strict.is_some() {
+                // final JSON Schema flag 不证明工具 strict；v1 无独立 strict fact，未知模型必须拒绝。
+                self.require_strict_tool_support()?;
+            }
+        }
+        let (thinking, effort) = if self.is_deepseek_anthropic() {
+            build_deepseek_anthropic_thinking(&request.thinking)?
+        } else {
+            build_anthropic_thinking(
+                &self.model,
+                resolution.profile.thinking_protocol,
+                &request.thinking,
+                request.max_tokens.unwrap_or(4096),
+            )?
+        };
+        let active_thinking = thinking
+            .as_ref()
+            .is_some_and(|value| value.block_type != "disabled")
+            || (!self.is_deepseek_anthropic()
+                && resolution.profile.thinking_protocol == ThinkingProtocol::AnthropicAdaptive)
+            || (self.is_deepseek_anthropic() && request.thinking.is_none());
+        if active_thinking
+            && matches!(
+                request.tool_choice,
+                Some(ToolChoice::Required | ToolChoice::Function { .. })
+            )
+        {
+            return Err(invalid(
+                "thinking + tool_choice",
+                "forced tool use cannot be combined with thinking",
+            )
+            .into());
+        }
+        if let Some(temperature) = request.temperature {
+            let upper = if self.is_deepseek_anthropic() {
+                2.0
+            } else {
+                1.0
+            };
+            if !temperature.is_finite() || !(0.0..=upper).contains(&temperature) {
+                return Err(
+                    invalid("temperature", "value is outside the native provider range").into(),
+                );
+            }
+            // 不能删显式采样参数来制造请求成功；不同 thinking 方言没有统一可兑现的采样控制。
+            if active_thinking && !self.is_deepseek_anthropic() {
+                return Err(invalid("thinking + temperature", "explicit sampling with thinking is not verified; omit temperature or disable thinking").into());
+            }
+        }
+        let format = match &request.response_format {
+            None | Some(ResponseFormat::Text) => None,
+            Some(ResponseFormat::JsonObject) => {
+                return Err(invalid(
+                    "response_format JsonObject",
+                    "Messages has no proven native JSON-object-only mode; use JsonSchema",
+                )
+                .into());
+            }
+            Some(ResponseFormat::JsonSchema { json_schema }) => {
+                self.require_schema_support(&resolution, "structured final output")?;
+                if !json_schema.strict || !json_schema.schema.is_object() {
+                    return Err(invalid(
+                        "response_format JsonSchema",
+                        "native json_schema requires a schema object and strict=true",
+                    )
+                    .into());
+                }
+                Some(AnthropicJsonFormat {
+                    format_type: "json_schema",
+                    schema: json_schema.schema.clone(),
+                })
+            }
+        };
+        if !self.is_deepseek_anthropic()
+            && effort.is_some()
+            && matches!(
+                resolution.profile.thinking_protocol,
+                ThinkingProtocol::AnthropicAdaptive
+            )
+        {
+            return Err(invalid(
+                "effort",
+                "adaptive-only model effort controls need exact primary support evidence",
+            )
+            .into());
+        }
+        let output_config = (format.is_some() || effort.is_some())
+            .then_some(AnthropicOutputConfig { format, effort });
+        Ok(AnthropicControls {
+            tool_choice,
+            thinking,
+            output_config,
+        })
+    }
+
+    fn require_strict_tool_support(&self) -> Result<()> {
+        if self.has_official_ga_schema_model() {
+            return Ok(());
+        }
+        Err(LlmError::InvalidResponse("Anthropic strict tool input is unsupported/unverified for this exact endpoint/model; final structured_output capability is not evidence for tool strict".into()).into())
+    }
+
+    fn require_tool_choice_support(
+        &self,
+        resolution: &ModelProfileResolution,
+        choice: &ToolChoice,
+    ) -> Result<()> {
+        let native = self.has_official_ga_schema_model()
+            || (self.is_deepseek_anthropic()
+                && (self.model.starts_with("claude")
+                    || matches!(self.model.as_str(), "deepseek-flash" | "deepseek-v4-pro")));
+        let exact = resolution.registered_facts.iter().any(|facts| {
+            matches!(
+                facts.metadata.source,
+                ModelFactSource::ExactModel | ModelFactSource::CallerOverride
+            ) && resolution.applied_facts.contains(&facts.metadata)
+                && match choice {
+                    ToolChoice::Auto => {
+                        facts.capabilities.tool_support == Some(true)
+                            || facts.profile.supports_tools == Some(true)
+                    }
+                    ToolChoice::None => {
+                        facts.capabilities.supports_tool_choice_none == Some(true)
+                            || facts.profile.supports_tool_choice_none == Some(true)
+                    }
+                    // 统一 v1 没有 forced-choice 单独能力事实；普通 tool_support 不授予强制选择。
+                    ToolChoice::Required | ToolChoice::Function { .. } => false,
+                }
+        });
+        let supported = match choice {
+            ToolChoice::None => resolution.profile.supports_tool_choice_none,
+            _ => resolution.profile.supports_tools,
+        };
+        if supported && (native || exact) {
+            return Ok(());
+        }
+        Err(LlmError::InvalidResponse("Anthropic tool_choice unsupported/unverified for exact endpoint/model and selected choice".into()).into())
+    }
+
+    fn require_schema_support(
+        &self,
+        resolution: &ModelProfileResolution,
+        feature: &str,
+    ) -> Result<()> {
+        if self.is_deepseek_anthropic() {
+            return Err(LlmError::InvalidResponse(format!("DeepSeek Anthropic compatibility does not support {feature}; output_config supports effort only")).into());
+        }
+        let exact = resolution.registered_facts.iter().any(|facts| {
+            matches!(
+                facts.metadata.source,
+                ModelFactSource::ExactModel | ModelFactSource::CallerOverride
+            ) && resolution.applied_facts.contains(&facts.metadata)
+                && (facts.capabilities.structured_output == Some(true)
+                    || facts.profile.supports_structured_output == Some(true))
+        });
+        if resolution.profile.capabilities.structured_output
+            && (self.has_official_ga_schema_model() || exact)
+        {
+            return Ok(());
+        }
+        Err(LlmError::InvalidResponse(format!(
+            "Anthropic {feature} unsupported/unverified for exact provider/model '{}'/ '{}'; configure a sourced exact model fact", self.provider_name, self.model
+        )).into())
+    }
+
+    fn is_deepseek_anthropic(&self) -> bool {
+        reqwest::Url::parse(&self.base_url).ok().is_some_and(|url| {
+            url.host_str() == Some("api.deepseek.com")
+                && (url.path() == "/anthropic" || url.path().starts_with("/anthropic/"))
+        })
+    }
+
+    fn has_official_ga_schema_model(&self) -> bool {
+        // 官方 GA 正文只证明这三个具名 4.5 家族；不推断其它 Claude/兼容服务。
+        // https://claude.com/resources/articles/structured-outputs-on-the-claude-developer-platform
+        self.provider_name == "anthropic"
+            && reqwest::Url::parse(&self.base_url)
+                .ok()
+                .is_some_and(|url| url.host_str() == Some("api.anthropic.com"))
+            && matches!(
+                self.model.as_str(),
+                "claude-sonnet-4-5"
+                    | "claude-sonnet-4-5-20250929"
+                    | "claude-opus-4-5"
+                    | "claude-opus-4-5-20251101"
+                    | "claude-haiku-4-5"
+                    | "claude-haiku-4-5-20251001"
+            )
     }
 
     pub fn new(api_key: impl Into<String>, model: impl Into<String>) -> Self {
@@ -136,11 +353,29 @@ impl AnthropicClient {
     }
 
     fn convert_request(&self, request: &ChatRequest) -> Result<AnthropicRequest> {
+        let controls = self.validate_request_features(request)?;
         let mut system_parts: Vec<String> = Vec::new();
-        let mut messages = Vec::new();
+        let mut messages: Vec<AnthropicMessage> = Vec::new();
+        let mut pending_tools = std::collections::HashSet::new();
 
         for msg in &request.messages {
+            if msg.is_provider_response_observation_only() {
+                continue;
+            }
             if msg.role == Role::System {
+                if let MessageContent::Parts(parts) = &msg.content
+                    && parts.iter().any(|part| {
+                        !matches!(
+                            part,
+                            ContentPart::Text { .. } | ContentPart::ResourceLink { .. }
+                        )
+                    })
+                {
+                    return Err(LlmError::InvalidResponse(
+                        "Anthropic system content supports text only".into(),
+                    )
+                    .into());
+                }
                 if let Some(text) = msg.content.as_text() {
                     system_parts.push(text);
                 }
@@ -148,19 +383,98 @@ impl AnthropicClient {
             }
 
             if msg.role == Role::Tool {
-                messages.push(AnthropicMessage {
-                    role: "user".to_string(),
-                    content: AnthropicContent::Blocks(vec![ContentBlock::ToolResult {
-                        tool_use_id: msg.tool_call_id.clone().unwrap_or_default(),
-                        content: msg.content.as_text().unwrap_or_default(),
-                        cache_control: None,
-                    }]),
-                });
+                let tool_use_id = msg
+                    .tool_call_id
+                    .clone()
+                    .filter(|id| !id.is_empty())
+                    .ok_or_else(|| {
+                        LlmError::InvalidResponse(
+                            "Anthropic tool_result omitted tool_call_id".into(),
+                        )
+                    })?;
+                if !pending_tools.remove(&tool_use_id) {
+                    return Err(LlmError::InvalidResponse(
+                        "Anthropic tool_result is duplicate or has no preceding tool_use".into(),
+                    )
+                    .into());
+                }
+                let result = ContentBlock::ToolResult {
+                    tool_use_id,
+                    content: tool_result_content(&msg.content)?,
+                    // DeepSeek忽略is_error；Some(false)等价其普通非错误tool_result默认语义。
+                    // 仅wire省略不支持的false标记，canonical Message/State仍保Some(false)。
+                    // Some(true)无法兑现原生错误语义，交方言检查明确拒绝；None不推断成功。
+                    is_error: if self.is_deepseek_anthropic()
+                        && msg.tool_result_is_error == Some(false)
+                    {
+                        None
+                    } else {
+                        msg.tool_result_is_error
+                    },
+                    cache_control: None,
+                };
+                // 并行工具回填必须处于同一个紧随 assistant 的 user 消息，顺序沿输入保留。
+                if let Some(last) = messages.last_mut()
+                    && last.role == "user"
+                    && let AnthropicContent::Blocks(blocks) = &mut last.content
+                    && blocks
+                        .iter()
+                        .all(|block| matches!(block, ContentBlock::ToolResult { .. }))
+                {
+                    blocks.push(result);
+                } else {
+                    messages.push(AnthropicMessage {
+                        role: "user".into(),
+                        content: AnthropicContent::Blocks(vec![result]),
+                    });
+                }
                 continue;
+            }
+            if !pending_tools.is_empty() {
+                return Err(LlmError::InvalidResponse(
+                    "Anthropic tool results must precede the next conversation message".into(),
+                )
+                .into());
+            }
+            if !matches!(msg.role, Role::User | Role::Assistant) {
+                return Err(LlmError::InvalidResponse(
+                    "Anthropic messages support user/assistant roles only".into(),
+                )
+                .into());
+            }
+            if msg.role == Role::Assistant {
+                if let MessageContent::Parts(parts) = &msg.content
+                    && parts.iter().any(|part| {
+                        !matches!(
+                            part,
+                            ContentPart::Text { .. } | ContentPart::ResourceLink { .. }
+                        )
+                    })
+                {
+                    return Err(LlmError::InvalidResponse(
+                        "Anthropic assistant input cannot represent Image/File parts".into(),
+                    )
+                    .into());
+                }
+                for call in msg.tool_calls.as_deref().unwrap_or_default() {
+                    if call.id.is_empty()
+                        || call.function.name.is_empty()
+                        || !pending_tools.insert(call.id.clone())
+                    {
+                        return Err(LlmError::InvalidResponse(
+                            "Anthropic tool_use requires unique nonempty id/name".into(),
+                        )
+                        .into());
+                    }
+                }
             }
 
             if msg.role == Role::Assistant
-                && let Some(blocks) = native_anthropic_history(msg)?
+                && let Some(blocks) = native_anthropic_history(
+                    msg,
+                    self.is_deepseek_anthropic(),
+                    &self.provider_name,
+                )?
             {
                 messages.push(AnthropicMessage {
                     role: "assistant".into(),
@@ -173,7 +487,12 @@ impl AnthropicClient {
                 && let Some(ref tool_calls) = msg.tool_calls
             {
                 let mut blocks: Vec<ContentBlock> = Vec::new();
-                append_reasoning_blocks(&mut blocks, msg.reasoning_blocks.as_deref());
+                append_reasoning_blocks(
+                    &mut blocks,
+                    msg.reasoning_blocks.as_deref(),
+                    self.is_deepseek_anthropic(),
+                    &self.provider_name,
+                )?;
                 if let Some(ref text) = msg.content.as_text()
                     && !text.is_empty()
                 {
@@ -183,8 +502,7 @@ impl AnthropicClient {
                     });
                 }
                 for tc in tool_calls {
-                    let input: serde_json::Value =
-                        serde_json::from_str(&tc.function.arguments).unwrap_or_default();
+                    let input = parse_tool_input(&tc.function.arguments)?;
                     blocks.push(ContentBlock::ToolUse {
                         id: tc.id.clone(),
                         name: tc.function.name.clone(),
@@ -202,36 +520,18 @@ impl AnthropicClient {
                 MessageContent::Parts(parts) => {
                     let mut blocks: Vec<ContentBlock> = Vec::new();
                     if msg.role == Role::Assistant {
-                        append_reasoning_blocks(&mut blocks, msg.reasoning_blocks.as_deref());
+                        append_reasoning_blocks(
+                            &mut blocks,
+                            msg.reasoning_blocks.as_deref(),
+                            self.is_deepseek_anthropic(),
+                            &self.provider_name,
+                        )?;
                     }
                     blocks.extend(
                         parts
                             .iter()
-                            .map(|part| match part {
-                                ContentPart::Text { text } => ContentBlock::Text {
-                                    text: text.clone(),
-                                    cache_control: None,
-                                },
-                                ContentPart::ImageUrl { image_url } => ContentBlock::Image {
-                                    source: data_url_to_image_source(&image_url.url),
-                                    cache_control: None,
-                                },
-                                ContentPart::ResourceLink { resource } => ContentBlock::Text {
-                                    text: resource.model_text(),
-                                    cache_control: None,
-                                },
-                                // File attachments: dispatch by inferred media type.
-                                //   - application/pdf → document content block (the only
-                                //     type Anthropic accepts as base64 document source)
-                                //   - text-class (txt/md/json/xml/...) → decode and inline
-                                //     as text so the model can read it directly
-                                //   - other binary → name-only placeholder (the API has
-                                //     no generic binary attachment block)
-                                ContentPart::File { name, content } => {
-                                    file_to_content_block(name, content)
-                                }
-                            })
-                            .collect::<Vec<_>>(),
+                            .map(part_to_content_block)
+                            .collect::<Result<Vec<_>>>()?,
                     );
                     if blocks.is_empty() {
                         AnthropicContent::Text(String::new())
@@ -241,7 +541,12 @@ impl AnthropicClient {
                 }
                 _ if msg.role == Role::Assistant && msg.reasoning_blocks.is_some() => {
                     let mut blocks = Vec::new();
-                    append_reasoning_blocks(&mut blocks, msg.reasoning_blocks.as_deref());
+                    append_reasoning_blocks(
+                        &mut blocks,
+                        msg.reasoning_blocks.as_deref(),
+                        self.is_deepseek_anthropic(),
+                        &self.provider_name,
+                    )?;
                     if let Some(text) = msg.content.as_text()
                         && !text.is_empty()
                     {
@@ -316,6 +621,7 @@ impl AnthropicClient {
                     name: t.function.name.clone(),
                     description: Some(t.function.description.clone()),
                     input_schema: t.function.parameters.clone(),
+                    strict: t.function.strict,
                     cache_control: if cache_plan.has_tool_breakpoint && i == count - 1 {
                         Some(CacheControl::ephemeral())
                     } else {
@@ -373,17 +679,15 @@ impl AnthropicClient {
             }
         }
 
-        // Translate thinking config. Claude 3.7–4.5 accept the budget block;
-        // 4.6+/4.7+ use adaptive thinking and reject the older budget block.
-        // The configured model contract is authoritative for the wire dialect.
+        // thinking、format、effort 一次校验，同源用于流式和非流式请求。
         let max_tokens = request.max_tokens.unwrap_or(4096);
-        let (thinking, effort) = build_anthropic_thinking(
-            &self.model,
-            self.model_profile_resolution().profile.thinking_protocol,
-            &request.thinking,
-            max_tokens,
-        );
-
+        if self.is_deepseek_anthropic() {
+            for message in &messages {
+                if let AnthropicContent::Blocks(blocks) = &message.content {
+                    validate_deepseek_blocks(blocks)?;
+                }
+            }
+        }
         Ok(AnthropicRequest {
             model: self.model.clone(),
             max_tokens,
@@ -392,8 +696,9 @@ impl AnthropicClient {
             temperature: request.temperature,
             tools,
             stream: None,
-            thinking,
-            effort,
+            thinking: controls.thinking,
+            output_config: controls.output_config,
+            tool_choice: controls.tool_choice,
             metadata: request.user_id.as_ref().map(|uid| AnthropicMetadata {
                 user_id: uid.clone(),
             }),
@@ -401,22 +706,48 @@ impl AnthropicClient {
     }
 
     fn convert_response(&self, resp: AnthropicResponse) -> Result<ChatResponse> {
-        let finish_reason = anthropic_finish_reason(resp.stop_reason.as_deref())?;
-        if resp.content.is_empty() {
-            return Err(LlmError::EmptyResponse.into());
+        let mut raw = resp.0;
+        strip_anthropic_framework_extensions(&mut raw);
+        if !raw.is_object() {
+            return Err(
+                LlmError::InvalidResponse("Anthropic response must be an object".into()).into(),
+            );
         }
-        let request_id = if resp.id.is_empty() {
-            super::native_message::fallback_request_id("anthropic")
-        } else {
-            resp.id.clone()
-        };
+        let provider_response = anthropic_response_metadata(&raw, &self.provider_name)?;
+        let finish = anthropic_finish_reason(
+            provider_response
+                .stop_reason
+                .as_ref()
+                .and_then(serde_json::Value::as_str),
+        );
+        let content: Vec<ContentBlock> =
+            serde_json::from_value(raw.get("content").cloned().ok_or_else(|| {
+                LlmError::InvalidResponse("Anthropic response omitted content".into())
+            })?)
+            .map_err(|error| LlmError::InvalidResponse(error.to_string()))?;
+        let native_request_id = provider_response
+            .request_id
+            .as_deref()
+            .filter(|id| !id.is_empty());
+        // 本地fallback只拥有规范块身份，绝不写成服务原生Source坐标。
+        let request_id = native_request_id
+            .map(str::to_string)
+            .unwrap_or_else(|| super::native_message::fallback_request_id("anthropic"));
+        let native_usage = raw
+            .get("usage")
+            .filter(|value| !value.is_null())
+            .cloned()
+            .map(serde_json::from_value::<AnthropicUsage>)
+            .transpose()
+            .map_err(|error| LlmError::InvalidResponse(error.to_string()))?;
         let mut assistant_blocks = Vec::new();
         let mut content_parts: Vec<String> = Vec::new();
         let mut reasoning_parts: Vec<String> = Vec::new();
         let mut reasoning_blocks: Vec<ReasoningBlock> = Vec::new();
         let mut tool_calls: Vec<ToolCall> = Vec::new();
+        let mut tool_ids = std::collections::HashSet::new();
 
-        for (index, block) in resp.content.iter().enumerate() {
+        for (index, block) in content.iter().enumerate() {
             let sequence = u64::try_from(index).map_err(|_| {
                 LlmError::InvalidResponse("Anthropic content index exceeds u64".into())
             })?;
@@ -428,16 +759,33 @@ impl AnthropicClient {
                 } => (
                     AssistantPhase::Reasoning,
                     thinking.clone(),
-                    Some(ReasoningBlock::Signed {
-                        thinking: thinking.clone(),
-                        signature: signature.clone(),
-                    }),
+                    Some(thinking_reasoning(
+                        thinking,
+                        signature.as_deref(),
+                        &self.provider_name,
+                        &format!("{request_id}:content:{index}"),
+                        self.is_deepseek_anthropic(),
+                    )?),
                 ),
-                ContentBlock::RedactedThinking { data } => (
-                    AssistantPhase::Reasoning,
-                    String::new(),
-                    Some(ReasoningBlock::Redacted { data: data.clone() }),
-                ),
+                ContentBlock::RedactedThinking { data } => {
+                    if self.is_deepseek_anthropic() {
+                        return Err(LlmError::InvalidResponse(
+                            "DeepSeek Anthropic redacted_thinking is unsupported".into(),
+                        )
+                        .into());
+                    }
+                    if data.is_empty() {
+                        return Err(LlmError::InvalidResponse(
+                            "Anthropic redacted_thinking omitted data".into(),
+                        )
+                        .into());
+                    }
+                    (
+                        AssistantPhase::Reasoning,
+                        String::new(),
+                        Some(ReasoningBlock::Redacted { data: data.clone() }),
+                    )
+                }
                 _ => (AssistantPhase::Unknown, String::new(), None),
             };
             let output_index = u32::try_from(index).map_err(|_| {
@@ -457,21 +805,23 @@ impl AnthropicClient {
             };
             if !matches!(block, ContentBlock::ToolUse { .. }) {
                 assistant_blocks.push(AssistantMessageBlock {
-                    provider_source: Some(output_source(
-                        LlmApiProtocol::Anthropic,
-                        &request_id,
-                        &format!("{request_id}:content:{index}"),
-                        output_index,
-                        None,
-                        content_kind,
-                        None,
-                    )),
+                    provider_source: native_request_id.map(|native_id| {
+                        output_source(
+                            LlmApiProtocol::Anthropic,
+                            native_id,
+                            &format!("{request_id}:content:{index}"),
+                            output_index,
+                            None,
+                            content_kind,
+                            None,
+                        )
+                    }),
                     block_id: format!("{request_id}:content:{index}"),
                     request_id: request_id.clone(),
                     sequence,
                     phase,
                     delta,
-                    complete: true,
+                    complete: finish.is_ok(),
                     provider: Some(self.provider_name.clone()),
                     reasoning,
                 });
@@ -479,10 +829,20 @@ impl AnthropicClient {
             match block {
                 ContentBlock::Text { text, .. } => content_parts.push(text.clone()),
                 ContentBlock::ToolUse { id, name, input } => {
+                    if id.is_empty()
+                        || name.is_empty()
+                        || !input.is_object()
+                        || !tool_ids.insert(id.clone())
+                    {
+                        return Err(LlmError::InvalidResponse(
+                            "Anthropic tool_use has malformed identity or input".into(),
+                        )
+                        .into());
+                    }
                     tool_calls.push(ToolCall {
                         provider_source: Some(output_source(
                             LlmApiProtocol::Anthropic,
-                            &request_id,
+                            native_request_id.unwrap_or_default(),
                             id,
                             output_index,
                             None,
@@ -493,7 +853,8 @@ impl AnthropicClient {
                         call_type: "function".to_string(),
                         function: FunctionCall {
                             name: name.clone(),
-                            arguments: serde_json::to_string(input).unwrap_or_default(),
+                            arguments: serde_json::to_string(input)
+                                .map_err(|error| LlmError::SerializationError(error.to_string()))?,
                         },
                     });
                 }
@@ -501,17 +862,14 @@ impl AnthropicClient {
                     thinking,
                     signature,
                 } => {
-                    if signature.is_empty() {
-                        return Err(LlmError::InvalidResponse(
-                            "Anthropic thinking omitted signature".into(),
-                        )
-                        .into());
-                    }
                     reasoning_parts.push(thinking.clone());
-                    reasoning_blocks.push(ReasoningBlock::Signed {
-                        thinking: thinking.clone(),
-                        signature: signature.clone(),
-                    });
+                    reasoning_blocks.push(thinking_reasoning(
+                        thinking,
+                        signature.as_deref(),
+                        &self.provider_name,
+                        &format!("{request_id}:content:{index}"),
+                        self.is_deepseek_anthropic(),
+                    )?);
                 }
                 ContentBlock::RedactedThinking { data } => {
                     reasoning_blocks.push(ReasoningBlock::Redacted { data: data.clone() });
@@ -539,18 +897,61 @@ impl AnthropicClient {
             assistant_blocks: (!assistant_blocks.is_empty()).then_some(assistant_blocks),
             execution_status: None,
             approved_assistant_blocks: None,
+            tool_result_is_error: None,
+            provider_response: Some(provider_response),
+        };
+        let finish_reason = match finish {
+            Ok(reason) if !content.is_empty() => reason,
+            Ok(_) => return Err(LlmError::EmptyResponse.into()),
+            Err(_) => {
+                return Err(LlmError::IncompleteResponse {
+                    partial: Box::new(message),
+                }
+                .into());
+            }
         };
 
-        super::native_message::validate_completion(
-            &message,
-            if finish_reason.as_deref() == Some("continue") {
-                Some("stop")
-            } else {
-                finish_reason.as_deref()
-            },
-        )?;
+        let validation = if finish_reason.as_deref() != Some("continue") {
+            super::native_message::validate_completion(&message, finish_reason.as_deref())
+        } else if message
+            .tool_calls
+            .as_ref()
+            .is_some_and(|tools| !tools.is_empty())
+            || message
+                .content
+                .as_text()
+                .is_some_and(|text| !text.trim().is_empty())
+        {
+            super::native_message::validate_completion(&message, Some("stop"))
+        } else {
+            Ok(())
+        };
+        if let Err(error) = validation {
+            if matches!(&error, echo_core::error::ReactError::Llm(inner) if matches!(inner.as_ref(), LlmError::EmptyResponse))
+            {
+                return Err(LlmError::IncompleteResponse {
+                    partial: Box::new(message),
+                }
+                .into());
+            }
+            return Err(error);
+        }
+
+        if message
+            .provider_response
+            .as_ref()
+            .and_then(|metadata| metadata.request_id.as_deref())
+            .filter(|id| !id.is_empty())
+            .is_none()
+        {
+            return Err(LlmError::InvalidResponse(
+                "Anthropic completed response omitted native id".into(),
+            )
+            .into());
+        }
+
         // Extract token usage from Anthropic response
-        let usage = resp.usage.map(|u| {
+        let usage = native_usage.as_ref().map(|u| {
             let prompt = u.input_tokens;
             let completion = u.output_tokens;
             Usage {
@@ -571,11 +972,12 @@ impl AnthropicClient {
                 id: request_id.clone(),
                 choices: Vec::new(),
                 created: None,
-                model: None,
+                model: raw
+                    .get("model")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_string),
                 usage,
-                extra: Some(
-                    serde_json::json!({"id":request_id,"stop_reason":resp.stop_reason,"content":resp.content}),
-                ),
+                extra: Some(raw),
             },
         })
     }
@@ -586,7 +988,6 @@ impl LlmClient for AnthropicClient {
         let model = self.model.clone();
         Box::pin(
             async move {
-                self.validate_request_features(&request)?;
                 let timeouts = request.timeouts.unwrap_or(self.timeouts);
                 let body = self.convert_request(&request)?;
                 let request_builder = self
@@ -601,10 +1002,14 @@ impl LlmClient for AnthropicClient {
                     Some(timeout) => request_builder.timeout(timeout),
                     None => request_builder,
                 };
-                let anthropic_resp: AnthropicResponse =
+                let mut raw: serde_json::Value =
                     post_json_request(request_builder, request.cancel_token.clone()).await?;
-
-                let response = self.convert_response(anthropic_resp)?;
+                strip_anthropic_framework_extensions(&mut raw);
+                let anthropic_resp: AnthropicResponse = serde_json::from_value(raw.clone())
+                    .map_err(|error| LlmError::InvalidResponse(error.to_string()))?;
+                let mut response = self.convert_response(anthropic_resp)?;
+                // 原响应的缺省/null与供应商扩展只在现有 raw 通道保留；不能经 typed 重序列化补造字段。
+                response.raw.extra = Some(raw);
                 ensure_request_not_cancelled(request.cancel_token.as_ref())?;
                 Ok(response)
             }
@@ -619,7 +1024,6 @@ impl LlmClient for AnthropicClient {
         let model = self.model.clone();
         Box::pin(
             async move {
-                self.validate_request_features(&request)?;
                 let timeouts = request.timeouts.unwrap_or(self.timeouts);
                 let mut body = self.convert_request(&request)?;
                 body.stream = Some(true);
@@ -639,6 +1043,7 @@ impl LlmClient for AnthropicClient {
                 Ok(adapt_anthropic_stream(
                     raw_stream,
                     self.provider_name.clone(),
+                    self.is_deepseek_anthropic(),
                 ))
             }
             .instrument(info_span!("anthropic_chat_stream", model = %model)),
@@ -654,21 +1059,126 @@ impl LlmClient for AnthropicClient {
     }
 
     fn protocol_capabilities(&self) -> ProviderCapabilityOverride {
-        ProviderCapabilityOverride::anthropic_protocol()
+        let mut capabilities = ProviderCapabilityOverride::anthropic_protocol();
+        capabilities.supports_tool_choice_none = Some(true);
+        // 表示适配器可编码；实际模型资格由 sourced resolution 决定。
+        capabilities.structured_output = Some(true);
+        capabilities
     }
 
     fn model_profile_resolution(&self) -> ModelProfileResolution {
-        self.model_profile_resolver.resolve_for_protocol_at(
-            &self.provider_name,
-            &self.model,
-            LlmApiProtocol::Anthropic,
-            Some(&self.base_url),
-            std::time::SystemTime::now(),
-        )
+        let mut facts = protocol_fact_set(LlmApiProtocol::Anthropic, std::time::SystemTime::now());
+        facts.capabilities.supports_tool_choice_none =
+            Some(self.has_official_ga_schema_model() || self.is_deepseek_anthropic());
+        // schema 编码已实现，但未知模型不可从 protocol 直接继承支持。
+        facts.capabilities.structured_output = Some(self.has_official_ga_schema_model());
+        if self.has_official_ga_schema_model() {
+            facts.metadata.provenance = "Anthropic structured outputs GA 2026-02-04; https://claude.com/resources/articles/structured-outputs-on-the-claude-developer-platform".into();
+        }
+        self.model_profile_resolver
+            .clone()
+            .register_protocol_facts(&self.provider_name, facts)
+            .resolve_for_protocol_at(
+                &self.provider_name,
+                &self.model,
+                LlmApiProtocol::Anthropic,
+                Some(&self.base_url),
+                std::time::SystemTime::now(),
+            )
     }
 
     fn capabilities(&self) -> echo_core::llm::capabilities::ProviderCapabilities {
         self.model_profile_resolution().profile.capabilities
+    }
+}
+
+/// 只清协议wrapper/内容块的框架保留扩展；不递归改写工具input或原生usage中的用户数据。
+fn strip_anthropic_framework_extensions(raw: &mut serde_json::Value) {
+    let Some(fields) = raw.as_object_mut() else {
+        return;
+    };
+    for name in [
+        "provider_response",
+        "execution_status",
+        "approved_assistant_blocks",
+        "assistant_blocks",
+        "provider_source",
+    ] {
+        fields.remove(name);
+    }
+    for wrapper in ["message", "content_block", "extra", "extensions"] {
+        if let Some(value) = fields.get_mut(wrapper) {
+            strip_anthropic_framework_extensions(value);
+        }
+    }
+    if let Some(content) = fields
+        .get_mut("content")
+        .and_then(serde_json::Value::as_array_mut)
+    {
+        for block in content {
+            strip_anthropic_framework_extensions(block);
+        }
+    }
+}
+
+/// 只从本协议外层原件提取已批准字段；通过Core公开serde校验固定记录，不依赖私有helper。
+fn anthropic_response_metadata(
+    raw: &serde_json::Value,
+    provider: &str,
+) -> Result<ProviderResponseMetadata> {
+    if !raw.is_object() {
+        return Err(LlmError::InvalidResponse(
+            "Anthropic native response wrapper must be an object".into(),
+        )
+        .into());
+    }
+    let request_id = match raw.get("id") {
+        None | Some(serde_json::Value::Null) => None,
+        Some(serde_json::Value::String(id)) => Some(id.clone()),
+        Some(_) => {
+            return Err(LlmError::InvalidResponse(
+                "Anthropic response id must be string or null".into(),
+            )
+            .into());
+        }
+    };
+    let mut fields = serde_json::Map::new();
+    fields.insert(
+        "protocol".into(),
+        serde_json::to_value(LlmApiProtocol::Anthropic)
+            .map_err(|error| LlmError::SerializationError(error.to_string()))?,
+    );
+    fields.insert(
+        "provider".into(),
+        serde_json::Value::String(provider.into()),
+    );
+    if let Some(id) = request_id {
+        fields.insert("request_id".into(), serde_json::Value::String(id));
+    }
+    for name in ["model", "stop_reason", "stop_sequence", "usage"] {
+        if let Some(value) = raw.get(name) {
+            fields.insert(name.into(), value.clone());
+        }
+    }
+    // 原生Anthropic没有Responses status/incomplete_details；任意上游同名扩展不进入公共观察。
+    serde_json::from_value(serde_json::Value::Object(fields)).map_err(|error| {
+        LlmError::InvalidResponse(format!("Anthropic response observation invalid: {error}")).into()
+    })
+}
+
+/// 同一响应的原生usage更新是累计计数/键值更新；绝不把output_tokens相加。
+fn merge_anthropic_usage_snapshot(saved: &mut serde_json::Value, update: &serde_json::Value) {
+    match (saved.as_object_mut(), update.as_object()) {
+        (Some(saved), Some(update)) => {
+            for (key, value) in update {
+                if let Some(previous) = saved.get_mut(key) {
+                    merge_anthropic_usage_snapshot(previous, value);
+                } else {
+                    saved.insert(key.clone(), value.clone());
+                }
+            }
+        }
+        _ => *saved = update.clone(),
     }
 }
 
@@ -726,20 +1236,14 @@ struct AnthropicRequest {
     tools: Option<Vec<AnthropicToolDef>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     stream: Option<bool>,
-    /// Extended-thinking block.
-    ///
-    /// - Claude 3.7–4.5 (`AnthropicThinkingBudget`): `{type:"enabled", budget_tokens:N}`.
-    /// - Claude 4.6 (`AnthropicEffort`): `{type:"adaptive"}` (the model decides
-    ///   depth based on the `effort` field); budget_tokens is rejected here.
-    /// - Claude Opus 4.7+ (`AnthropicAdaptive`): the block is dropped entirely
-    ///   (sending it returns a 400).
+    /// 原生 thinking 控制；不可表达的显式配置在编码前报错。
     #[serde(skip_serializing_if = "Option::is_none")]
     thinking: Option<AnthropicThinking>,
-    /// Effort control (Claude 4.5+, primarily 4.6). One of
-    /// `low`/`medium`/`high`/`xhigh`/`max`. Replaces `budget_tokens` as the
-    /// recommended depth knob on newer models.
+    /// 官方 schema：format 与 effort 均位于 output_config，禁止 top-level effort。
     #[serde(skip_serializing_if = "Option::is_none")]
-    effort: Option<String>,
+    output_config: Option<AnthropicOutputConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_choice: Option<AnthropicToolChoice>,
     /// `metadata:{user_id}` for prompt-cache (KVCache) isolation on the
     /// DeepSeek/Anthropic endpoint. Filled from `ChatRequest.user_id` when set;
     /// omitted entirely when `None` (stage4 P4.1: cache_user_id single-source).
@@ -764,58 +1268,182 @@ struct AnthropicThinking {
     budget_tokens: Option<u32>,
 }
 
-/// Resolve the Anthropic thinking fields for a request.
-///
-/// Returns `(thinking_block, effort)`:
-/// - Claude 3.7–4.5 (`AnthropicThinkingBudget`): `{type:"enabled", budget_tokens:N}`
-///   + optional `effort` (4.5 accepts effort alongside budget).
-/// - Claude 4.6 (`AnthropicEffort`): `{type:"adaptive"}` + `effort`. budget_tokens
-///   is rejected on 4.6, so it is NOT emitted.
-/// - Claude Opus 4.7+ (`AnthropicAdaptive`): both fields dropped (legacy block
-///   returns a 400; the model decides its own depth).
-/// - Other protocols / `None`: no fields.
+/// 显式请求不可被 clamp/drop 成另一个承诺；native budget 至少 1024 且小于输出上限。
 fn build_anthropic_thinking(
     model: &str,
     thinking_protocol: ThinkingProtocol,
     thinking: &Option<echo_core::llm::ThinkingConfig>,
     max_tokens: u32,
-) -> (Option<AnthropicThinking>, Option<String>) {
-    use echo_core::llm::ThinkingProtocol as T;
+) -> Result<(Option<AnthropicThinking>, Option<String>)> {
+    use echo_core::llm::{ThinkingConfig as C, ThinkingLevel as L, ThinkingProtocol as T};
     let Some(cfg) = thinking.as_ref() else {
-        return (None, None);
+        return Ok((None, None));
     };
+    let invalid = |reason: &str| {
+        LlmError::InvalidResponse(format!(
+            "Anthropic thinking unsupported for model '{model}': {reason}"
+        ))
+    };
+    let disabled = matches!(cfg, C::Disabled | C::Level(L::None | L::Minimal));
     match thinking_protocol {
         T::AnthropicThinkingBudget => {
-            // 3.7–4.5: budget_tokens (effort is also accepted on 4.5).
-            let block = cfg
-                .to_anthropic_budget(max_tokens)
-                .map(|budget| AnthropicThinking {
-                    block_type: "enabled",
-                    budget_tokens: Some(budget),
-                });
-            (block, None)
+            if disabled {
+                return Ok((Some(AnthropicThinking { block_type: "disabled", budget_tokens: None }), None));
+            }
+            let budget = match cfg {
+                C::BudgetTokens(tokens) => *tokens,
+                _ => cfg.to_anthropic_budget(max_tokens).ok_or_else(|| invalid("cannot resolve budget"))?,
+            };
+            if budget < 1024 || budget >= max_tokens {
+                return Err(invalid("budget_tokens must be >=1024 and strictly less than max_tokens").into());
+            }
+            Ok((Some(AnthropicThinking { block_type: "enabled", budget_tokens: Some(budget) }), None))
         }
         T::AnthropicEffort => {
-            // Claude 4.6: adaptive thinking block + effort. budget_tokens 400s.
-            let block = if matches!(cfg, echo_core::llm::ThinkingConfig::Disabled) {
-                None
-            } else {
-                Some(AnthropicThinking {
-                    block_type: "adaptive",
-                    budget_tokens: None,
-                })
-            };
-            (block, cfg.to_anthropic_effort().map(str::to_string))
+            if matches!(cfg, C::BudgetTokens(_)) {
+                return Err(invalid("an exact token budget is not representable by adaptive effort").into());
+            }
+            if disabled {
+                return Ok((Some(AnthropicThinking { block_type: "disabled", budget_tokens: None }), None));
+            }
+            Ok((Some(AnthropicThinking { block_type: "adaptive", budget_tokens: None }), cfg.to_anthropic_effort().map(str::to_string)))
         }
-        T::AnthropicAdaptive => {
-            warn!(
-                model = model,
-                "thinking config ignored: Claude Opus 4.7+ use adaptive-only thinking (any field would 400)"
-            );
-            (None, None)
-        }
-        _ => (None, None),
+        T::AnthropicAdaptive => Err(invalid("explicit controls on adaptive-only models need exact primary evidence; no setting was silently dropped").into()),
+        _ => Err(invalid("resolved model has no Anthropic thinking dialect").into()),
     }
+}
+
+/// DeepSeek 官方 Anthropic 兼容合同：budget 不生效，effort 与温度走该服务方言。
+fn build_deepseek_anthropic_thinking(
+    thinking: &Option<echo_core::llm::ThinkingConfig>,
+) -> Result<(Option<AnthropicThinking>, Option<String>)> {
+    use echo_core::llm::{ThinkingConfig as C, ThinkingLevel as L};
+    let Some(cfg) = thinking else {
+        return Ok((None, None));
+    };
+    match cfg {
+        C::BudgetTokens(_) => Err(LlmError::InvalidResponse(
+            "DeepSeek Anthropic ignores budget_tokens; an exact budget cannot be honored".into(),
+        )
+        .into()),
+        C::Disabled | C::Level(L::None | L::Minimal) => Ok((
+            Some(AnthropicThinking {
+                block_type: "disabled",
+                budget_tokens: None,
+            }),
+            None,
+        )),
+        _ => Ok((
+            Some(AnthropicThinking {
+                block_type: "enabled",
+                budget_tokens: None,
+            }),
+            cfg.to_anthropic_effort().map(str::to_string),
+        )),
+    }
+}
+
+fn thinking_reasoning(
+    thinking: &str,
+    signature: Option<&str>,
+    provider: &str,
+    id: &str,
+    allow_unsigned: bool,
+) -> Result<ReasoningBlock> {
+    if let Some(signature) = signature.filter(|signature| !signature.is_empty()) {
+        return Ok(ReasoningBlock::Signed {
+            thinking: thinking.into(),
+            signature: signature.into(),
+        });
+    }
+    if !allow_unsigned {
+        return Err(LlmError::InvalidResponse(
+            "Anthropic native thinking requires its signature".into(),
+        )
+        .into());
+    }
+    let mut raw = serde_json::json!({"type":"thinking","thinking":thinking});
+    if let Some(signature) = signature
+        && let Some(fields) = raw.as_object_mut()
+    {
+        fields.insert(
+            "signature".into(),
+            serde_json::Value::String(signature.into()),
+        );
+    }
+    Ok(ReasoningBlock::Opaque {
+        provider: provider.into(),
+        id: id.into(),
+        data: raw.to_string(),
+        summary: Vec::new(),
+    })
+}
+
+fn unsigned_thinking_replay(raw: &str) -> Result<ContentBlock> {
+    let value: ContentBlock = serde_json::from_str(raw).map_err(|_| {
+        LlmError::InvalidResponse("DeepSeek opaque thinking is not a native block".into())
+    })?;
+    if !matches!(value, ContentBlock::Thinking { .. }) {
+        return Err(
+            LlmError::InvalidResponse("DeepSeek opaque state is not thinking".into()).into(),
+        );
+    }
+    Ok(value)
+}
+
+fn validate_deepseek_blocks(blocks: &[ContentBlock]) -> Result<()> {
+    for block in blocks {
+        match block {
+            ContentBlock::Document { .. } | ContentBlock::RedactedThinking { .. } => {
+                return Err(LlmError::InvalidResponse(
+                    "DeepSeek Anthropic does not support document/redacted_thinking".into(),
+                )
+                .into());
+            }
+            ContentBlock::ToolResult {
+                content, is_error, ..
+            } => {
+                if *is_error == Some(true) {
+                    return Err(LlmError::InvalidResponse("DeepSeek Anthropic ignores tool_result.is_error=true; native error observation cannot be represented".into()).into());
+                }
+                if let AnthropicToolResultContent::Blocks(parts) = content {
+                    validate_deepseek_blocks(parts)?;
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+struct AnthropicControls {
+    tool_choice: Option<AnthropicToolChoice>,
+    thinking: Option<AnthropicThinking>,
+    output_config: Option<AnthropicOutputConfig>,
+}
+
+#[derive(Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum AnthropicToolChoice {
+    Auto,
+    None,
+    Any,
+    Tool { name: String },
+}
+
+#[derive(Serialize)]
+struct AnthropicOutputConfig {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    format: Option<AnthropicJsonFormat>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    effort: Option<String>,
+}
+
+#[derive(Serialize)]
+struct AnthropicJsonFormat {
+    #[serde(rename = "type")]
+    format_type: &'static str,
+    schema: serde_json::Value,
 }
 
 #[derive(Serialize)]
@@ -902,12 +1530,18 @@ enum ContentBlock {
     #[serde(rename = "tool_result")]
     ToolResult {
         tool_use_id: String,
-        content: String,
+        content: AnthropicToolResultContent,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        is_error: Option<bool>,
         #[serde(skip_serializing_if = "Option::is_none")]
         cache_control: Option<CacheControl>,
     },
     #[serde(rename = "thinking")]
-    Thinking { thinking: String, signature: String },
+    Thinking {
+        thinking: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        signature: Option<String>,
+    },
     #[serde(rename = "redacted_thinking")]
     RedactedThinking { data: String },
     #[serde(other)]
@@ -952,7 +1586,7 @@ impl ContentBlock {
     fn is_runtime_context(&self) -> bool {
         match self {
             ContentBlock::Text { text, .. } => is_runtime_context_text(text),
-            ContentBlock::ToolResult { content, .. } => is_runtime_context_text(content),
+            ContentBlock::ToolResult { content, .. } => content.is_runtime_context(),
             _ => false,
         }
     }
@@ -961,25 +1595,41 @@ impl ContentBlock {
 fn append_reasoning_blocks(
     target: &mut Vec<ContentBlock>,
     reasoning_blocks: Option<&[ReasoningBlock]>,
-) {
+    allow_unsigned: bool,
+    provider: &str,
+) -> Result<()> {
     for block in reasoning_blocks.unwrap_or_default() {
         let content = match block {
             ReasoningBlock::Signed {
                 thinking,
                 signature,
-            } => ContentBlock::Thinking {
-                thinking: thinking.clone(),
-                signature: signature.clone(),
-            },
+            } => {
+                if signature.is_empty() {
+                    return Err(LlmError::InvalidResponse(
+                        "Anthropic replay thinking signature is empty".into(),
+                    )
+                    .into());
+                }
+                ContentBlock::Thinking {
+                    thinking: thinking.clone(),
+                    signature: Some(signature.clone()),
+                }
+            }
             ReasoningBlock::Redacted { data } => {
                 ContentBlock::RedactedThinking { data: data.clone() }
             }
             // Opaque state is owned by another provider and must not cross the
             // protocol boundary when a conversation switches models.
+            ReasoningBlock::Opaque {
+                provider: owner,
+                data,
+                ..
+            } if allow_unsigned && owner == provider => unsigned_thinking_replay(data)?,
             ReasoningBlock::Opaque { .. } => continue,
         };
         target.push(content);
     }
+    Ok(())
 }
 
 fn apply_conversation_cache_breakpoints(
@@ -1047,49 +1697,143 @@ fn data_url_to_image_source(url: &str) -> ImageSource {
     }
 }
 
-/// Convert a `ContentPart::File` into the best-fit Anthropic content block.
-///
-/// Anthropic's Messages API only accepts `application/pdf` as a base64
-/// `document` source — other binary types have no generic attachment block.
-/// To make text-class attachments (txt/md/json/src/...) actually readable by
-/// the model, we decode and inline them as text. Binary non-PDF falls back to
-/// a name-only placeholder (the previous behaviour for all files).
-fn file_to_content_block(name: &str, content_base64: &str) -> ContentBlock {
-    let ext = name.rsplit('.').next().map(|e| e.to_ascii_lowercase());
-    match ext.as_deref() {
-        // PDF → document content block (the only base64 document type Anthropic
-        // accepts).
-        Some("pdf") => ContentBlock::Document {
-            source: ImageSource::Base64 {
-                media_type: "application/pdf".to_string(),
-                data: content_base64.to_string(),
-            },
+/// 工具内容使用 native string/blocks union；不能经 as_text 吞掉 Image/File。
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(untagged)]
+enum AnthropicToolResultContent {
+    Text(String),
+    Blocks(Vec<ContentBlock>),
+}
+
+impl AnthropicToolResultContent {
+    fn is_runtime_context(&self) -> bool {
+        match self {
+            Self::Text(text) => is_runtime_context_text(text),
+            Self::Blocks(blocks) => blocks.iter().any(ContentBlock::is_runtime_context),
+        }
+    }
+}
+
+fn tool_result_content(content: &MessageContent) -> Result<AnthropicToolResultContent> {
+    Ok(match content {
+        MessageContent::Text(text) => AnthropicToolResultContent::Text(text.clone()),
+        MessageContent::Empty => AnthropicToolResultContent::Text(String::new()),
+        MessageContent::Parts(parts) => AnthropicToolResultContent::Blocks(
+            parts
+                .iter()
+                .map(part_to_content_block)
+                .collect::<Result<Vec<_>>>()?,
+        ),
+    })
+}
+
+fn part_to_content_block(part: &ContentPart) -> Result<ContentBlock> {
+    Ok(match part {
+        ContentPart::Text { text } => ContentBlock::Text {
+            text: text.clone(),
             cache_control: None,
         },
-        // Text-class files → decode base64 and inline as text so the model can
-        // read the contents directly.
+        ContentPart::ImageUrl { image_url } => ContentBlock::Image {
+            source: checked_image_source(&image_url.url)?,
+            cache_control: None,
+        },
+        ContentPart::ResourceLink { resource } => ContentBlock::Text {
+            text: resource.model_text(),
+            cache_control: None,
+        },
+        ContentPart::File { name, content } => file_to_content_block(name, content)?,
+    })
+}
+
+fn checked_image_source(url: &str) -> Result<ImageSource> {
+    let source = data_url_to_image_source(url);
+    let invalid = || {
+        LlmError::InvalidResponse(
+            "Anthropic image source must be a supported base64 image or an HTTP(S) URL".into(),
+        )
+    };
+    match &source {
+        ImageSource::Base64 { media_type, data } => {
+            if !matches!(
+                media_type.as_str(),
+                "image/jpeg" | "image/png" | "image/gif" | "image/webp"
+            ) || data.is_empty()
+                || base64::Engine::decode(&base64::engine::general_purpose::STANDARD, data).is_err()
+            {
+                return Err(invalid().into());
+            }
+        }
+        ImageSource::Url_ { url } => {
+            if !reqwest::Url::parse(url).ok().is_some_and(|parsed| {
+                matches!(parsed.scheme(), "https" | "http") && parsed.host_str().is_some()
+            }) {
+                return Err(invalid().into());
+            }
+        }
+    }
+    Ok(source)
+}
+
+/// PDF 保留 base64；文本保留完整 UTF-8 原文；其它二进制显式拒绝，不能伪名称占位。
+fn file_to_content_block(name: &str, content_base64: &str) -> Result<ContentBlock> {
+    let invalid = |reason: &str| {
+        LlmError::InvalidResponse(format!(
+            "Anthropic file representation unsupported: {reason}"
+        ))
+    };
+    let bytes = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, content_base64)
+        .map_err(|_| invalid("invalid base64"))?;
+    let ext = name
+        .rsplit('.')
+        .next()
+        .map(|value| value.to_ascii_lowercase());
+    match ext.as_deref() {
+        Some("pdf") => Ok(ContentBlock::Document {
+            source: ImageSource::Base64 {
+                media_type: "application/pdf".into(),
+                data: content_base64.into(),
+            },
+            cache_control: None,
+        }),
+        Some("png" | "jpg" | "jpeg" | "gif" | "webp") => {
+            let mime = match ext.as_deref() {
+                Some("jpg" | "jpeg") => "image/jpeg",
+                Some("gif") => "image/gif",
+                Some("webp") => "image/webp",
+                _ => "image/png",
+            };
+            Ok(ContentBlock::Image {
+                source: checked_image_source(&format!("data:{mime};base64,{content_base64}"))?,
+                cache_control: None,
+            })
+        }
         Some(
             "txt" | "md" | "markdown" | "json" | "xml" | "yaml" | "yml" | "csv" | "tsv" | "rs"
             | "py" | "js" | "ts" | "tsx" | "jsx" | "go" | "java" | "c" | "cpp" | "h" | "sh"
             | "toml" | "ini" | "log" | "sql",
         ) => {
-            let decoded =
-                base64::Engine::decode(&base64::engine::general_purpose::STANDARD, content_base64)
-                    .ok();
-            let text = decoded
-                .and_then(|bytes| String::from_utf8(bytes).ok())
-                .unwrap_or_else(|| format!("[Attachment: {name}] (binary, undecodable)"));
-            ContentBlock::Text {
+            let text = String::from_utf8(bytes).map_err(|_| invalid("text file is not UTF-8"))?;
+            Ok(ContentBlock::Text {
                 text: format!("\n[Attachment: {name}]\n```\n{text}\n```"),
                 cache_control: None,
-            }
+            })
         }
-        // Other binary → name-only placeholder (no generic attachment block).
-        _ => ContentBlock::Text {
-            text: format!("\n[Attachment: {name}]"),
-            cache_control: None,
-        },
+        _ => Err(invalid(
+            "binary MIME is not representable by the current native content contract",
+        )
+        .into()),
     }
+}
+
+fn parse_tool_input(arguments: &str) -> Result<serde_json::Value> {
+    let value: serde_json::Value = serde_json::from_str(arguments)
+        .map_err(|_| LlmError::InvalidResponse("Anthropic tool input is not valid JSON".into()))?;
+    if !value.is_object() {
+        return Err(
+            LlmError::InvalidResponse("Anthropic tool input must be an object".into()).into(),
+        );
+    }
+    Ok(value)
 }
 
 #[derive(Serialize)]
@@ -1099,20 +1843,17 @@ struct AnthropicToolDef {
     description: Option<String>,
     input_schema: serde_json::Value,
     #[serde(skip_serializing_if = "Option::is_none")]
+    strict: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     cache_control: Option<CacheControl>,
 }
 
+/// 保原响应存在性；在同一 decode 路径派生 typed 内容与固定公共观察。
 #[derive(Deserialize)]
-struct AnthropicResponse {
-    #[serde(default)]
-    id: String,
-    content: Vec<ContentBlock>,
-    stop_reason: Option<String>,
-    #[serde(default)]
-    usage: Option<AnthropicUsage>,
-}
+#[serde(transparent)]
+struct AnthropicResponse(serde_json::Value);
 
-#[derive(Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone)]
 struct AnthropicUsage {
     input_tokens: u32,
     output_tokens: u32,
@@ -1120,6 +1861,8 @@ struct AnthropicUsage {
     cache_creation_input_tokens: Option<u32>,
     #[serde(default)]
     cache_read_input_tokens: Option<u32>,
+    #[serde(flatten)]
+    extra: std::collections::BTreeMap<String, serde_json::Value>,
 }
 
 #[cfg(test)]
@@ -1183,7 +1926,7 @@ mod tests {
     }
 
     #[test]
-    fn claude_46_max_effort_remains_max() {
+    fn claude_46_max_effort_remains_max() -> Result<()> {
         let (thinking, effort) = build_anthropic_thinking(
             "claude-opus-4-6",
             ThinkingProtocol::AnthropicEffort,
@@ -1191,9 +1934,10 @@ mod tests {
                 echo_core::llm::ThinkingLevel::Max,
             )),
             8_192,
-        );
+        )?;
         assert_eq!(effort.as_deref(), Some("max"));
         assert_eq!(thinking.map(|block| block.block_type), Some("adaptive"));
+        Ok(())
     }
 
     #[test]
@@ -1245,8 +1989,14 @@ mod tests {
     #[test]
     fn message_delta_usage_accepts_output_tokens_only() -> Result<()> {
         let mut adapter = NativeAnthropicStream::default();
+        adapter.map(serde_json::json!({"type":"message_start","message":{"id":"msg_usage","usage":{"input_tokens":0,"output_tokens":0}}}))?;
         let chunks = adapter.map(serde_json::json!({"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":17}}))?;
-        assert!(chunks.is_empty());
+        assert!(chunks.iter().all(|chunk| chunk.finish_reason.is_none()));
+        assert!(
+            chunks
+                .iter()
+                .any(|chunk| chunk.delta.provider_response.is_some())
+        );
         assert_eq!(adapter.usage.completion_tokens, Some(17));
         Ok(())
     }
@@ -1270,10 +2020,18 @@ mod tests {
     #[test]
     fn thinking_response_is_projected_to_reasoning_content()
     -> std::result::Result<(), Box<dyn std::error::Error>> {
-        let raw = r#"{"content":[{"type":"thinking","thinking":"reason","signature":"sig"},{"type":"text","text":"answer"}],"stop_reason":"end_turn","usage":{"input_tokens":2,"output_tokens":3}}"#;
+        let raw = r#"{"id":"msg-thinking-projection","content":[{"type":"thinking","thinking":"reason","signature":"sig"},{"type":"text","text":"answer"}],"stop_reason":"end_turn","usage":{"input_tokens":2,"output_tokens":3}}"#;
         let response = serde_json::from_str::<AnthropicResponse>(raw)?;
         let converted =
             AnthropicClient::new("sk-test", "claude-sonnet-4-6").convert_response(response)?;
+        assert_eq!(
+            converted
+                .message
+                .provider_response
+                .as_ref()
+                .and_then(|metadata| metadata.request_id.as_deref()),
+            Some("msg-thinking-projection")
+        );
         assert_eq!(
             converted.message.reasoning_content.as_deref(),
             Some("reason")
@@ -1324,7 +2082,7 @@ mod tests {
         assert!(matches!(
             blocks.and_then(|values| values.first()),
             Some(ContentBlock::Thinking { thinking, signature })
-                if thinking == "reason" && signature == "sig"
+                if thinking == "reason" && signature.as_deref() == Some("sig")
         ));
         assert!(matches!(
             blocks.and_then(|values| values.get(1)),
@@ -1334,25 +2092,21 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_request_features_fail_instead_of_being_dropped() {
-        let client = AnthropicClient::new("test-key", "test-model");
-        let mut request = ChatRequest::new(vec![Message::user("hello".to_string())]);
-        request.tool_choice = Some("none".to_string());
-        let tool_error = client
-            .validate_request_features(&request)
-            .err()
-            .map(|error| error.to_string())
-            .unwrap_or_default();
-        assert!(tool_error.contains("tool_choice"));
-
-        request.tool_choice = None;
-        request.response_format = Some(echo_core::llm::types::ResponseFormat::JsonObject);
-        let format_error = client
-            .validate_request_features(&request)
-            .err()
-            .map(|error| error.to_string())
-            .unwrap_or_default();
-        assert!(format_error.contains("response format"));
+    fn native_none_and_text_are_supported_without_silent_json_mode() -> Result<()> {
+        let client = AnthropicClient::new("fixture-only", "claude-sonnet-4-5");
+        let mut request = ChatRequest::new(vec![Message::user("hello".into())]);
+        request.tool_choice = Some(ToolChoice::None);
+        request.response_format = Some(ResponseFormat::Text);
+        let wire = serde_json::to_value(client.convert_request(&request)?)
+            .map_err(|error| LlmError::SerializationError(error.to_string()))?;
+        assert_eq!(
+            wire.get("tool_choice"),
+            Some(&serde_json::json!({"type":"none"}))
+        );
+        assert!(wire.get("output_config").is_none());
+        request.response_format = Some(ResponseFormat::JsonObject);
+        assert!(client.convert_request(&request).is_err());
+        Ok(())
     }
 
     /// Sprint 2: main think path sends `cache_hints: Some` with **empty**
@@ -1377,6 +2131,7 @@ mod tests {
         let tools = vec![ToolDefinition {
             tool_type: "function".to_string(),
             function: FunctionSpec {
+                strict: None,
                 name: "t".to_string(),
                 description: "d".to_string(),
                 parameters: serde_json::json!({}),
@@ -1417,7 +2172,7 @@ mod tests {
     #[test]
     fn pdf_attachment_becomes_document_block() -> std::result::Result<(), String> {
         let b64 = base64::engine::general_purpose::STANDARD.encode(b"%PDF-1.4 fake");
-        let block = file_to_content_block("report.pdf", &b64);
+        let block = file_to_content_block("report.pdf", &b64).map_err(|error| error.to_string())?;
         let ContentBlock::Document { source, .. } = block else {
             return Err("expected Document block".to_string());
         };
@@ -1432,7 +2187,7 @@ mod tests {
     #[test]
     fn text_attachment_inlined_as_text() -> std::result::Result<(), String> {
         let b64 = base64::engine::general_purpose::STANDARD.encode(b"hello notes");
-        let block = file_to_content_block("notes.txt", &b64);
+        let block = file_to_content_block("notes.txt", &b64).map_err(|error| error.to_string())?;
         let ContentBlock::Text { text, .. } = block else {
             return Err("expected Text block".to_string());
         };
@@ -1448,16 +2203,9 @@ mod tests {
     }
 
     #[test]
-    fn binary_non_pdf_attachment_is_placeholder() -> std::result::Result<(), String> {
+    fn binary_non_pdf_attachment_is_explicitly_unsupported() {
         let b64 = base64::engine::general_purpose::STANDARD.encode(b"\x00\x01binary");
-        let block = file_to_content_block("archive.zip", &b64);
-        let ContentBlock::Text { text, .. } = block else {
-            return Err("expected Text placeholder".to_string());
-        };
-        assert!(text.contains("archive.zip"));
-        // Should NOT contain decoded binary garbage.
-        assert!(!text.contains("binary"));
-        Ok(())
+        assert!(file_to_content_block("archive.zip", &b64).is_err());
     }
 
     #[test]
@@ -1488,9 +2236,25 @@ mod tests {
 
 /// Native provider source alone orders replay. Runtime-approved presentation
 /// blocks are a separate projection and are never serialized to vendor wire.
-fn native_anthropic_history(message: &Message) -> Result<Option<Vec<ContentBlock>>> {
+fn native_anthropic_history(
+    message: &Message,
+    allow_unsigned: bool,
+    provider: &str,
+) -> Result<Option<Vec<ContentBlock>>> {
     let native = message.assistant_blocks.as_deref().unwrap_or_default();
     let tools = message.tool_calls.as_deref().unwrap_or_default();
+    let observation = message
+        .provider_response
+        .as_ref()
+        .filter(|metadata| metadata.protocol == LlmApiProtocol::Anthropic);
+    // D2未知原生身份只供检查；不能因缺Source而退回普通历史路径。
+    if observation.is_some_and(|metadata| metadata.request_id.as_deref().is_none_or(str::is_empty))
+    {
+        return Err(LlmError::InvalidResponse(
+            "Anthropic native replay omitted observed request id".into(),
+        )
+        .into());
+    }
     let has_native = native.iter().any(|block| {
         block
             .provider_source
@@ -1506,10 +2270,47 @@ fn native_anthropic_history(message: &Message) -> Result<Option<Vec<ContentBlock
     }
     let invalid =
         |reason: &str| LlmError::InvalidResponse(format!("Anthropic native replay {reason}"));
+    // 先沿既有canonical身份收齐前缀，再用原生Source决定可重放组与顺序。
+    // None本身不授权wire；只有同组后继真实Source可补全，不能借其它组/协议的Source。
+    let mut canonical: Vec<AssistantMessageBlock> = Vec::new();
+    for block in native {
+        if let Some(saved) = canonical
+            .iter_mut()
+            .find(|saved| saved.request_id == block.request_id && saved.block_id == block.block_id)
+        {
+            match (&saved.provider_source, &block.provider_source) {
+                (None, Some(_)) => saved.provider_source = block.provider_source.clone(),
+                (Some(before), Some(after)) if before == after => {}
+                (None, None) => {}
+                _ => return Err(invalid("source changed or was removed").into()),
+            }
+            if let Some(after) = block.provider.as_ref() {
+                if saved
+                    .provider
+                    .as_ref()
+                    .is_some_and(|before| before != after)
+                {
+                    return Err(invalid("canonical provider changed").into());
+                }
+                // provider也是单调观察；缺字段不能擦除已知身份或跳过中间foreign段。
+                saved.provider = Some(after.clone());
+            }
+            saved.delta.push_str(&block.delta);
+            saved.complete |= block.complete;
+            if block.phase != AssistantPhase::Unknown {
+                saved.phase = block.phase;
+            }
+            if block.reasoning.is_some() {
+                saved.reasoning = block.reasoning.clone();
+            }
+        } else {
+            canonical.push(block.clone());
+        }
+    }
     let mut merged: std::collections::BTreeMap<u32, AssistantMessageBlock> =
         std::collections::BTreeMap::new();
     let mut owner = None::<String>;
-    for block in native.iter().filter(|block| {
+    for block in canonical.into_iter().filter(|block| {
         block
             .provider_source
             .as_ref()
@@ -1519,6 +2320,21 @@ fn native_anthropic_history(message: &Message) -> Result<Option<Vec<ContentBlock
             .provider_source
             .as_ref()
             .ok_or_else(|| invalid("source omitted"))?;
+        if source.request_id.is_empty()
+            || observation.is_some_and(|metadata| {
+                metadata.request_id.as_deref() != Some(source.request_id.as_str())
+            })
+        {
+            return Err(invalid("source request id is empty or differs from observation").into());
+        }
+        if observation.is_some_and(|metadata| {
+            block
+                .provider
+                .as_ref()
+                .is_some_and(|owner| owner != &metadata.provider)
+        }) {
+            return Err(invalid("canonical provider differs from observation").into());
+        }
         if owner
             .as_ref()
             .is_some_and(|owner| owner != &source.request_id)
@@ -1526,16 +2342,8 @@ fn native_anthropic_history(message: &Message) -> Result<Option<Vec<ContentBlock
             return Err(invalid("mixed request owners").into());
         }
         owner.get_or_insert_with(|| source.request_id.clone());
-        if let Some(saved) = merged.get_mut(&source.output_index) {
-            if saved.provider_source != block.provider_source {
-                return Err(invalid("source changed").into());
-            }
-            saved.delta.push_str(&block.delta);
-            if block.reasoning.is_some() {
-                saved.reasoning = block.reasoning.clone();
-            }
-        } else {
-            merged.insert(source.output_index, block.clone());
+        if merged.insert(source.output_index, block).is_some() {
+            return Err(invalid("duplicate native position across canonical groups").into());
         }
     }
     let mut ordered = std::collections::BTreeMap::new();
@@ -1544,11 +2352,21 @@ fn native_anthropic_history(message: &Message) -> Result<Option<Vec<ContentBlock
             Some(ReasoningBlock::Signed {
                 thinking,
                 signature,
-            }) => ContentBlock::Thinking {
-                thinking,
-                signature,
-            },
+            }) => {
+                if signature.is_empty() {
+                    return Err(invalid("thinking signature is empty").into());
+                }
+                ContentBlock::Thinking {
+                    thinking,
+                    signature: Some(signature),
+                }
+            }
             Some(ReasoningBlock::Redacted { data }) => ContentBlock::RedactedThinking { data },
+            Some(ReasoningBlock::Opaque {
+                provider: owner,
+                data,
+                ..
+            }) if allow_unsigned && owner == provider => unsigned_thinking_replay(&data)?,
             Some(ReasoningBlock::Opaque { .. }) => {
                 return Err(invalid("foreign reasoning payload").into());
             }
@@ -1566,6 +2384,13 @@ fn native_anthropic_history(message: &Message) -> Result<Option<Vec<ContentBlock
             .as_ref()
             .filter(|source| source.protocol == LlmApiProtocol::Anthropic)
             .ok_or_else(|| invalid("tool source missing"))?;
+        if source.request_id.is_empty()
+            || observation.is_some_and(|metadata| {
+                metadata.request_id.as_deref() != Some(source.request_id.as_str())
+            })
+        {
+            return Err(invalid("tool request id is empty or differs from observation").into());
+        }
         if owner
             .as_ref()
             .is_some_and(|owner| owner != &source.request_id)
@@ -1598,6 +2423,9 @@ struct NativeAnthropicStream {
     provider: String,
     sequence: u64,
     blocks: std::collections::BTreeMap<usize, serde_json::Value>,
+    seen_indexes: std::collections::HashSet<usize>,
+    has_native_content: bool,
+    deepseek_dialect: bool,
     reasoning: std::collections::HashMap<usize, ReasoningBlock>,
     tools: std::collections::HashMap<usize, (String, String, String)>,
     usage: Usage,
@@ -1605,9 +2433,18 @@ struct NativeAnthropicStream {
     has_output: bool,
     output_text: String,
     completed_tools: Vec<ToolCall>,
+    provider_response: Option<ProviderResponseMetadata>,
+    observed_blocks: Vec<AssistantMessageBlock>,
 }
 
 impl NativeAnthropicStream {
+    fn native_request_id(&self) -> Option<&str> {
+        self.provider_response
+            .as_ref()
+            .and_then(|metadata| metadata.request_id.as_deref())
+            .filter(|id| !id.is_empty())
+    }
+
     fn block(
         &mut self,
         index: usize,
@@ -1624,15 +2461,17 @@ impl NativeAnthropicStream {
             _ => "text",
         };
         let block = AssistantMessageBlock {
-            provider_source: Some(output_source(
-                LlmApiProtocol::Anthropic,
-                &self.request_id,
-                &format!("{}:content:{index}", self.request_id),
-                output_index,
-                None,
-                kind,
-                None,
-            )),
+            provider_source: self.native_request_id().map(|native_id| {
+                output_source(
+                    LlmApiProtocol::Anthropic,
+                    native_id,
+                    &format!("{}:content:{index}", self.request_id),
+                    output_index,
+                    None,
+                    kind,
+                    None,
+                )
+            }),
             block_id: format!("{}:content:{index}", self.request_id),
             request_id: self.request_id.clone(),
             sequence: self.sequence,
@@ -1655,6 +2494,7 @@ impl NativeAnthropicStream {
         reasoning: Option<ReasoningBlock>,
     ) -> Result<ChatChunk> {
         let block = self.block(index, phase, text.clone(), complete, reasoning.clone())?;
+        self.observed_blocks.push(block.clone());
         Ok(ChatChunk {
             delta: DeltaMessage {
                 content: (phase != AssistantPhase::Reasoning && !text.is_empty())
@@ -1670,14 +2510,236 @@ impl NativeAnthropicStream {
         })
     }
 
-    fn map(&mut self, event: serde_json::Value) -> Result<Vec<ChatChunk>> {
+    fn metadata_chunk(&self) -> ChatChunk {
+        ChatChunk {
+            delta: DeltaMessage {
+                provider_response: self.provider_response.clone(),
+                ..Default::default()
+            },
+            finish_reason: None,
+            usage: None,
+        }
+    }
+
+    fn update_metadata(&mut self, event: &serde_json::Value) -> Result<()> {
+        let metadata = self.provider_response.as_mut().ok_or_else(|| {
+            LlmError::InvalidResponse("Anthropic metadata update preceded message_start".into())
+        })?;
+        if let Some(delta) = event.get("delta") {
+            if !delta.is_object() {
+                return Err(LlmError::InvalidResponse(
+                    "Anthropic message_delta.delta must be object".into(),
+                )
+                .into());
+            }
+            if delta.get("stop_reason").is_some() {
+                metadata.stop_reason = delta.get("stop_reason").cloned();
+            }
+            if delta.get("stop_sequence").is_some() {
+                metadata.stop_sequence = delta.get("stop_sequence").cloned();
+            }
+        }
+        if let Some(update) = event.get("usage").cloned() {
+            if let Some(saved) = metadata.usage.as_mut() {
+                merge_anthropic_usage_snapshot(saved, &update);
+            } else {
+                metadata.usage = Some(update);
+            }
+        }
+        // serde是唯一共享shape校验；缺失/null和未知嵌套值沿其公开合同。
+        *metadata = serde_json::from_value(
+            serde_json::to_value(&*metadata)
+                .map_err(|error| LlmError::SerializationError(error.to_string()))?,
+        )
+        .map_err(|error| {
+            LlmError::InvalidResponse(format!("Anthropic response observation invalid: {error}"))
+        })?;
+        Ok(())
+    }
+
+    /// 用同一canonical事实构造失败观察；不会发布、执行工具或建立完成资格。
+    fn incomplete_error(&mut self) -> Result<echo_core::error::ReactError> {
+        let mut blocks = self.observed_blocks.clone();
+        let mut active_reasoning = self
+            .reasoning
+            .iter()
+            .map(|(index, reasoning)| (*index, reasoning.clone()))
+            .collect::<Vec<_>>();
+        active_reasoning.sort_by_key(|(index, _)| *index);
+        for (index, reasoning) in active_reasoning {
+            let reasoning = match reasoning {
+                ReasoningBlock::Signed {
+                    thinking,
+                    signature,
+                } if self.deepseek_dialect && signature.is_empty() => thinking_reasoning(
+                    &thinking,
+                    self.blocks
+                        .get(&index)
+                        .and_then(|block| block.get("signature"))
+                        .and_then(serde_json::Value::as_str),
+                    &self.provider,
+                    &format!("{}:content:{index}", self.request_id),
+                    true,
+                )?,
+                other => other,
+            };
+            blocks.push(self.block(
+                index,
+                AssistantPhase::Reasoning,
+                String::new(),
+                false,
+                Some(reasoning),
+            )?);
+        }
+        let mut reasoning_by_index = std::collections::BTreeMap::new();
+        let block_prefix = format!("{}:content:", self.request_id);
+        for block in &blocks {
+            if let Some(reasoning) = block.reasoning.as_ref() {
+                // 这是本adapter生成的内部块坐标；未知native ID时不能借Source排序。
+                let index = block
+                    .block_id
+                    .strip_prefix(block_prefix.as_str())
+                    .and_then(|index| index.parse::<u32>().ok())
+                    .ok_or_else(|| {
+                        LlmError::InvalidResponse(
+                            "Anthropic partial block omitted internal index".into(),
+                        )
+                    })?;
+                reasoning_by_index.insert(index, reasoning.clone());
+            }
+        }
+        let reasoning_blocks = reasoning_by_index.into_values().collect::<Vec<_>>();
+        let mut reasoning_text = String::new();
+        for reasoning in &reasoning_blocks {
+            match reasoning {
+                ReasoningBlock::Signed { thinking, .. } => reasoning_text.push_str(thinking),
+                ReasoningBlock::Opaque { data, .. } => {
+                    let raw: serde_json::Value = serde_json::from_str(data)
+                        .map_err(|error| LlmError::InvalidResponse(error.to_string()))?;
+                    if let Some(text) = raw.get("thinking").and_then(serde_json::Value::as_str) {
+                        reasoning_text.push_str(text);
+                    }
+                }
+                ReasoningBlock::Redacted { .. } => {}
+            }
+        }
+        let mut tools = self.completed_tools.clone();
+        for (index, (id, name, arguments)) in &self.tools {
+            let index_u32 = u32::try_from(*index).map_err(|_| {
+                LlmError::InvalidResponse("Anthropic partial tool index exceeds u32".into())
+            })?;
+            let arguments = if arguments.is_empty() {
+                self.blocks
+                    .get(index)
+                    .and_then(|block| block.get("input"))
+                    .cloned()
+                    .unwrap_or_else(|| serde_json::json!({}))
+                    .to_string()
+            } else {
+                arguments.clone()
+            };
+            tools.push(ToolCall {
+                provider_source: Some(output_source(
+                    LlmApiProtocol::Anthropic,
+                    self.native_request_id().unwrap_or_default(),
+                    id,
+                    index_u32,
+                    None,
+                    "tool_use",
+                    None,
+                )),
+                id: id.clone(),
+                call_type: "function".into(),
+                function: FunctionCall {
+                    name: name.clone(),
+                    arguments,
+                },
+            });
+        }
+        tools.sort_by_key(|tool| {
+            tool.provider_source
+                .as_ref()
+                .map(|source| source.output_index)
+        });
+        let partial = Message {
+            role: Role::Assistant,
+            content: if self.output_text.is_empty() {
+                MessageContent::Empty
+            } else {
+                MessageContent::Text(self.output_text.clone())
+            },
+            tool_calls: (!tools.is_empty()).then_some(tools),
+            reasoning_content: (!reasoning_text.is_empty()).then_some(reasoning_text),
+            reasoning_blocks: (!reasoning_blocks.is_empty()).then_some(reasoning_blocks),
+            assistant_blocks: (!blocks.is_empty()).then_some(blocks),
+            provider_response: self.provider_response.clone(),
+            execution_status: None,
+            approved_assistant_blocks: None,
+            ..Default::default()
+        };
+        Ok(LlmError::IncompleteResponse {
+            partial: Box::new(partial),
+        }
+        .into())
+    }
+
+    fn merge_usage(&mut self, value: &serde_json::Value, from_delta: bool) -> Result<()> {
+        if !from_delta && value.is_object() {
+            serde_json::from_value::<AnthropicUsage>(value.clone()).map_err(|error| {
+                LlmError::InvalidResponse(format!("Anthropic message_start usage invalid: {error}"))
+            })?;
+        }
+        let read = |name: &str| -> Result<Option<u32>> {
+            match value.get(name) {
+                None => Ok(None),
+                Some(serde_json::Value::Null)
+                    if name.starts_with("cache_") || (from_delta && name == "input_tokens") =>
+                {
+                    Ok(None)
+                }
+                Some(value) => value
+                    .as_u64()
+                    .and_then(|number| u32::try_from(number).ok())
+                    .map(Some)
+                    .ok_or_else(|| {
+                        LlmError::InvalidResponse(format!(
+                            "Anthropic usage.{name} is not representable as u32"
+                        ))
+                        .into()
+                    }),
+            }
+        };
+        if let Some(count) = read("input_tokens")? {
+            self.usage.prompt_tokens = Some(count);
+        }
+        if let Some(count) = read("output_tokens")? {
+            self.usage.completion_tokens = Some(count);
+        }
+        if let Some(count) = read("cache_creation_input_tokens")? {
+            self.usage.cache_creation_input_tokens = Some(count);
+        }
+        if let Some(count) = read("cache_read_input_tokens")? {
+            self.usage.cache_read_input_tokens = Some(count);
+        }
+        self.usage.total_tokens = self
+            .usage
+            .prompt_tokens
+            .zip(self.usage.completion_tokens)
+            .map(|(input, output)| input.saturating_add(output));
+        Ok(())
+    }
+
+    fn map(&mut self, mut event: serde_json::Value) -> Result<Vec<ChatChunk>> {
+        strip_anthropic_framework_extensions(&mut event);
         use serde_json::Value;
         let invalid = |text: &str| LlmError::InvalidResponse(format!("Anthropic stream {text}"));
         let kind = event
             .get("type")
             .and_then(Value::as_str)
             .ok_or_else(|| invalid("event omitted type"))?;
-        if self.finish.is_some() && !matches!(kind, "message_stop" | "ping" | "error") {
+        if self.finish.is_some()
+            && !matches!(kind, "message_delta" | "message_stop" | "ping" | "error")
+        {
             return Err(invalid("content followed message_delta").into());
         }
         let mut chunks = Vec::new();
@@ -1689,6 +2751,8 @@ impl NativeAnthropicStream {
                 let message = event
                     .get("message")
                     .ok_or_else(|| invalid("omitted message_start body"))?;
+                self.provider_response =
+                    Some(anthropic_response_metadata(message, &self.provider)?);
                 self.request_id = message
                     .get("id")
                     .and_then(Value::as_str)
@@ -1696,19 +2760,9 @@ impl NativeAnthropicStream {
                     .map(ToString::to_string)
                     .unwrap_or_else(|| super::native_message::fallback_request_id("anthropic"));
                 if let Some(usage) = message.get("usage") {
-                    self.usage.prompt_tokens = usage
-                        .get("input_tokens")
-                        .and_then(Value::as_u64)
-                        .and_then(|n| u32::try_from(n).ok());
-                    self.usage.cache_read_input_tokens = usage
-                        .get("cache_read_input_tokens")
-                        .and_then(Value::as_u64)
-                        .and_then(|n| u32::try_from(n).ok());
-                    self.usage.cache_creation_input_tokens = usage
-                        .get("cache_creation_input_tokens")
-                        .and_then(Value::as_u64)
-                        .and_then(|n| u32::try_from(n).ok());
+                    self.merge_usage(usage, false)?;
                 }
+                chunks.push(self.metadata_chunk());
             }
             "content_block_start" => {
                 let index = event
@@ -1720,86 +2774,87 @@ impl NativeAnthropicStream {
                     .get("content_block")
                     .ok_or_else(|| invalid("omitted content_block"))?
                     .clone();
-                if self.request_id.is_empty() || self.blocks.insert(index, block.clone()).is_some()
+                let decoded: ContentBlock = serde_json::from_value(block.clone())
+                    .map_err(|error| invalid(&format!("content block start invalid: {error}")))?;
+                match &decoded {
+                    ContentBlock::Text { .. } => {}
+                    ContentBlock::Thinking { .. } => {
+                        if block
+                            .get("signature")
+                            .is_some_and(|value| !value.is_string())
+                        {
+                            return Err(invalid(
+                                "thinking signature must be a string when present",
+                            )
+                            .into());
+                        }
+                    }
+                    ContentBlock::ToolUse { id, name, input } => {
+                        if id.is_empty()
+                            || name.is_empty()
+                            || !input.is_object()
+                            || self.tools.values().any(|(other, _, _)| other == id)
+                            || self.completed_tools.iter().any(|tool| tool.id == *id)
+                        {
+                            return Err(invalid("tool start has malformed identity/input").into());
+                        }
+                    }
+                    ContentBlock::RedactedThinking { data }
+                        if !data.is_empty() && !self.deepseek_dialect => {}
+                    _ => return Err(invalid("unknown or unsupported content block start").into()),
+                }
+                if self.request_id.is_empty()
+                    || !self.seen_indexes.insert(index)
+                    || self.blocks.insert(index, block.clone()).is_some()
                 {
                     return Err(invalid("block start preceded message or duplicated index").into());
                 }
-                match block.get("type").and_then(Value::as_str) {
-                    Some("text") => {
-                        let text = block
-                            .get("text")
-                            .and_then(Value::as_str)
-                            .unwrap_or_default();
+                self.has_native_content = true;
+                match decoded {
+                    ContentBlock::Text { text, .. } => {
                         if !text.is_empty() {
                             self.has_output = true;
-                            self.output_text.push_str(text);
+                            self.output_text.push_str(&text);
                             chunks.push(self.canonical(
                                 index,
                                 AssistantPhase::Unknown,
-                                text.to_string(),
-                                false,
-                                None,
-                            )?);
-                        }
-                    }
-                    Some("thinking") => {
-                        let text = block
-                            .get("thinking")
-                            .and_then(Value::as_str)
-                            .unwrap_or_default()
-                            .to_string();
-                        self.reasoning.insert(
-                            index,
-                            ReasoningBlock::Signed {
-                                thinking: text.clone(),
-                                signature: block
-                                    .get("signature")
-                                    .and_then(Value::as_str)
-                                    .unwrap_or_default()
-                                    .to_string(),
-                            },
-                        );
-                        if !text.is_empty() {
-                            chunks.push(self.canonical(
-                                index,
-                                AssistantPhase::Reasoning,
                                 text,
                                 false,
                                 None,
                             )?);
                         }
                     }
-                    Some("redacted_thinking") => {
-                        let data = block
-                            .get("data")
-                            .and_then(Value::as_str)
-                            .filter(|v| !v.is_empty())
-                            .ok_or_else(|| invalid("redacted thinking omitted data"))?;
+                    ContentBlock::Thinking {
+                        thinking,
+                        signature,
+                    } => {
                         self.reasoning.insert(
                             index,
-                            ReasoningBlock::Redacted {
-                                data: data.to_string(),
+                            ReasoningBlock::Signed {
+                                thinking: thinking.clone(),
+                                signature: signature.unwrap_or_default(),
                             },
                         );
+                        if !thinking.is_empty() {
+                            chunks.push(self.canonical(
+                                index,
+                                AssistantPhase::Reasoning,
+                                thinking,
+                                false,
+                                None,
+                            )?);
+                        }
                     }
-                    Some("tool_use") => {
-                        let id = block
-                            .get("id")
-                            .and_then(Value::as_str)
-                            .filter(|v| !v.is_empty())
-                            .ok_or_else(|| invalid("tool omitted id"))?
-                            .to_string();
-                        let name = block
-                            .get("name")
-                            .and_then(Value::as_str)
-                            .filter(|v| !v.is_empty())
-                            .ok_or_else(|| invalid("tool omitted name"))?
-                            .to_string();
+                    ContentBlock::RedactedThinking { data } => {
+                        self.reasoning
+                            .insert(index, ReasoningBlock::Redacted { data });
+                    }
+                    ContentBlock::ToolUse { id, name, .. } => {
                         self.tools
                             .insert(index, (id.clone(), name.clone(), String::new()));
                         chunks.push(anthropic_tool_chunk(index, Some(id), Some(name), None)?);
                     }
-                    _ => return Err(invalid("unknown content block type").into()),
+                    _ => return Err(invalid("unsupported decoded content block start").into()),
                 }
             }
             "content_block_delta" => {
@@ -1861,6 +2916,11 @@ impl NativeAnthropicStream {
                             self.reasoning.get_mut(&index)
                         {
                             signature.push_str(text);
+                            if let Some(fields) =
+                                self.blocks.get_mut(&index).and_then(Value::as_object_mut)
+                            {
+                                fields.insert("signature".into(), Value::String(signature.clone()));
+                            }
                         }
                     }
                     Some("input_json_delta") if block_kind == "tool_use" => {
@@ -1909,7 +2969,7 @@ impl NativeAnthropicStream {
                     self.completed_tools.push(ToolCall {
                         provider_source: Some(output_source(
                             LlmApiProtocol::Anthropic,
-                            &self.request_id,
+                            self.native_request_id().unwrap_or_default(),
                             &id,
                             u32::try_from(index).map_err(|_| invalid("tool index exceeds u32"))?,
                             None,
@@ -1928,10 +2988,19 @@ impl NativeAnthropicStream {
                     }
                     self.has_output = true;
                 } else if let Some(reasoning) = self.reasoning.remove(&index) {
-                    if matches!(&reasoning, ReasoningBlock::Signed { signature, .. } if signature.is_empty())
-                    {
-                        return Err(invalid("thinking block omitted signature").into());
-                    }
+                    let reasoning = match reasoning {
+                        ReasoningBlock::Signed {
+                            thinking,
+                            signature,
+                        } if signature.is_empty() => thinking_reasoning(
+                            &thinking,
+                            block.get("signature").and_then(Value::as_str),
+                            &self.provider,
+                            &format!("{}:content:{index}", self.request_id),
+                            self.deepseek_dialect,
+                        )?,
+                        other => other,
+                    };
                     chunks.push(self.canonical(
                         index,
                         AssistantPhase::Reasoning,
@@ -1950,30 +3019,40 @@ impl NativeAnthropicStream {
                 }
             }
             "message_delta" => {
-                self.finish = anthropic_finish_reason(
-                    event
-                        .get("delta")
-                        .and_then(|d| d.get("stop_reason"))
-                        .and_then(Value::as_str),
-                )?;
-                if let Some(n) = event
-                    .get("usage")
-                    .and_then(|u| u.get("output_tokens"))
-                    .and_then(Value::as_u64)
-                    .and_then(|n| u32::try_from(n).ok())
-                {
-                    self.usage.completion_tokens = Some(n);
+                if self.request_id.is_empty() {
+                    return Err(invalid("message_delta preceded message_start").into());
                 }
-                self.usage.total_tokens = Some(
-                    self.usage
-                        .prompt_tokens
-                        .unwrap_or(0)
-                        .saturating_add(self.usage.completion_tokens.unwrap_or(0)),
-                );
+                if let Some(usage) = event.get("usage") {
+                    self.merge_usage(usage, true)?;
+                }
+                self.update_metadata(&event)?;
+                let reason = self
+                    .provider_response
+                    .as_ref()
+                    .and_then(|metadata| metadata.stop_reason.as_ref())
+                    .and_then(Value::as_str);
+                self.finish = match reason {
+                    None => None,
+                    Some(reason) => match anthropic_finish_reason(Some(reason)) {
+                        Ok(finish) => finish,
+                        Err(_) => return Err(self.incomplete_error()?),
+                    },
+                };
+                if !self.blocks.is_empty() && self.finish.is_some() {
+                    return Err(self.incomplete_error()?);
+                }
+                chunks.push(self.metadata_chunk());
             }
             "message_stop" => {
-                if self.finish.is_none() || !self.blocks.is_empty() || !self.has_output {
-                    return Err(invalid("message_stop without completed nonempty response").into());
+                if !self.has_native_content {
+                    return Err(LlmError::EmptyResponse.into());
+                }
+                if self.finish.is_none()
+                    || !self.blocks.is_empty()
+                    || (!self.has_output
+                        && !(self.finish.as_deref() == Some("continue") && self.has_native_content))
+                {
+                    return Err(self.incomplete_error()?);
                 }
                 let message = Message {
                     content: MessageContent::Text(self.output_text.clone()),
@@ -1981,21 +3060,33 @@ impl NativeAnthropicStream {
                         .then(|| self.completed_tools.clone()),
                     ..Default::default()
                 };
-                super::native_message::validate_completion(
-                    &message,
-                    if self.finish.as_deref() == Some("continue") {
-                        Some("stop")
-                    } else {
-                        self.finish.as_deref()
-                    },
-                )?;
+                if self.finish.as_deref() != Some("continue") {
+                    super::native_message::validate_completion(&message, self.finish.as_deref())?;
+                } else if self.has_output {
+                    super::native_message::validate_completion(&message, Some("stop"))?;
+                }
+                if self.native_request_id().is_none() {
+                    return Err(invalid("completed response omitted native id").into());
+                }
                 chunks.push(ChatChunk {
-                    delta: DeltaMessage::default(),
+                    delta: DeltaMessage {
+                        provider_response: self.provider_response.clone(),
+                        ..Default::default()
+                    },
                     finish_reason: self.finish.clone(),
-                    usage: Some(self.usage.clone()),
+                    usage: self
+                        .provider_response
+                        .as_ref()
+                        .and_then(|observation| observation.usage.as_ref())
+                        .filter(|usage| usage.is_object())
+                        .map(|_| self.usage.clone()),
                 });
             }
-            "error" => return Err(invalid("reported provider error").into()),
+            "error" => {
+                // 保留流内原错误type/message及其它字段；没有真实HTTP失败码时不捏造status。
+                let detail = event.get("error").unwrap_or(&event);
+                return Err(super::client::reported_provider_error(&self.provider, detail).into());
+            }
             "ping" => {}
             _ => {}
         }
@@ -2018,15 +3109,17 @@ impl NativeAnthropicStream {
                             .map(|call| call.id.as_str())
                     })
                     .ok_or_else(|| invalid("tool source identity missing"))?;
-                tool.provider_source = Some(output_source(
-                    LlmApiProtocol::Anthropic,
-                    &self.request_id,
-                    id,
-                    tool.index,
-                    None,
-                    "tool_use",
-                    None,
-                ));
+                tool.provider_source = self.native_request_id().map(|native_id| {
+                    output_source(
+                        LlmApiProtocol::Anthropic,
+                        native_id,
+                        id,
+                        tool.index,
+                        None,
+                        "tool_use",
+                        None,
+                    )
+                });
             }
         }
         Ok(chunks)
@@ -2060,12 +3153,13 @@ fn anthropic_tool_chunk(
 fn adapt_anthropic_stream<S>(
     raw_stream: S,
     provider: String,
+    deepseek_dialect: bool,
 ) -> BoxStream<'static, Result<ChatChunk>>
 where
     S: futures::Stream<Item = Result<JsonSseEvent>> + Send + 'static,
 {
     Box::pin(async_stream::try_stream! {
-        let mut adapter = NativeAnthropicStream { provider, ..Default::default() };
+        let mut adapter = NativeAnthropicStream { provider, deepseek_dialect, ..Default::default() };
         futures::pin_mut!(raw_stream);
         while let Some(event) = raw_stream.next().await {
             match event? {
@@ -2077,6 +3171,16 @@ where
                 }
             }
         }
+        // 配置身份本身不是原生观察；已接纳的实际字段（含显式null）或内容才构成D2 partial。
+        let observed = adapter.provider_response.as_ref().is_some_and(|metadata| {
+            adapter.has_native_content
+                || metadata.request_id.is_some()
+                || metadata.model.is_some()
+                || metadata.stop_reason.is_some()
+                || metadata.stop_sequence.is_some()
+                || metadata.usage.is_some()
+        });
+        if observed { Err(adapter.incomplete_error()?)?; }
         Err(LlmError::InvalidResponse("Anthropic SSE EOF before message_stop".into()))?;
     })
 }
@@ -2150,3 +3254,19 @@ mod native_replay_tests {
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[path = "anthropic_compatibility_tests.rs"]
+mod compatibility_tests;
+
+#[cfg(test)]
+#[path = "anthropic_resume_tests.rs"]
+mod resume_tests;
+
+#[cfg(test)]
+#[path = "anthropic_metadata_tests.rs"]
+mod metadata_tests;
+
+#[cfg(test)]
+#[path = "anthropic_tool_result_default_tests.rs"]
+mod tool_result_default_tests;

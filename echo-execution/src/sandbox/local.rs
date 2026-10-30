@@ -709,7 +709,7 @@ fn ensure_local_execution_supported() -> Result<()> {
     }
 }
 
-pub(super) async fn cleanup_child_process(
+pub(crate) async fn cleanup_child_process(
     child: &mut tokio::process::Child,
     process_group_id: Option<u32>,
 ) -> std::result::Result<(), String> {

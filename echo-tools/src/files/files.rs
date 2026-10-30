@@ -142,6 +142,25 @@ impl Default for CreateFileTool {
 }
 
 impl Tool for CreateFileTool {
+    fn resolve_file_tracking_path(
+        &self,
+        path: &str,
+        _parameters: &ToolParameters,
+        ctx: &echo_core::tools::ToolContext,
+    ) -> echo_core::error::Result<(
+        std::sync::Arc<dyn echo_core::tools::filesystem::FileSystem>,
+        PathBuf,
+    )> {
+        let resolved = resolve_path(
+            self.file_system.as_ref(),
+            self.name(),
+            path,
+            &self.base_dir,
+            ctx.working_dir.as_deref(),
+        )?;
+        Ok((self.file_system.clone(), resolved))
+    }
+
     fn name(&self) -> &str {
         "create_file"
     }
@@ -266,6 +285,25 @@ impl Default for DeleteFileTool {
 }
 
 impl Tool for DeleteFileTool {
+    fn resolve_file_tracking_path(
+        &self,
+        path: &str,
+        _parameters: &ToolParameters,
+        ctx: &echo_core::tools::ToolContext,
+    ) -> echo_core::error::Result<(
+        std::sync::Arc<dyn echo_core::tools::filesystem::FileSystem>,
+        PathBuf,
+    )> {
+        let resolved = resolve_path(
+            self.file_system.as_ref(),
+            self.name(),
+            path,
+            &self.base_dir,
+            ctx.working_dir.as_deref(),
+        )?;
+        Ok((self.file_system.clone(), resolved))
+    }
+
     fn name(&self) -> &str {
         "delete_file"
     }
@@ -397,6 +435,19 @@ impl Default for ReadFileTool {
 }
 
 impl Tool for ReadFileTool {
+    fn resolve_file_tracking_path(
+        &self,
+        path: &str,
+        _parameters: &ToolParameters,
+        _ctx: &echo_core::tools::ToolContext,
+    ) -> echo_core::error::Result<(
+        std::sync::Arc<dyn echo_core::tools::filesystem::FileSystem>,
+        PathBuf,
+    )> {
+        // path已由本次成功read解析并放入effect；只绑定原provider，不再次解析/改写。
+        Ok((self.file_system.clone(), PathBuf::from(path)))
+    }
+
     fn name(&self) -> &str {
         "read_file"
     }
@@ -660,6 +711,25 @@ impl Default for WriteFileTool {
 }
 
 impl Tool for WriteFileTool {
+    fn resolve_file_tracking_path(
+        &self,
+        path: &str,
+        _parameters: &ToolParameters,
+        ctx: &echo_core::tools::ToolContext,
+    ) -> echo_core::error::Result<(
+        std::sync::Arc<dyn echo_core::tools::filesystem::FileSystem>,
+        PathBuf,
+    )> {
+        let resolved = resolve_path(
+            self.file_system.as_ref(),
+            self.name(),
+            path,
+            &self.base_dir,
+            ctx.working_dir.as_deref(),
+        )?;
+        Ok((self.file_system.clone(), resolved))
+    }
+
     fn name(&self) -> &str {
         "write_file"
     }
@@ -867,6 +937,25 @@ impl Default for AppendFileTool {
 }
 
 impl Tool for AppendFileTool {
+    fn resolve_file_tracking_path(
+        &self,
+        path: &str,
+        _parameters: &ToolParameters,
+        ctx: &echo_core::tools::ToolContext,
+    ) -> echo_core::error::Result<(
+        std::sync::Arc<dyn echo_core::tools::filesystem::FileSystem>,
+        PathBuf,
+    )> {
+        let resolved = resolve_path(
+            self.file_system.as_ref(),
+            self.name(),
+            path,
+            &self.base_dir,
+            ctx.working_dir.as_deref(),
+        )?;
+        Ok((self.file_system.clone(), resolved))
+    }
+
     fn name(&self) -> &str {
         "append_file"
     }
@@ -996,6 +1085,25 @@ impl Default for UpdateFileTool {
 }
 
 impl Tool for UpdateFileTool {
+    fn resolve_file_tracking_path(
+        &self,
+        path: &str,
+        _parameters: &ToolParameters,
+        ctx: &echo_core::tools::ToolContext,
+    ) -> echo_core::error::Result<(
+        std::sync::Arc<dyn echo_core::tools::filesystem::FileSystem>,
+        PathBuf,
+    )> {
+        let resolved = resolve_path(
+            self.file_system.as_ref(),
+            self.name(),
+            path,
+            &self.base_dir,
+            ctx.working_dir.as_deref(),
+        )?;
+        Ok((self.file_system.clone(), resolved))
+    }
+
     fn name(&self) -> &str {
         "update_file"
     }
@@ -1143,6 +1251,25 @@ impl Default for MoveFileTool {
 }
 
 impl Tool for MoveFileTool {
+    fn resolve_file_tracking_path(
+        &self,
+        path: &str,
+        _parameters: &ToolParameters,
+        ctx: &echo_core::tools::ToolContext,
+    ) -> echo_core::error::Result<(
+        std::sync::Arc<dyn echo_core::tools::filesystem::FileSystem>,
+        PathBuf,
+    )> {
+        let resolved = resolve_path(
+            self.file_system.as_ref(),
+            self.name(),
+            path,
+            &self.base_dir,
+            ctx.working_dir.as_deref(),
+        )?;
+        Ok((self.file_system.clone(), resolved))
+    }
+
     fn name(&self) -> &str {
         "move_file"
     }

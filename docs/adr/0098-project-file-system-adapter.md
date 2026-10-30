@@ -192,3 +192,42 @@ EKO additionally owns real GUI/SSH and same-name two-machine checks; fake
 providers or a terminal login cannot establish that acceptance. The website
 must mirror the finally qualified framework source, not invent a source pin for
 this uncommitted candidate.
+
+## 2026-10-30：read-before-edit沿实际owned工具提供路径事实
+
+独立源码复核发现两个相邻缺口：成功target read effect被host canonicalize重新解释，
+以及snapshot cwd与合法工具with_base_dir优先级不同。只给snapshot加provider getter
+仍会在cwd=A、tool base=B时核错目标；不能删除base_dir能力或用host同名路径补证。
+
+选择在原Tool trait提供一项同步default方法resolve_file_tracking_path，接该次最终
+parameters／ToolContext，返回原FileSystem Arc及其namespace内路径。缺能力默认明确
+Unsupported；既有文件工具只调用自身原resolve_path，ApplyPatch沿原root／action
+resolver，不建立第二路径validator或来源表。调用在原blocking模式保留资源guard并
+等待真实Join，map锁不跨await。该通用身份机制不依赖EKO的SSH／项目UI策略。
+
+成功FileRead effect路径是已经报告的事实：ReadFileTool只把它绑定自身provider，不再
+事后host／target canonicalize改写。原read-map扩为路径对应source／时间观察，未知
+source只保诊断而不能授权。native按paths_are_native明确声明同一进程namespace，
+non-native仅认同一保留Arc。30分钟TTL与每次prepare清空保持原规则，不新增registry。
+
+公开record_file_read显式接source，这是Rust签名变化；FileReadHistory是原map值的
+非序列化Rust类型别名，不是新wire DTO。ToolContext原16个accepted字段不增，三语言
+既有FileRead／FileEdit String path和ToolResult effects保留。flag关闭不调用新hook，
+成功effect即使来源证明缺失也不被抹掉或改成工具失败；guard开启时没有正确write
+proof须依原Unavailable工具拒绝通道返回，不能猜host／snapshot或新增自动重试。
+真实provider I/O错误保typed原首因，不泛吞成“未读”。
+
+验证包括host／target双向alias、source相同路径隔离、base_dir A/B正反控制、相对／
+绝对cwd、provider失败不落host、flag关闭和默认Unsupported的custom effects保真，
+以及原TTL、资源与Join；真实SSH／SDK／native资格单列。本段是当前方案说明，不
+以源码或结构校验替代同源实测与消费者复审，也不自动把新trait方法接受为语言路由。
+
+## 目录范围合同补充（2026-10-30）
+
+FileSystem 的不可变 namespace 决定读取哪一个目标；工具的显式目录根决定该目标内哪些路径属于本次读取范围，两者不能互相替代。Glob、RepoMap、CodeSearch 的 construction-time `with_base_dir` 继续作为上界；runtime `working_dir` 只作相对路径基准。Grep 保留原 base、working_dir 与 native artifact-root 的允许根集合，non-native provider 不纳入本机 artifact 根；没有任何根时保留无约束读取。
+
+入口及递归实际读取目录项均使用被选 provider 的 canonicalize，复用现有路径 resolver 与 Grep 的原根集合，不新增 validator、权限模式或注册表。根内链接和同根 alias 继续有效；明确越界时整次调用返回范围错误，不返回已累积的部分成功结果。Glob、RepoMap 保留原逻辑路径用于 matcher、显示与分页身份。该检查沿用现有 pathname API，不声称能够原子防止检查后由外部并发替换 symlink；没有新增文件描述符身份或写入机制。
+
+路径校验必须解析实际 I/O 的原路径，不在 provider canonicalize 前折叠 `symlink/..`；已展开的递归目录项不再次拼接相对 base。缺失写目标沿同 provider 解析已有祖先再重建后缀；普通无显式根仍保原 best-effort 行为。保留原忽略构建目录和悬空条目跳过规则，typed provider 故障继续传播。
+
+验收覆盖原工具API的parent path、根/child链接、合法alias、相对base、symlink/..、Grep多根及目标namespace反例，并与旧生产代码使用同一断言；既有full/Glob matcher通过票不能替代目录范围验证。不新增公开API或产品配置，现成示例及官网工具用法保持，采用时由原作者核对对应说明。

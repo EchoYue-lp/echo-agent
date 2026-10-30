@@ -409,18 +409,6 @@ impl Agent for RwLockAgentWrapper {
             .unwrap_or_default()
     }
 
-    fn set_external_context(&self, context: &crate::tools::ExternalRunContext) {
-        if let Ok(agent) = self.inner.try_read() {
-            agent.set_external_context(context);
-        }
-    }
-
-    fn clear_external_context(&self) {
-        if let Ok(agent) = self.inner.try_read() {
-            agent.clear_external_context();
-        }
-    }
-
     fn set_working_dir(&self, path: Option<std::path::PathBuf>) {
         if let Ok(agent) = self.inner.try_read() {
             agent.set_working_dir(path);

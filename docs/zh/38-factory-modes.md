@@ -113,12 +113,13 @@ Provider adapter 或应用发现精确模型事实时使用 `register_exact_mode
 `register_provider_default`、`register_exact` 和三参数 `resolve` 继续作为兼容入口，但会立即
 转换为带 provenance 的记录并进入同一 resolver。
 
-`ModelFactInputs` 是既有 `LlmConfig` 与 `ModelConfig` 的可序列化 sidecar。
-`SourcedLlmConfig` 和 `SourcedModelConfig` 保留 provider、exact-model 与有序 caller records，
-同时不改变原公开 config struct 形状。旧的 `ModelConfig::context_window` 会转换为带来源的 caller
-override。具体 client 通过 `protocol_capabilities` 发布 adapter 固有的 wire baseline，可配置
-provider 名称不能改变该协议事实；原有 `capabilities` 方法返回 freshness 解析后的 profile，
-而不是 wire baseline。
+`ModelFactInputs` 是 provider、exact-model 与有序 caller 来源事实的序列化值。当前
+`ModelConfig.facts` 直接保存这些事实；`SourcedLlmConfig` 继续服务原 client 构建与刷新。
+`ModelConfig` 新增 `facts` 字段，旧 `SourcedModelConfig { config, facts }` 侧车形状退役。
+当前 `ModelConfig::context_window` 仍转换为带原 provenance 的 caller override；清除
+直接覆盖不抹去 facts，清除 facts 不抹去直接覆盖。具体 client 通过 `protocol_capabilities`
+发布 adapter 固有 wire baseline，可配置 provider 名称不能改变该协议事实；`capabilities`
+仍返回 freshness 解析后的 profile，不是 wire baseline。
 
 通过 `ReactAgentBuilder::sourced_llm_config` 安装 LLM sidecar。每个 run snapshot 都会重新解析当前 client，并保留
 `model_fact_sources`、`ignored_model_facts`，因此过期记录不能继续隐藏在 budget、compression、thinking

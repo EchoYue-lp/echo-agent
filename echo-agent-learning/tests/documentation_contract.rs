@@ -449,22 +449,22 @@ fn public_checkpoint_docs_do_not_claim_plan_recovery() -> Result<(), Box<dyn std
     let contracts = [
         (
             "README.md",
-            "current_plan",
+            "TaskRevisionService",
             ["messages + plan", "messages + current plan"].as_slice(),
         ),
         (
             "README.zh.md",
-            "current_plan",
+            "TaskRevisionService",
             ["消息 + 计划", "消息 + 当前计划"].as_slice(),
         ),
         (
             "src/memory.rs",
-            "legacy Store round trips",
+            "运行时checkpoint不保存计划",
             ["messages + plan", "messages + current plan"].as_slice(),
         ),
         (
             "src/agent/snapshot.rs",
-            "Legacy `current_plan` values remain raw Store data",
+            "运行时检查点不承载计划文本",
             ["messages + plan", "messages + current plan"].as_slice(),
         ),
         (
@@ -478,7 +478,7 @@ fn public_checkpoint_docs_do_not_claim_plan_recovery() -> Result<(), Box<dyn std
         let content = std::fs::read_to_string(workspace_root.join(path))?;
         if !content.contains(required) {
             violations.push(format!(
-                "{path} must describe the legacy checkpoint plan field"
+                "{path} must describe the current checkpoint and task-graph ownership"
             ));
         }
         for stale in forbidden {

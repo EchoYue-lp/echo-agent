@@ -243,7 +243,7 @@ macro_rules! __chat_request_field {
         $req.max_tokens = Some($v as u32);
     };
     ($req:expr, tool_choice, $v:expr) => {
-        $req.tool_choice = Some($v.to_string());
+        $req.tool_choice = Some($v);
     };
 }
 

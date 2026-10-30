@@ -52,11 +52,13 @@ async fn settle_final_intervention(
     context: &Arc<Mutex<crate::compression::ContextManager>>,
     output: &str,
     tx: &mpsc::Sender<Result<AgentEvent>>,
+    observation: Option<&crate::llm::types::ProviderResponseMetadata>,
 ) -> Result<Option<crate::agent::AgentSteerTurnOutcome>> {
     let agent = &snap.config.agent_name;
     for intervention in &snap.tools.intervention_callbacks {
         let result = intervention.on_final_answer(agent, output).await;
         if result.cancel {
+            super::retain_provider_response_observation(context, observation).await;
             let reason = "Agent execution cancelled by intervention at final answer";
             settle_terminal_projection(snap, context, Some(reason.to_string()), tx).await?;
             snap.finalize_run(crate::trace::RunStatus::Cancelled, None, Some(reason))
@@ -70,6 +72,7 @@ async fn settle_final_intervention(
             return Ok(Some(crate::agent::AgentSteerTurnOutcome::Cancelled));
         }
         if result.block {
+            super::retain_provider_response_observation(context, observation).await;
             let reason = result
                 .block_reason
                 .unwrap_or_else(|| "blocked by intervention at final answer".to_string());
@@ -222,6 +225,7 @@ pub(crate) async fn emit_final_text(
     reasoning_content: String,
     reasoning_blocks: Vec<crate::llm::types::ReasoningBlock>,
     assistant_blocks: Vec<echo_core::agent::AssistantMessageBlock>,
+    provider_response: Option<crate::llm::types::ProviderResponseMetadata>,
     // True only when the ReAct driver already applied Output Guard before
     // schema validation and the optional Critic.
     guard_already_checked: bool,
@@ -232,6 +236,8 @@ pub(crate) async fn emit_final_text(
         match snap.check_final_answer_guard(&answer).await {
             Ok(answer) => answer,
             Err(error) => {
+                super::retain_provider_response_observation(context, provider_response.as_ref())
+                    .await;
                 return Ok(ControlFlow::Break(
                     settle_final_guard_failure(snap, context, tx, error).await?,
                 ));
@@ -239,6 +245,7 @@ pub(crate) async fn emit_final_text(
         }
     };
     if super::cancellation_requested(snap) {
+        super::retain_provider_response_observation(context, provider_response.as_ref()).await;
         return Ok(ControlFlow::Break(
             settle_cancelled_final_candidate(snap, context, tx).await?,
         ));
@@ -287,6 +294,7 @@ pub(crate) async fn emit_final_text(
     let reg = snap.tools.hook_registry.read().await.clone();
     let sr = reg.run_lifecycle_hooks(&hc).await;
     if super::cancellation_requested(snap) {
+        super::retain_provider_response_observation(context, provider_response.as_ref()).await;
         return Ok(ControlFlow::Break(
             settle_cancelled_final_candidate(snap, context, tx).await?,
         ));
@@ -311,6 +319,7 @@ pub(crate) async fn emit_final_text(
         );
         message.assistant_blocks = Some(assistant_blocks.clone());
         message.approved_assistant_blocks = Some(Vec::new());
+        message.provider_response = provider_response.clone();
         message.execution_status = Some(execution_status(
             snap,
             echo_core::agent::ExecutionStatusKind::Candidate,
@@ -334,7 +343,9 @@ pub(crate) async fn emit_final_text(
         state.stop_hook_continued = true;
         return Ok(ControlFlow::Continue(()));
     }
-    if let Some(outcome) = settle_final_intervention(snap, context, &answer, tx).await? {
+    if let Some(outcome) =
+        settle_final_intervention(snap, context, &answer, tx, provider_response.as_ref()).await?
+    {
         return Ok(ControlFlow::Break(outcome));
     }
     let final_request_id = assistant_blocks
@@ -391,6 +402,7 @@ pub(crate) async fn emit_final_text(
     )
     .await;
     if super::cancellation_requested(snap) {
+        super::retain_provider_response_observation(context, provider_response.as_ref()).await;
         return Ok(ControlFlow::Break(
             settle_cancelled_candidate(snap, context, tx, true).await?,
         ));
@@ -402,6 +414,7 @@ pub(crate) async fn emit_final_text(
     );
     message.assistant_blocks = Some(assistant_blocks);
     message.approved_assistant_blocks = Some(published_blocks.clone());
+    message.provider_response = provider_response;
     let confirmed_status = execution_status(
         snap,
         echo_core::agent::ExecutionStatusKind::Settled,
@@ -624,12 +637,19 @@ mod tests {
             .push(crate::llm::types::Message::user(
                 "durable input".to_string(),
             ));
-        let legacy = agent.capture_legacy_external_context();
+
         let trace_run_id = agent
-            .start_legacy_trace_run("durable input", &legacy)
+            .start_scoped_trace_run(
+                "durable input",
+                None,
+                agent.config().conversation_id.as_deref(),
+                None,
+                None,
+            )
             .await
             .ok_or_else(|| ReactError::Other("trace did not start".to_string()))?;
-        let snap = AgentRunSnapshot::from_agent(&agent);
+        let mut snap = AgentRunSnapshot::from_agent(&agent);
+        snap.trace_run_id = Some(trace_run_id.clone());
         let (tx, rx) = mpsc::channel(1);
         drop(rx);
 
@@ -675,10 +695,19 @@ mod tests {
         let store: Arc<InMemoryRunStore> = Arc::new(InMemoryRunStore::new());
         let mut agent = ReactAgent::new(AgentConfig::new("test-model", agent_name, "sys"));
         agent.set_run_store(store.clone());
-        let legacy = agent.capture_legacy_external_context();
-        agent.start_legacy_trace_run("test input", &legacy).await;
 
-        let snap = AgentRunSnapshot::from_agent(&agent);
+        let trace_run_id = agent
+            .start_scoped_trace_run(
+                "test input",
+                None,
+                agent.config().conversation_id.as_deref(),
+                None,
+                None,
+            )
+            .await;
+
+        let mut snap = AgentRunSnapshot::from_agent(&agent);
+        snap.trace_run_id = trace_run_id;
         (snap, store, agent)
     }
 
@@ -844,15 +873,22 @@ mod tests {
         let store = Arc::new(InMemoryRunStore::new());
         let mut agent = ReactAgent::new(AgentConfig::new("test-model", "guarded", "sys"));
         agent.set_run_store(store.clone());
-        let legacy = agent.capture_legacy_external_context();
+
         let run_id = agent
-            .start_legacy_trace_run("blocked answer", &legacy)
+            .start_scoped_trace_run(
+                "blocked answer",
+                None,
+                agent.config().conversation_id.as_deref(),
+                None,
+                None,
+            )
             .await
             .ok_or_else(|| ReactError::Other("trace did not start".into()))?;
         agent.set_guard_manager(echo_core::guard::GuardManager::from_guards(vec![Arc::new(
             BlockFinalAnswerGuard,
         )]));
-        let snapshot = AgentRunSnapshot::from_agent(&agent);
+        let mut snapshot = AgentRunSnapshot::from_agent(&agent);
+        snapshot.trace_run_id = Some(run_id.clone());
         let (tx, mut rx) = mpsc::channel::<Result<AgentEvent>>(8);
         let mut state = LoopState::new();
         let outcome = emit_final_text(
@@ -867,6 +903,7 @@ mod tests {
             String::new(),
             Vec::new(),
             Vec::new(),
+            None,
             false,
         )
         .await?;
@@ -885,9 +922,12 @@ mod tests {
                         "blocked final answer was emitted".to_string(),
                     ));
                 }
-                Ok(AgentEvent::Token(_)) => {
+                Ok(AgentEvent::AssistantMessage { block })
+                    if block.phase != crate::agent::AssistantPhase::Reasoning
+                        && !block.delta.is_empty() =>
+                {
                     return Err(ReactError::Other(
-                        "blocked final answer leaked through Token".to_string(),
+                        "blocked final answer leaked through a current assistant block".to_string(),
                     ));
                 }
                 _ => {}
@@ -908,7 +948,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn final_answer_transform_is_identical_in_token_and_terminal() -> Result<()> {
+    async fn final_answer_transform_is_identical_in_current_confirmation_and_context() -> Result<()>
+    {
         let mut agent = ReactAgent::new(AgentConfig::new("test-model", "guarded", "sys"));
         agent.set_guard_manager(echo_core::guard::GuardManager::from_guards(vec![Arc::new(
             TransformFinalAnswerGuard,
@@ -928,6 +969,7 @@ mod tests {
             String::new(),
             Vec::new(),
             Vec::new(),
+            None,
             false,
         )
         .await?;
@@ -938,8 +980,9 @@ mod tests {
         let mut delivered = Vec::new();
         while let Ok(event) = rx.try_recv() {
             match event {
-                Ok(AgentEvent::Token(text)) | Ok(AgentEvent::FinalAnswer(text)) => {
-                    delivered.push(text);
+                Ok(AgentEvent::FinalAnswer(text)) => delivered.push(text),
+                Ok(AgentEvent::AssistantMessage { block }) => {
+                    assert!(!block.delta.contains("raw answer"));
                 }
                 _ => {}
             }

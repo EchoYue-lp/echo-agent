@@ -324,6 +324,7 @@ mod tests {
                 name: "search".into(),
                 description: "Search".into(),
                 parameters: serde_json::json!({}),
+                strict: None,
             },
         }];
         let msgs = vec![Message::user("hello".to_string())];
@@ -429,6 +430,7 @@ mod tests {
                     name: "search".into(),
                     description: "Search".into(),
                     parameters: serde_json::json!({}),
+                    strict: None,
                 },
             },
             ToolDefinition {
@@ -437,6 +439,7 @@ mod tests {
                     name: "read".into(),
                     description: "Read".into(),
                     parameters: serde_json::json!({}),
+                    strict: None,
                 },
             },
         ];

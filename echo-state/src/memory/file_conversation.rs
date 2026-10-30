@@ -64,16 +64,14 @@ const DELETE_RECEIPT_RETENTION: usize = 32;
 
 /// One conversation manifest plus messages loaded from its committed log.
 ///
-/// `messages` remains deserializable for records written by the original
-/// single-file layout. The first subsequent `save_messages` call migrates such
-/// a record into the append-oriented layout.
+/// 消息只由当前generation log承载；内存中的messages不属于manifest格式。
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ConversationRecord {
     conversation: Conversation,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(skip)]
     messages: Vec<StoredMessage>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    message_log: Option<MessageLogMeta>,
+    message_log: MessageLogMeta,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     search_filter: Option<SearchFilter>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -527,17 +525,7 @@ impl FileConversationStore {
             }
             let record = Self::read_manifest_path(&path)?;
             meta.next_id = meta.next_id.max(record.conversation.id);
-            let max_message_id = record
-                .message_log
-                .as_ref()
-                .and_then(|log| log.max_message_id)
-                .or_else(|| {
-                    record
-                        .messages
-                        .iter()
-                        .filter_map(|message| message.id)
-                        .max()
-                });
+            let max_message_id = record.message_log.max_message_id;
             if let Some(message_id) = max_message_id {
                 meta.next_id = meta.next_id.max(message_id);
             }
@@ -558,10 +546,11 @@ impl FileConversationStore {
                 continue;
             }
             let record = Self::read_manifest_path(&path)?;
-            if let Some(log) = record.message_log.as_ref() {
-                let safe = safe_segment(&record.conversation.conversation_id)?;
-                referenced.insert(base.join(format!("{safe}.messages.{}.jsonl", log.generation)));
-            }
+            let safe = safe_segment(&record.conversation.conversation_id)?;
+            referenced.insert(base.join(format!(
+                "{safe}.messages.{}.jsonl",
+                record.message_log.generation
+            )));
         }
 
         let entries =
@@ -606,13 +595,6 @@ impl FileConversationStore {
         let record: ConversationRecord = serde_json::from_str(content).map_err(|e| {
             MemoryError::SerializationError(format!("parse {}: {e}", path.display()))
         })?;
-        if record.message_log.is_some() && !record.messages.is_empty() {
-            return Err(MemoryError::SerializationError(format!(
-                "manifest {} contains both embedded and logged messages",
-                path.display()
-            ))
-            .into());
-        }
         if record
             .search_filter
             .as_ref()
@@ -691,9 +673,7 @@ impl FileConversationStore {
             Some(record) => record,
             None => return Ok(None),
         };
-        if let Some(log) = record.message_log.as_ref() {
-            record.messages = self.read_message_log(conversation_id, log)?;
-        }
+        record.messages = self.read_message_log(conversation_id, &record.message_log)?;
         Ok(Some(record))
     }
 
@@ -789,11 +769,7 @@ impl FileConversationStore {
                 .into());
             }
         }
-        let mut manifest = record.clone();
-        if manifest.message_log.is_some() {
-            manifest.messages.clear();
-        }
-        let json = serde_json::to_string_pretty(&manifest)
+        let json = serde_json::to_string_pretty(record)
             .map_err(|e| MemoryError::SerializationError(format!("serialize conversation: {e}")))?;
         let path = self.conv_path(&record.conversation.conversation_id)?;
         echo_core::utils::fs::atomic_write(&path, json.as_bytes())
@@ -839,7 +815,7 @@ impl FileConversationStore {
             })
             .collect::<Result<Vec<_>>>()?;
         Ok(ConversationCache {
-            log: record.message_log.clone(),
+            log: Some(record.message_log.clone()),
             messages,
         })
     }
@@ -941,14 +917,10 @@ impl FileConversationStore {
         Ok(path)
     }
 
-    fn next_generation(log: Option<&MessageLogMeta>) -> Result<u64> {
-        match log {
-            Some(log) => log.generation.checked_add(1).ok_or_else(|| {
-                MemoryError::Unsupported("conversation message-log generation exhausted".into())
-                    .into()
-            }),
-            None => Ok(1),
-        }
+    fn next_generation(log: &MessageLogMeta) -> Result<u64> {
+        log.generation.checked_add(1).ok_or_else(|| {
+            MemoryError::Unsupported("conversation message-log generation exhausted".into()).into()
+        })
     }
 
     fn remove_replaced_log(&self, conversation_id: &str, replaced: Option<&MessageLogMeta>) {
@@ -976,7 +948,7 @@ impl FileConversationStore {
     ) -> Result<()> {
         let conversation_id = record.conversation.conversation_id.clone();
         let assigned = self.reserve_messages(&conversation_id, messages)?;
-        let generation = Self::next_generation(record.message_log.as_ref())?;
+        let generation = Self::next_generation(&record.message_log)?;
         let bytes = Self::serialize_message_log(&assigned)?;
         let path = self.message_log_path(&conversation_id, generation)?;
         echo_core::utils::fs::atomic_write(&path, &bytes).map_err(|error| {
@@ -996,14 +968,14 @@ impl FileConversationStore {
         };
         let replaced = record.message_log.clone();
         record.messages.clear();
-        record.message_log = Some(log.clone());
+        record.message_log = log.clone();
         record.search_filter = Some(SearchFilter::from_conversation(
             &record.conversation,
             &assigned,
         ));
         self.persist_current_meta()?;
         self.write_manifest(record)?;
-        self.remove_replaced_log(&conversation_id, replaced.as_ref());
+        self.remove_replaced_log(&conversation_id, Some(&replaced));
         self.authority.conversations.lock().map_err(poison)?.insert(
             conversation_id,
             ConversationCache {
@@ -1087,7 +1059,7 @@ impl FileConversationStore {
         let record = ConversationRecord {
             conversation: conversation.clone(),
             messages: Vec::new(),
-            message_log: Some(MessageLogMeta::empty()),
+            message_log: MessageLogMeta::empty(),
             search_filter: Some(SearchFilter::from_conversation(&conversation, &[])),
             projection,
         };
@@ -1288,10 +1260,7 @@ impl ConversationStore for FileConversationStore {
                             .is_none_or(|a| r.conversation.agent_type.as_deref() == Some(a))
                     })
                     .map(|r| {
-                        let message_count = r
-                            .message_log
-                            .as_ref()
-                            .map_or(r.messages.len(), |log| log.message_count);
+                        let message_count = r.message_log.message_count;
                         ConversationMeta {
                             id: r.conversation.id,
                             conversation_id: r.conversation.conversation_id,
@@ -1386,9 +1355,7 @@ impl ConversationStore for FileConversationStore {
                     .remove(&conversation_id);
                 store.remove_replaced_log(
                     &conversation_id,
-                    manifest
-                        .as_ref()
-                        .and_then(|record| record.message_log.as_ref()),
+                    manifest.as_ref().map(|record| &record.message_log),
                 );
                 Ok(())
             },
@@ -1419,11 +1386,10 @@ impl ConversationStore for FileConversationStore {
                     .map_err(poison)?
                     .remove(&conversation_id)
                 {
-                    Some(cache) if cache.log == record.message_log => cache,
+                    Some(cache) if cache.log.as_ref() == Some(&record.message_log) => cache,
                     _ => {
-                        if let Some(log) = record.message_log.as_ref() {
-                            record.messages = store.read_message_log(&conversation_id, log)?;
-                        }
+                        record.messages =
+                            store.read_message_log(&conversation_id, &record.message_log)?;
                         Self::cache_from_record(&record)?
                     }
                 };
@@ -1431,8 +1397,7 @@ impl ConversationStore for FileConversationStore {
                     .iter()
                     .map(Self::semantic_digest)
                     .collect::<Result<Vec<_>>>()?;
-                let append_suffix = record.message_log.is_some()
-                    && Self::prefix_matches(&cache, &messages, &digests);
+                let append_suffix = Self::prefix_matches(&cache, &messages, &digests);
                 record.conversation.updated_at = now_rfc3339();
 
                 let updated_cache = if append_suffix {
@@ -1451,11 +1416,7 @@ impl ConversationStore for FileConversationStore {
                         cached_suffix.push(Self::cached_message(assigned, *digest));
                     }
                     let bytes = Self::serialize_message_log(&suffix)?;
-                    let mut log = record.message_log.clone().ok_or_else(|| {
-                        MemoryError::SerializationError(
-                            "append path is missing its message-log manifest".into(),
-                        )
-                    })?;
+                    let mut log = record.message_log.clone();
                     let path = store.prepare_log_for_append(&conversation_id, &log)?;
                     if !bytes.is_empty() {
                         echo_core::utils::fs::append_existing(
@@ -1498,7 +1459,7 @@ impl ConversationStore for FileConversationStore {
                     }
                     updated_cache.messages.extend(cached_suffix);
                     updated_cache.log = Some(log.clone());
-                    record.message_log = Some(log);
+                    record.message_log = log;
                     record.search_filter = Some(search_filter);
                     record.messages.clear();
                     store.persist_current_meta()?;
@@ -1506,7 +1467,7 @@ impl ConversationStore for FileConversationStore {
                     updated_cache
                 } else {
                     let assigned = store.reserve_messages(&conversation_id, &messages)?;
-                    let generation = Self::next_generation(record.message_log.as_ref())?;
+                    let generation = Self::next_generation(&record.message_log)?;
                     let bytes = Self::serialize_message_log(&assigned)?;
                     let path = store.message_log_path(&conversation_id, generation)?;
                     echo_core::utils::fs::atomic_write(&path, &bytes).map_err(|error| {
@@ -1528,14 +1489,14 @@ impl ConversationStore for FileConversationStore {
                     };
                     let replaced = record.message_log.clone();
                     record.messages.clear();
-                    record.message_log = Some(log.clone());
+                    record.message_log = log.clone();
                     record.search_filter = Some(SearchFilter::from_conversation(
                         &record.conversation,
                         &assigned,
                     ));
                     store.persist_current_meta()?;
                     store.write_manifest(&record)?;
-                    store.remove_replaced_log(&conversation_id, replaced.as_ref());
+                    store.remove_replaced_log(&conversation_id, Some(&replaced));
                     let cached_messages = assigned
                         .iter()
                         .zip(digests.iter())
@@ -1607,12 +1568,7 @@ impl ConversationStore for FileConversationStore {
                             projection.lifecycle == ConversationProjectionLifecycle::Live
                         })
                     })
-                    .map(|record| {
-                        record
-                            .message_log
-                            .as_ref()
-                            .map_or(record.messages.len(), |log| log.message_count)
-                    })
+                    .map(|record| record.message_log.message_count)
                     .unwrap_or(0))
             },
         )
@@ -2263,10 +2219,10 @@ impl ConversationStore for FileConversationStore {
                         continue;
                     }
                     if !title_hit {
-                        if let Some(log) = record.message_log.as_ref() {
-                            record.messages = store
-                                .read_message_log(&record.conversation.conversation_id, log)?;
-                        }
+                        record.messages = store.read_message_log(
+                            &record.conversation.conversation_id,
+                            &record.message_log,
+                        )?;
                         let message_hit = record.messages.iter().any(|message| {
                             message
                                 .content
@@ -2277,10 +2233,7 @@ impl ConversationStore for FileConversationStore {
                             continue;
                         }
                     }
-                    let message_count = record
-                        .message_log
-                        .as_ref()
-                        .map_or(record.messages.len(), |log| log.message_count);
+                    let message_count = record.message_log.message_count;
                     results.push(ConversationMeta {
                         id: record.conversation.id,
                         conversation_id: record.conversation.conversation_id,
@@ -2383,17 +2336,13 @@ mod tests {
         }
     }
 
-    fn projection_message(conversation_id: &str, content: &str) -> StoredMessage {
-        StoredMessage {
-            id: None,
-            conversation_id: conversation_id.to_string(),
-            role: "user".to_string(),
-            content: Some(content.to_string()),
-            attachments_json: None,
-            tool_calls_json: None,
-            tool_result_json: None,
-            created_at: "2026-09-16T00:00:00Z".to_string(),
-        }
+    fn projection_message(conversation_id: &str, content: &str) -> Result<StoredMessage> {
+        let mut stored = crate::memory::conversation::project_message(
+            conversation_id,
+            &echo_core::llm::types::Message::user(content.to_string()),
+        )?;
+        stored.created_at = "2026-09-16T00:00:00Z".to_string();
+        Ok(stored)
     }
 
     fn projection_batch(
@@ -2411,7 +2360,7 @@ mod tests {
             contents
                 .iter()
                 .map(|content| projection_message(conversation_id, content))
-                .collect(),
+                .collect::<Result<Vec<_>>>()?,
         )
     }
 
@@ -2438,7 +2387,7 @@ mod tests {
             contents
                 .iter()
                 .map(|content| projection_message(conversation_id, content))
-                .collect(),
+                .collect::<Result<Vec<_>>>()?,
         )
     }
 
@@ -2527,7 +2476,7 @@ mod tests {
         store
             .save_messages(
                 "legacy-epoch",
-                &[projection_message("legacy-epoch", "before-conflict")],
+                &[projection_message("legacy-epoch", "before-conflict")?],
             )
             .await?;
         let legacy = store
@@ -2950,7 +2899,7 @@ mod tests {
         store
             .save_messages(
                 "managed-import",
-                &[projection_message("managed-import", "legacy")],
+                &[projection_message("managed-import", "legacy")?],
             )
             .await?;
         let adopted = store
@@ -2965,7 +2914,7 @@ mod tests {
             store
                 .save_messages(
                     "managed-import",
-                    &[projection_message("managed-import", "raw-overwrite")],
+                    &[projection_message("managed-import", "raw-overwrite")?],
                 )
                 .await
         ));
@@ -3011,7 +2960,7 @@ mod tests {
             TranscriptProjectionApplyStatus::AlreadyApplied
         );
         let mut tampered_import = import;
-        tampered_import.messages = vec![projection_message("managed-import", "tampered")];
+        tampered_import.messages = vec![projection_message("managed-import", "tampered")?];
         assert!(
             store
                 .import_managed_messages(tampered_import)
@@ -3059,7 +3008,7 @@ mod tests {
         let acquired = store
             .ensure_projection_epoch(ensure_projection_request("import-frontier", None))
             .await?;
-        let imported_message = projection_message("import-frontier", "restored");
+        let imported_message = projection_message("import-frontier", "restored")?;
         let import = ManagedConversationImport::prepare_for_generation(
             "import-frontier",
             acquired.authority.epoch,
@@ -3669,10 +3618,7 @@ mod tests {
     }
 
     fn log_meta(record: &ConversationRecord) -> TestResult<MessageLogMeta> {
-        record
-            .message_log
-            .clone()
-            .ok_or_else(|| std::io::Error::other("missing message-log metadata").into())
+        Ok(record.message_log.clone())
     }
 
     fn block_meta_writes(store: &FileConversationStore) -> TestResult<PathBuf> {
@@ -4518,41 +4464,54 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn legacy_aggregate_record_is_read_then_migrated_on_save() -> TestResult {
+    async fn current_log_manifest_rejects_aggregate_without_rewriting_and_reopens() -> TestResult {
         let base = tmp_base();
         let store = FileConversationStore::new(&base)?;
         store.create_conversation(new_conv("c1", None)).await?;
-        let mut legacy = manifest(&store, "c1")?;
-        let old_log = log_meta(&legacy)?;
-        let old_log_path = store.message_log_path("c1", old_log.generation)?;
-        let mut old_message = stored("user", "legacy");
-        old_message.id = Some(50);
-        legacy.messages = vec![old_message];
-        legacy.message_log = None;
-        legacy.search_filter = None;
-        store.write_manifest(&legacy)?;
-        std::fs::remove_file(old_log_path)?;
-        drop(store);
-
-        let reopened = FileConversationStore::new(&base)?;
-        assert_eq!(
-            reopened
-                .get_messages("c1")
-                .await?
-                .first()
-                .and_then(|message| message.content.as_deref()),
-            Some("legacy")
-        );
-        reopened
+        store
             .save_messages(
                 "c1",
-                &[stored("user", "legacy"), stored("assistant", "new")],
+                &[stored("user", "当前历史😀"), stored("assistant", "回答")],
             )
             .await?;
-        let migrated = manifest(&reopened, "c1")?;
-        assert!(migrated.messages.is_empty());
-        assert!(migrated.message_log.is_some());
-        assert_eq!(reopened.get_messages("c1").await?.len(), 2);
+        let current = manifest(&store, "c1")?;
+        let generation = current.message_log.generation;
+        let path = store.conv_path("c1")?;
+        let original = std::fs::read(&path)?;
+        let mut aggregate: serde_json::Value = serde_json::from_slice(&original)?;
+        let object = aggregate
+            .as_object_mut()
+            .ok_or_else(|| std::io::Error::other("manifest not object"))?;
+        assert!(!object.contains_key("messages"));
+        object.remove("message_log");
+        object.insert(
+            "messages".into(),
+            serde_json::to_value(store.get_messages("c1").await?)?,
+        );
+        let invalid = serde_json::to_vec(&aggregate)?;
+        echo_core::utils::fs::atomic_write(&path, &invalid)?;
+        assert!(store.get_messages("c1").await.is_err());
+        assert_eq!(std::fs::read(&path)?, invalid);
+        drop(store);
+        assert!(FileConversationStore::new(&base).is_err());
+        assert_eq!(std::fs::read(&path)?, invalid);
+        echo_core::utils::fs::atomic_write(&path, &original)?;
+        let reopened = FileConversationStore::new(&base)?;
+        let mut messages = reopened.get_messages("c1").await?;
+        assert_eq!(messages.len(), 2);
+        assert_eq!(
+            messages
+                .first()
+                .and_then(|message| message.content.as_deref()),
+            Some("当前历史😀")
+        );
+        messages.push(stored("user", "继续"));
+        reopened.save_messages("c1", &messages).await?;
+        assert_eq!(
+            manifest(&reopened, "c1")?.message_log.generation,
+            generation
+        );
+        assert_eq!(reopened.count_messages("c1").await?, 3);
         std::fs::remove_dir_all(base)?;
         Ok(())
     }

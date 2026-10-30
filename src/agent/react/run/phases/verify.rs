@@ -157,7 +157,16 @@ pub(crate) async fn verify_final_text(
     let reasoning_content = think.reasoning_buffer;
     let reasoning_blocks = think.reasoning_blocks;
     let assistant_blocks = think.assistant_blocks;
-    if !verify_answer(snap, context, &content_buffer, state.verifier_retry_count).await? {
+    let provider_response = think.provider_response;
+    let verified =
+        match verify_answer(snap, context, &content_buffer, state.verifier_retry_count).await {
+            Ok(verified) => verified,
+            Err(error) => {
+                // 此Future仍在原取消select里；durable失败结算交原driver在select外完整等待。
+                return Err(error);
+            }
+        };
+    if !verified {
         // Push the LLM's answer to context so it can see its own attempt
         let mut message = with_reasoning_content(
             Message::assistant(content_buffer),
@@ -166,6 +175,7 @@ pub(crate) async fn verify_final_text(
         );
         message.assistant_blocks = Some(assistant_blocks.clone());
         message.approved_assistant_blocks = Some(Vec::new());
+        message.provider_response = provider_response;
         context.lock().await.push(message);
         state.verifier_retry_count = state.verifier_retry_count.saturating_add(1);
         return Ok(IterOutcome::Continue);
@@ -176,6 +186,7 @@ pub(crate) async fn verify_final_text(
         reasoning_content,
         reasoning_blocks,
         assistant_blocks,
+        provider_response: provider_response.map(Box::new),
     })
 }
 

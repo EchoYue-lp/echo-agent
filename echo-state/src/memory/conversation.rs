@@ -34,6 +34,10 @@ struct MessageProjectionMeta {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     tool_call_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    tool_result_is_error: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    provider_response: Option<echo_core::llm::types::ProviderResponseMetadata>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     transcript_generation_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     transcript_ordinal: Option<u64>,
@@ -98,10 +102,28 @@ pub fn project_message(conversation_id: &str, message: &Message) -> Result<Store
         .transpose()?;
 
     let tool_result_json = if message.role == Role::Tool {
+        let tool_call_id = message
+            .tool_call_id
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| {
+                MemoryError::SerializationError(
+                    "tool message is missing its explicit tool_call_id".to_string(),
+                )
+            })?;
+        let name = message
+            .name
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| {
+                MemoryError::SerializationError(
+                    "tool message is missing its explicit name".to_string(),
+                )
+            })?;
         Some(
             serde_json::json!({
-                "tool_call_id": message.tool_call_id,
-                "name": message.name,
+                "tool_call_id": tool_call_id,
+                "name": name,
             })
             .to_string(),
         )
@@ -128,6 +150,8 @@ pub fn project_message(conversation_id: &str, message: &Message) -> Result<Store
         assistant_blocks: message.assistant_blocks.clone(),
         name: message.name.clone(),
         tool_call_id: message.tool_call_id.clone(),
+        tool_result_is_error: message.tool_result_is_error,
+        provider_response: message.provider_response.clone(),
         transcript_generation_id: None,
         transcript_ordinal: None,
     })?);
@@ -233,14 +257,17 @@ pub fn normalized_transcript_attachments(stored: &StoredMessage) -> Result<Optio
 /// Returns an error when:
 /// - `tool_calls_json` is present but cannot be deserialized as
 ///   `Vec<ToolCall>` (corruption — surfaced rather than silently dropped).
-/// - `tool_result_json` is present on a `tool`-role message but cannot be
-///   deserialized into `{ tool_call_id, name }`.
+/// - 工具结果缺失或损坏显式 `{ tool_call_id, name }`，或与canonical投影身份不同。
 /// - the role is anything other than `system`/`user`/`assistant`/`tool`.
 ///   Unknown roles are an error rather than silently demoted to `user`, so
 ///   callers can detect schema drift instead of silently losing the role.
 pub fn restore_message(stored: &StoredMessage) -> Result<Message> {
     let text = stored.content.clone().unwrap_or_default();
-    let projection = restore_projection_meta(stored)?;
+    let projection = restore_projection_meta(stored)?.ok_or_else(|| {
+        MemoryError::SerializationError(
+            "runtime message is missing current canonical projection metadata".to_string(),
+        )
+    })?;
     let mut message = match stored.role.as_str() {
         "system" => Message::system(text),
         "assistant" => {
@@ -263,23 +290,22 @@ pub fn restore_message(stored: &StoredMessage) -> Result<Message> {
         "tool" => {
             #[derive(serde::Deserialize)]
             struct ToolResultMeta {
-                tool_call_id: Option<String>,
-                name: Option<String>,
+                tool_call_id: String,
+                name: String,
             }
-            let meta = stored
-                .tool_result_json
-                .as_deref()
-                .map(serde_json::from_str::<ToolResultMeta>)
-                .transpose()?;
-            // If the projection carried the call id/name, use them; otherwise
-            // fall back to a stable placeholder so the tool message is still
-            // well-formed (downstream code keys on role==Tool, not the id).
-            let tool_call_id = meta
-                .as_ref()
-                .and_then(|value| value.tool_call_id.clone())
-                .unwrap_or_else(|| "unknown_tool_call".to_string());
-            let name = meta.and_then(|value| value.name).unwrap_or_default();
-            Message::tool_result(tool_call_id, name, text)
+            let raw = stored.tool_result_json.as_deref().ok_or_else(|| {
+                MemoryError::SerializationError(
+                    "tool result is missing explicit metadata".to_string(),
+                )
+            })?;
+            let meta: ToolResultMeta = serde_json::from_str(raw)?;
+            if meta.tool_call_id.trim().is_empty() || meta.name.trim().is_empty() {
+                return Err(MemoryError::SerializationError(
+                    "tool result has empty identity metadata".to_string(),
+                )
+                .into());
+            }
+            Message::tool_result(meta.tool_call_id, meta.name, text)
         }
         "user" => Message::user(text),
         other => {
@@ -289,32 +315,39 @@ pub fn restore_message(stored: &StoredMessage) -> Result<Message> {
             .into());
         }
     };
-    if let Some(projection) = projection {
-        if let Some(content) = projection.content {
-            message.content = content;
-        }
-        message.reasoning_content = projection.reasoning_content;
-        message.execution_status = projection.execution_status;
-        message.approved_assistant_blocks = projection.approved_assistant_blocks;
-        message.reasoning_blocks = projection.reasoning_blocks;
-        message.assistant_blocks = projection.assistant_blocks;
-        message.name = projection.name;
-        message.tool_call_id = projection.tool_call_id;
+    if message.role == Role::Tool
+        && (projection.tool_call_id != message.tool_call_id || projection.name != message.name)
+    {
+        return Err(MemoryError::SerializationError(
+            "tool result identity differs from its canonical projection".to_string(),
+        )
+        .into());
     }
+    if let Some(content) = projection.content {
+        message.content = content;
+    }
+    message.reasoning_content = projection.reasoning_content;
+    message.execution_status = projection.execution_status;
+    message.approved_assistant_blocks = projection.approved_assistant_blocks;
+    message.reasoning_blocks = projection.reasoning_blocks;
+    message.assistant_blocks = projection.assistant_blocks;
+    message.name = projection.name;
+    message.tool_call_id = projection.tool_call_id;
+    message.tool_result_is_error = projection.tool_result_is_error;
+    message.provider_response = projection.provider_response;
     Ok(message)
 }
 
 fn restore_projection_meta(stored: &StoredMessage) -> Result<Option<MessageProjectionMeta>> {
+    // 这里只分类框架自有metadata；raw/display原件不被认领，也不因此取得runtime身份。
+    // restore_message必须显式要求Some；metadata/digest查询继续保留raw记录能力。
     let Some(raw) = stored.attachments_json.as_deref() else {
         return Ok(None);
     };
-    // The application also uses attachments_json for UI metadata. Only claim
-    // payloads carrying our explicit marker; unrelated or legacy payloads are
-    // intentionally left to the application projection.
     let Ok(value) = serde_json::from_str::<serde_json::Value>(raw) else {
         return Ok(None);
     };
-    if value.get("_echo_message_version").is_none() {
+    if !value.is_object() || value.get("_echo_message_version").is_none() {
         return Ok(None);
     }
     let projection: MessageProjectionMeta = serde_json::from_value(value)?;
@@ -368,6 +401,94 @@ mod tests {
             restore_message(&stored)?.text_content().as_deref(),
             Some("hello")
         );
+        Ok(())
+    }
+    #[test]
+    fn current_tool_projection_requires_explicit_identity_without_guessing() -> Result<()> {
+        let original = Message::tool_result(
+            "call-current".to_string(),
+            "read_file".to_string(),
+            "结果😀".to_string(),
+        );
+        let row = project_message("current", &original)?;
+        assert_eq!(
+            serde_json::to_value(restore_message(&row)?)?,
+            serde_json::to_value(&original)?
+        );
+        for raw in [
+            None,
+            Some("{}"),
+            Some("{\"tool_call_id\":null,\"name\":\"read_file\"}"),
+            Some("{\"tool_call_id\":\"call-current\"}"),
+            Some("{\"tool_call_id\":\"\",\"name\":\"read_file\"}"),
+            Some("{\"tool_call_id\":\"other-call\",\"name\":\"read_file\"}"),
+        ] {
+            let mut invalid = row.clone();
+            invalid.tool_result_json = raw.map(str::to_string);
+            let before = serde_json::to_vec(&invalid)?;
+            assert!(restore_message(&invalid).is_err());
+            assert_eq!(serde_json::to_vec(&invalid)?, before);
+        }
+        let mut annotated = row.clone();
+        let mut metadata: serde_json::Value =
+            serde_json::from_str(annotated.attachments_json.as_deref().ok_or_else(|| {
+                MemoryError::SerializationError("canonical marker missing".into())
+            })?)?;
+        metadata
+            .as_object_mut()
+            .ok_or_else(|| MemoryError::SerializationError("canonical metadata not object".into()))?
+            .insert(
+                "consumer_extension".into(),
+                serde_json::json!({"nested":null}),
+            );
+        annotated.attachments_json = Some(serde_json::to_string(&metadata)?);
+        assert_eq!(
+            restore_message(&annotated)?.tool_call_id.as_deref(),
+            Some("call-current")
+        );
+        let mut invalid_message = original;
+        invalid_message.tool_call_id = None;
+        assert!(project_message("current", &invalid_message).is_err());
+        let mut corrupt = row;
+        corrupt.attachments_json = Some("{".to_string());
+        assert!(restore_message(&corrupt).is_err());
+        Ok(())
+    }
+    #[test]
+    fn current_plain_projection_requires_marker_and_keeps_display_data_immutable() -> Result<()> {
+        let row = project_message("current-plain", &Message::user("当前原件😀".to_string()))?;
+        assert_eq!(
+            restore_message(&row)?.text_content().as_deref(),
+            Some("当前原件😀")
+        );
+        for raw in [
+            None,
+            Some("{"),
+            Some("[]"),
+            Some("null"),
+            Some("{}"),
+            Some("{\"consumer_extension\":null}"),
+            Some("{\"_echo_message_version\":2}"),
+        ] {
+            let mut display_only = row.clone();
+            display_only.attachments_json = raw.map(str::to_string);
+            let before = serde_json::to_vec(&display_only)?;
+            assert!(restore_message(&display_only).is_err());
+            if raw != Some("{\"_echo_message_version\":2}") {
+                assert_eq!(transcript_projection_meta(&display_only)?, None);
+                assert_eq!(
+                    normalized_transcript_attachments(&display_only)?,
+                    display_only.attachments_json
+                );
+                let digest = transcript_projection_message_digest(&display_only)?;
+                assert_eq!(digest.len(), 64);
+                assert!(
+                    set_transcript_projection_meta(&mut display_only, "current-generation", 0)
+                        .is_err()
+                );
+            }
+            assert_eq!(serde_json::to_vec(&display_only)?, before);
+        }
         Ok(())
     }
 }
@@ -763,6 +884,281 @@ mod native_history_metadata_tests {
             assert!(set_transcript_projection_meta(&mut row, "generation", 0).is_err());
             assert_eq!(row.attachments_json, before);
         }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tool_result_observation_tests {
+    use super::*;
+
+    #[test]
+    fn file_projection_retains_false_true_and_unknown_error_observation()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        for observation in [None, Some(false), Some(true)] {
+            let mut wire = serde_json::json!({"role":"tool", "name":"inspect", "tool_call_id":"call-1", "content":[{"type":"text","text":"观察🙂"},{"type":"file","name":"保留.txt","content":"5Lit5paH"}]});
+            if let Some(is_error) = observation {
+                wire.as_object_mut()
+                    .ok_or("message is not object")?
+                    .insert("tool_result_is_error".into(), is_error.into());
+            }
+            let message: Message = serde_json::from_value(wire.clone())?;
+            let projected = project_message("public-contract", &message)?;
+            let cold: StoredMessage = serde_json::from_slice(&serde_json::to_vec(&projected)?)?;
+            let restored = restore_message(&cold)?;
+            assert_eq!(serde_json::to_value(restored)?, wire);
+            assert_eq!(
+                managed_import_projection_digests("public-contract", std::slice::from_ref(&cold))?,
+                vec![transcript_projection_message_digest(&cold)?]
+            );
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tool_result_cold_import_tests {
+    use super::*;
+    use crate::memory::FileConversationStore;
+    use echo_core::memory::conversation::{
+        ConversationStore, EnsureConversationProjectionRequest, ManagedConversationImport,
+        NewConversation, TranscriptProjectionApplyStatus,
+    };
+
+    #[tokio::test]
+    async fn tool_result_error_and_parts_survive_managed_import_then_cold_reopen()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let base =
+            std::env::temp_dir().join(format!("tool-contract-cold-{}", uuid::Uuid::new_v4()));
+        let conversation_id = "tool-contract";
+        let mut originals = Vec::new();
+        for observation in [None, Some(false), Some(true)] {
+            let mut wire = serde_json::json!({"role":"tool", "name":"inspect", "tool_call_id":format!("call-{}", originals.len()), "content":[{"type":"text","text":"保留错误观察🙂"},{"type":"image_url","image_url":{"url":"data:image/png;base64,AA=="}},{"type":"file","name":"保留.txt","content":"5Lit5paH"}]});
+            if let Some(is_error) = observation {
+                wire.as_object_mut()
+                    .ok_or("expected object")?
+                    .insert("tool_result_is_error".into(), is_error.into());
+            }
+            originals.push(wire);
+        }
+        let messages = originals
+            .iter()
+            .cloned()
+            .map(serde_json::from_value::<Message>)
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        let mut rows = project_messages(conversation_id, &messages)?;
+        for (index, row) in rows.iter_mut().enumerate() {
+            set_transcript_projection_meta(row, "tool-generation", u64::try_from(index)?)?;
+        }
+        {
+            let store = FileConversationStore::new(&base)?;
+            let authority = store
+                .ensure_projection_epoch(EnsureConversationProjectionRequest {
+                    conversation: NewConversation {
+                        conversation_id: conversation_id.into(),
+                        user_id: "test".into(),
+                        agent_type: None,
+                        title: None,
+                    },
+                    expected_tombstone_epoch: None,
+                })
+                .await?
+                .authority;
+            let request = ManagedConversationImport::prepare_for_generation(
+                conversation_id,
+                authority.epoch,
+                authority.revision,
+                "tool-generation",
+                rows,
+            )?;
+            assert_eq!(
+                store.import_managed_messages(request).await?.status,
+                TranscriptProjectionApplyStatus::Applied
+            );
+        }
+        {
+            let reopened = FileConversationStore::new(&base)?;
+            let stored = reopened.get_messages(conversation_id).await?;
+            let cold = restore_messages(&stored)?;
+            assert_eq!(serde_json::to_value(cold)?, serde_json::json!(originals));
+            assert_eq!(
+                managed_import_projection_digests(conversation_id, &stored)?.len(),
+                3
+            );
+        }
+        std::fs::remove_dir_all(base)?;
+        Ok(())
+    }
+}
+
+// 旧API可表达的JSON损失测试片段：附到echo-state/src/memory/conversation.rs。
+// batch owner将TMPDIR绑定到任务主根；不新建store权威，不声明metadata类型。
+#[cfg(test)]
+mod provider_response_cold_contract_tests {
+    use super::{
+        managed_import_projection_digests, project_messages, restore_messages,
+        set_transcript_projection_meta,
+    };
+    use crate::memory::FileConversationStore;
+    use echo_core::llm::types::Message;
+    use echo_core::memory::conversation::{
+        ConversationStore, EnsureConversationProjectionRequest, ManagedConversationImport,
+        NewConversation, TranscriptProjectionApplyStatus,
+    };
+    use serde_json::{Value, json};
+
+    #[tokio::test]
+    async fn native_response_snapshot_preserves_presence_and_usage_after_managed_cold_reopen()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory =
+            std::env::temp_dir().join(format!("response-metadata-{}", uuid::Uuid::new_v4()));
+        let conversation_id = "response-metadata";
+        let mut expected = Vec::new();
+        for stop in [None, Some(Value::Null), Some(json!("END-终止"))] {
+            let mut metadata = json!({"protocol":"anthropic", "provider":"configured-provider",
+                "request_id":"msg-source", "model":"native-model", "stop_reason":"end_turn",
+                "usage":{"input_tokens":5,"output_tokens":10,
+                    "output_tokens_details":{"reasoning_tokens":7},
+                    "nested_extension":{"counter":9007199254740993_u64,"value":null}}});
+            if let Some(value) = stop {
+                metadata
+                    .as_object_mut()
+                    .ok_or("expected metadata object")?
+                    .insert("stop_sequence".into(), value);
+            }
+            expected.push(
+                json!({"role":"assistant", "content":"耐久观察🙂", "provider_response":metadata}),
+            );
+        }
+        let messages = expected
+            .iter()
+            .cloned()
+            .map(serde_json::from_value::<Message>)
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut rows = project_messages(conversation_id, &messages)?;
+        for (offset, row) in rows.iter_mut().enumerate() {
+            set_transcript_projection_meta(row, "metadata-generation", u64::try_from(offset)?)?;
+        }
+        {
+            let store = FileConversationStore::new(&directory)?;
+            let authority = store
+                .ensure_projection_epoch(EnsureConversationProjectionRequest {
+                    conversation: NewConversation {
+                        conversation_id: conversation_id.into(),
+                        user_id: "test".into(),
+                        agent_type: None,
+                        title: None,
+                    },
+                    expected_tombstone_epoch: None,
+                })
+                .await?
+                .authority;
+            let request = ManagedConversationImport::prepare_for_generation(
+                conversation_id,
+                authority.epoch,
+                authority.revision,
+                "metadata-generation",
+                rows,
+            )?;
+            assert_eq!(
+                store.import_managed_messages(request).await?.status,
+                TranscriptProjectionApplyStatus::Applied
+            );
+        }
+        {
+            let reopened = FileConversationStore::new(&directory)?;
+            let cold_rows = reopened.get_messages(conversation_id).await?;
+            let restored = restore_messages(&cold_rows)?;
+            assert_eq!(serde_json::to_value(restored)?, json!(expected));
+            let digests = managed_import_projection_digests(conversation_id, &cold_rows)?;
+            assert_eq!(
+                digests
+                    .iter()
+                    .collect::<std::collections::HashSet<_>>()
+                    .len(),
+                3,
+                "absence, null and string change the native observation identity"
+            );
+        }
+        std::fs::remove_dir_all(directory)?;
+        Ok(())
+    }
+}
+
+// POST_API：构造器+真实File持久化合同；不是ReAct collector已实际执行或工具调用次数的证据。
+#[cfg(test)]
+mod observation_only_cold_contract_tests {
+    use super::{project_messages, restore_messages, set_transcript_projection_meta};
+    use crate::memory::FileConversationStore;
+    use echo_core::llm::types::{Message, ProviderResponseMetadata};
+    use echo_core::memory::conversation::{
+        ConversationStore, EnsureConversationProjectionRequest, ManagedConversationImport,
+        NewConversation, TranscriptProjectionApplyStatus,
+    };
+    use serde_json::json;
+
+    #[tokio::test]
+    async fn metadata_only_failure_record_keeps_filter_identity_after_managed_cold_reopen()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let metadata: ProviderResponseMetadata = serde_json::from_value(json!({
+            "protocol":"responses","provider":"configured-responses","request_id":"resp-incomplete",
+            "status":"incomplete","incomplete_details":{"reason":"max_output_tokens"},
+            "usage":{"output_tokens":10,"nested":{"counter":9007199254740993_u64,"null":null}}
+        }))?;
+        let message = Message::provider_response_observation(metadata.clone());
+        let expected = serde_json::to_value(&message)?;
+        let conversation_id = "observation-only";
+        let directory =
+            std::env::temp_dir().join(format!("observation-only-{}", uuid::Uuid::new_v4()));
+        let mut rows = project_messages(conversation_id, &[message])?;
+        let row = rows.first_mut().ok_or("observation projection missing")?;
+        set_transcript_projection_meta(row, "observation-generation", 0)?;
+        {
+            let store = FileConversationStore::new(&directory)?;
+            let authority = store
+                .ensure_projection_epoch(EnsureConversationProjectionRequest {
+                    conversation: NewConversation {
+                        conversation_id: conversation_id.into(),
+                        user_id: "test".into(),
+                        agent_type: None,
+                        title: None,
+                    },
+                    expected_tombstone_epoch: None,
+                })
+                .await?
+                .authority;
+            let request = ManagedConversationImport::prepare_for_generation(
+                conversation_id,
+                authority.epoch,
+                authority.revision,
+                "observation-generation",
+                rows,
+            )?;
+            assert_eq!(
+                store.import_managed_messages(request).await?.status,
+                TranscriptProjectionApplyStatus::Applied
+            );
+        }
+        {
+            let reopened = FileConversationStore::new(&directory)?;
+            let rows = reopened.get_messages(conversation_id).await?;
+            let messages = restore_messages(&rows)?;
+            assert_eq!(messages.len(), 1);
+            let restored = messages.first().ok_or("cold observation missing")?;
+            assert_eq!(serde_json::to_value(restored)?, expected);
+            assert!(restored.is_provider_response_observation_only());
+            assert_eq!(restored.provider_response.as_ref(), Some(&metadata));
+            assert!(restored.tool_calls.is_none());
+            assert!(restored.reasoning_blocks.is_none());
+            assert!(restored.execution_status.is_none());
+            assert!(
+                restored
+                    .approved_assistant_blocks
+                    .as_ref()
+                    .is_some_and(Vec::is_empty)
+            );
+        }
+        std::fs::remove_dir_all(directory)?;
         Ok(())
     }
 }

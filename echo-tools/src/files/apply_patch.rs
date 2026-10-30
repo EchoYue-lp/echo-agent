@@ -59,6 +59,34 @@ impl Default for ApplyPatchTool {
 }
 
 impl Tool for ApplyPatchTool {
+    fn resolve_file_tracking_path(
+        &self,
+        path: &str,
+        _parameters: &ToolParameters,
+        ctx: &echo_core::tools::ToolContext,
+    ) -> Result<(
+        std::sync::Arc<dyn echo_core::tools::filesystem::FileSystem>,
+        PathBuf,
+    )> {
+        let map_error = |error| match error {
+            PatchPreparationError::Backend(error) => error,
+            PatchPreparationError::Validation(reason) => ToolError::InvalidPath {
+                path: path.to_string(),
+                reason,
+            }
+            .into(),
+        };
+        let root = resolve_root(
+            self.file_system.as_ref(),
+            self.base_dir.as_deref(),
+            ctx.working_dir.as_deref(),
+        )
+        .map_err(map_error)?;
+        let resolved =
+            resolve_action_path(self.file_system.as_ref(), &root, path).map_err(map_error)?;
+        Ok((self.file_system.clone(), resolved))
+    }
+
     fn name(&self) -> &str {
         "apply_patch"
     }

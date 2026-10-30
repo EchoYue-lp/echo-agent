@@ -57,8 +57,14 @@ struct PrintCallback;
 
 #[callback]
 impl PrintCallback {
-    async fn on_tool_start(&self, _agent: &str, tool: &str, _args: &serde_json::Value) {
-        println!("  [回调] 工具开始: {tool}");
+    async fn on_tool_start_with_id(
+        &self,
+        _agent: &str,
+        call_id: &str,
+        tool: &str,
+        _args: &serde_json::Value,
+    ) {
+        println!("  [回调] 工具开始: {tool} call_id={call_id}");
     }
     async fn on_final_answer(&self, _agent: &str, answer: &str) {
         println!("  [回调] 最终答案: {answer}");

@@ -31,9 +31,10 @@ impl ToolRecorder {
 }
 
 impl AgentCallback for ToolRecorder {
-    fn on_tool_start<'a>(
+    fn on_tool_start_with_id<'a>(
         &'a self,
         _agent: &'a str,
+        _call_id: &'a str,
         tool: &'a str,
         _args: &'a Value,
     ) -> BoxFuture<'a, ()> {

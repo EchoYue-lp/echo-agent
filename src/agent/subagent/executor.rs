@@ -3020,11 +3020,6 @@ impl SubagentExecutor {
                             }
                         }
                     }
-                    AgentEvent::Token(_) | AgentEvent::ThinkStart | AgentEvent::ThinkEnd { .. } => {
-                        return Err(ReactError::Other(
-                            "Subagent source emitted a retired assistant projection".into(),
-                        ));
-                    }
                     AgentEvent::LlmUsage {
                         model,
                         prompt_tokens: pt,
@@ -3778,6 +3773,35 @@ mod tests {
     use echo_core::tools::{InvocationResourceGuard, ToolResult, ToolResultKind};
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
+    /// 测试 producer 自己选择状态及序号；此函数只保留同一次调用的身份。
+    fn source_status(
+        identity: &echo_core::agent::EventIdentity,
+        kind: echo_core::agent::ExecutionStatusKind,
+        sequence: u64,
+    ) -> AgentEvent {
+        AgentEvent::ExecutionStatus(echo_core::agent::ExecutionStatus {
+            adapter_generated: false,
+            execution_id: identity
+                .execution_id
+                .as_ref()
+                .map(|value| value.as_str())
+                .unwrap_or(identity.turn_id.as_str())
+                .to_string(),
+            request_id: Some(
+                identity
+                    .message_id
+                    .as_ref()
+                    .map(|value| value.as_str())
+                    .unwrap_or(identity.turn_id.as_str())
+                    .to_string(),
+            ),
+            sequence,
+            phase: echo_core::agent::AgentPhase::Thinking,
+            status: kind,
+            reason: None,
+        })
+    }
+
     /// Agent that blocks its stream until released and records steer input —
     /// used to exercise the default uplink sink against a live attempt.
     struct SteerableBlockingAgent {
@@ -3788,20 +3812,21 @@ mod tests {
     impl SteerableBlockingAgent {
         fn blocking_stream<'a>(
             release: Arc<tokio::sync::Notify>,
+            invocation: AgentInvocationContext,
         ) -> futures::future::BoxFuture<
             'a,
             Result<futures::stream::BoxStream<'a, Result<AgentEvent>>>,
         > {
-            // Resolve the stream-creation future immediately: the control
-            // plane attaches (and live steer becomes possible) only after the
-            // stream exists, so the release wait must live inside the first
-            // stream poll rather than in this future.
             Box::pin(async move {
-                Ok(Box::pin(futures::stream::once(async move {
+                let identity = echo_core::agent::EventIdentity::from_invocation(&invocation)?;
+                let source = async_stream::stream! {
+                    let _invocation = invocation;
+                    yield Ok(source_status(&identity, echo_core::agent::ExecutionStatusKind::Started, 0));
                     release.notified().await;
-                    Ok(AgentEvent::FinalAnswer("released".to_string()))
-                }))
-                    as futures::stream::BoxStream<'a, Result<AgentEvent>>)
+                    yield Ok(AgentEvent::FinalAnswer("released".to_string()));
+                    yield Ok(source_status(&identity, echo_core::agent::ExecutionStatusKind::Settled, 1));
+                };
+                Ok(source.boxed())
             })
         }
     }
@@ -3819,29 +3844,16 @@ mod tests {
             ""
         }
 
-        fn execute<'a>(&'a self, _task: &'a str) -> futures::future::BoxFuture<'a, Result<String>> {
-            Box::pin(async { Ok("done".to_string()) })
-        }
-
-        fn execute_stream<'a>(
-            &'a self,
-            _task: &'a str,
-        ) -> futures::future::BoxFuture<
-            'a,
-            Result<futures::stream::BoxStream<'a, Result<AgentEvent>>>,
-        > {
-            Self::blocking_stream(self.release.clone())
-        }
-
-        fn execute_stream_message_with_cancel<'a>(
+        fn execute_stream_message_with_invocation_context<'a>(
             &'a self,
             _message: Message,
             _cancel: CancellationToken,
+            invocation: AgentInvocationContext,
         ) -> futures::future::BoxFuture<
             'a,
             Result<futures::stream::BoxStream<'a, Result<AgentEvent>>>,
         > {
-            Self::blocking_stream(self.release.clone())
+            Self::blocking_stream(self.release.clone(), invocation)
         }
 
         fn steer_input(
@@ -4295,79 +4307,6 @@ mod tests {
         Ok(())
     }
 
-    struct LegacyAccessAgent {
-        calls: Arc<AtomicUsize>,
-    }
-    impl Agent for LegacyAccessAgent {
-        fn name(&self) -> &str {
-            "legacy-access"
-        }
-        fn model_name(&self) -> &str {
-            "test"
-        }
-        fn system_prompt(&self) -> &str {
-            ""
-        }
-        fn execute<'a>(&'a self, _: &'a str) -> futures::future::BoxFuture<'a, Result<String>> {
-            Box::pin(async move {
-                self.calls.fetch_add(1, Ordering::SeqCst);
-                Ok("legacy".to_string())
-            })
-        }
-        fn execute_stream<'a>(
-            &'a self,
-            _: &'a str,
-        ) -> futures::future::BoxFuture<
-            'a,
-            Result<futures::stream::BoxStream<'a, Result<AgentEvent>>>,
-        > {
-            Box::pin(async move {
-                self.calls.fetch_add(1, Ordering::SeqCst);
-                Ok(
-                    futures::stream::iter([Ok::<AgentEvent, ReactError>(AgentEvent::FinalAnswer(
-                        "## Summary\nlegacy".to_string(),
-                    ))])
-                    .boxed(),
-                )
-            })
-        }
-    }
-
-    #[tokio::test]
-    async fn readonly_target_with_legacy_agent_rejects_before_old_execute_while_writer_none_remains()
-    -> Result<()> {
-        for readonly in [false, true] {
-            let registry = Arc::new(SubagentRegistry::new());
-            let calls = Arc::new(AtomicUsize::new(0));
-            let mut definition = SubagentDefinition::new("legacy-access", "legacy agent");
-            if readonly {
-                definition.access_mode = super::super::types::SubagentAccessMode::ReadOnly;
-            }
-            registry
-                .register(
-                    definition,
-                    Box::new(LegacyAccessAgent {
-                        calls: Arc::clone(&calls),
-                    }),
-                )
-                .await;
-            let executor = SubagentExecutor::new(registry, SubagentExecutorConfig::default());
-            let mut request = readonly_test_request("legacy-access", ExecutionMode::Sync);
-            request.parent_context = None;
-            let result = executor.dispatch(request).await;
-            if readonly {
-                assert!(
-                    matches!(result,Err(error) if error.to_string().contains("read-only invocation constraints"))
-                );
-                assert_eq!(calls.load(Ordering::SeqCst), 0);
-            } else {
-                assert!(result.is_ok());
-                assert_eq!(calls.load(Ordering::SeqCst), 1);
-            }
-        }
-        Ok(())
-    }
-
     #[tokio::test]
     async fn readonly_target_bound_survives_retry_target_change_without_resetting_depth_or_scope()
     -> Result<()> {
@@ -4562,18 +4501,18 @@ mod tests {
             ""
         }
 
-        fn execute<'a>(&'a self, _task: &'a str) -> futures::future::BoxFuture<'a, Result<String>> {
-            Box::pin(async { Ok("done".to_string()) })
-        }
-
-        fn execute_stream<'a>(
+        fn execute_stream_message_with_invocation_context<'a>(
             &'a self,
-            _task: &'a str,
+            _message: Message,
+            _cancel: CancellationToken,
+            invocation_context: AgentInvocationContext,
         ) -> futures::future::BoxFuture<
             'a,
             Result<futures::stream::BoxStream<'a, Result<AgentEvent>>>,
         > {
-            Box::pin(async {
+            Box::pin(async move {
+                let identity =
+                    echo_core::agent::EventIdentity::from_invocation(&invocation_context)?;
                 let invocation = ToolInvocation {
                     requested_name: "requested_tool".to_string(),
                     requested_args: serde_json::json!({"value": "requested"}),
@@ -4596,6 +4535,11 @@ mod tests {
                     model_content: Vec::new(),
                 };
                 let events = vec![
+                    Ok(source_status(
+                        &identity,
+                        echo_core::agent::ExecutionStatusKind::Started,
+                        0,
+                    )),
                     Ok(AgentEvent::ToolCall {
                         call_id: "call-rich".to_string(),
                         invocation,
@@ -4606,8 +4550,16 @@ mod tests {
                         result,
                     }),
                     Ok(AgentEvent::FinalAnswer("done".to_string())),
+                    Ok(source_status(
+                        &identity,
+                        echo_core::agent::ExecutionStatusKind::Settled,
+                        1,
+                    )),
                 ];
-                Ok(Box::pin(futures::stream::iter(events))
+                Ok(Box::pin(async_stream::stream! {
+                    let _invocation = invocation_context;
+                    for event in events { yield event; }
+                })
                     as futures::stream::BoxStream<'a, Result<AgentEvent>>)
             })
         }
@@ -4626,41 +4578,37 @@ mod tests {
             ""
         }
 
-        fn execute<'a>(&'a self, _task: &'a str) -> futures::future::BoxFuture<'a, Result<String>> {
-            Box::pin(async move { std::future::pending::<Result<String>>().await })
-        }
-
-        fn execute_stream<'a>(
+        fn execute_stream_message_with_invocation_context<'a>(
             &'a self,
-            _task: &'a str,
-        ) -> futures::future::BoxFuture<
-            'a,
-            Result<futures::stream::BoxStream<'a, Result<AgentEvent>>>,
-        > {
-            Box::pin(async move {
-                let (_sender, receiver) = tokio::sync::mpsc::channel(1);
-                Ok(
-                    Box::pin(tokio_stream::wrappers::ReceiverStream::new(receiver))
-                        as futures::stream::BoxStream<'a, Result<AgentEvent>>,
-                )
-            })
-        }
-
-        fn execute_stream_with_invocation_context<'a>(
-            &'a self,
-            _task: &'a str,
+            _message: Message,
             cancel: CancellationToken,
-            _invocation: AgentInvocationContext,
+            invocation: AgentInvocationContext,
         ) -> futures::future::BoxFuture<
             'a,
             Result<futures::stream::BoxStream<'a, Result<AgentEvent>>>,
         > {
             let cancellation_seen = Arc::clone(&self.cancellation_seen);
             Box::pin(async move {
-                let (sender, receiver) = tokio::sync::mpsc::channel(1);
+                let identity = echo_core::agent::EventIdentity::from_invocation(&invocation)?;
+                let (sender, receiver) = tokio::sync::mpsc::channel(2);
                 tokio::spawn(async move {
+                    let _invocation = invocation;
+                    let _ = sender
+                        .send(Ok(source_status(
+                            &identity,
+                            echo_core::agent::ExecutionStatusKind::Started,
+                            0,
+                        )))
+                        .await;
                     cancel.cancelled().await;
                     cancellation_seen.notify_one();
+                    let _ = sender
+                        .send(Ok(source_status(
+                            &identity,
+                            echo_core::agent::ExecutionStatusKind::Cancelled,
+                            1,
+                        )))
+                        .await;
                     let _ = sender.send(Ok(AgentEvent::Cancelled)).await;
                 });
                 Ok(
@@ -4743,13 +4691,11 @@ mod tests {
             ""
         }
 
-        fn execute<'a>(&'a self, _task: &'a str) -> futures::future::BoxFuture<'a, Result<String>> {
-            Box::pin(std::future::pending())
-        }
-
-        fn execute_stream<'a>(
+        fn execute_stream_message_with_invocation_context<'a>(
             &'a self,
-            _task: &'a str,
+            _message: Message,
+            _cancel: CancellationToken,
+            invocation: AgentInvocationContext,
         ) -> futures::future::BoxFuture<
             'a,
             Result<futures::stream::BoxStream<'a, Result<AgentEvent>>>,
@@ -4758,25 +4704,26 @@ mod tests {
             let started = self.started.clone();
             let release = self.release.clone();
             Box::pin(async move {
+                let identity = echo_core::agent::EventIdentity::from_invocation(&invocation)?;
                 started.notify_one();
-                Ok(Box::pin(PendingDropStream {
+                let pending = PendingDropStream {
                     dropped,
-                    physical_eof: Box::pin(async move { release.notified().await }),
+                    physical_eof: Box::pin(async move {
+                        let _invocation = invocation;
+                        release.notified().await
+                    }),
+                };
+                // 原 PendingDropStream 仍拥有 physical EOF；不为非合作 source 猜成功。
+                Ok(futures::stream::once(async move {
+                    Ok(source_status(
+                        &identity,
+                        echo_core::agent::ExecutionStatusKind::Started,
+                        0,
+                    ))
                 })
-                    as futures::stream::BoxStream<'a, Result<AgentEvent>>)
+                .chain(pending)
+                .boxed())
             })
-        }
-
-        fn execute_stream_with_invocation_context<'a>(
-            &'a self,
-            task: &'a str,
-            _cancel: CancellationToken,
-            _invocation: AgentInvocationContext,
-        ) -> futures::future::BoxFuture<
-            'a,
-            Result<futures::stream::BoxStream<'a, Result<AgentEvent>>>,
-        > {
-            self.execute_stream(task)
         }
     }
 
@@ -4794,12 +4741,11 @@ mod tests {
         fn system_prompt(&self) -> &str {
             ""
         }
-        fn execute<'a>(&'a self, _task: &'a str) -> futures::future::BoxFuture<'a, Result<String>> {
-            Box::pin(async { Err(ReactError::Other("stream only".to_string())) })
-        }
-        fn execute_stream<'a>(
+        fn execute_stream_message_with_invocation_context<'a>(
             &'a self,
-            _task: &'a str,
+            _message: Message,
+            _cancel: CancellationToken,
+            invocation: AgentInvocationContext,
         ) -> futures::future::BoxFuture<
             'a,
             Result<futures::stream::BoxStream<'a, Result<AgentEvent>>>,
@@ -4815,7 +4761,14 @@ mod tests {
                 if self.setup {
                     return Err(unknown);
                 }
-                Ok(futures::stream::iter(vec![Ok(AgentEvent::Cancelled), Err(unknown)]).boxed())
+                let identity = echo_core::agent::EventIdentity::from_invocation(&invocation)?;
+                Ok(async_stream::stream! {
+                    let _invocation = invocation;
+                    yield Ok(source_status(&identity, echo_core::agent::ExecutionStatusKind::Started, 0));
+                    yield Ok(source_status(&identity, echo_core::agent::ExecutionStatusKind::Cancelled, 1));
+                    yield Ok(AgentEvent::Cancelled);
+                    yield Err(unknown);
+                }.boxed())
             })
         }
     }
@@ -4991,13 +4944,21 @@ mod tests {
     }
 
     impl TailCleanupAgent {
-        fn events(&self) -> Vec<Result<AgentEvent>> {
-            match self.sequence {
+        fn events(&self, identity: &echo_core::agent::EventIdentity) -> Vec<Result<AgentEvent>> {
+            let started =
+                source_status(identity, echo_core::agent::ExecutionStatusKind::Started, 0);
+            let settled =
+                source_status(identity, echo_core::agent::ExecutionStatusKind::Settled, 1);
+            let mut events = match self.sequence {
                 TailCleanupSequence::AnswerOnly => {
-                    vec![Ok(AgentEvent::FinalAnswer("done".to_string()))]
+                    vec![
+                        Ok(AgentEvent::FinalAnswer("done".to_string())),
+                        Ok(settled.clone()),
+                    ]
                 }
                 TailCleanupSequence::AnswerThenCleanupError => vec![
                     Ok(AgentEvent::FinalAnswer("done".to_string())),
+                    Ok(settled.clone()),
                     Err(ReactError::Other("cleanup close failed".to_string())),
                 ],
                 TailCleanupSequence::EarlyFailureThenCleanupError => vec![
@@ -5009,14 +4970,22 @@ mod tests {
                             "fixture terminal failure",
                         ),
                     }),
+                    Ok(source_status(
+                        identity,
+                        echo_core::agent::ExecutionStatusKind::Failed,
+                        1,
+                    )),
                     Err(ReactError::Other("cleanup close failed".to_string())),
                 ],
                 TailCleanupSequence::AnswerThenTwoCleanupErrors => vec![
                     Ok(AgentEvent::FinalAnswer("done".to_string())),
+                    Ok(settled.clone()),
                     Err(ReactError::Other("first tail cleanup failure".to_string())),
                     Err(ReactError::Other("second tail cleanup failure".to_string())),
                 ],
-            }
+            };
+            events.insert(0, Ok(started));
+            events
         }
     }
 
@@ -5033,40 +5002,22 @@ mod tests {
             ""
         }
 
-        fn execute<'a>(&'a self, _task: &'a str) -> futures::future::BoxFuture<'a, Result<String>> {
-            Box::pin(async { Ok("done".to_string()) })
-        }
-
-        fn execute_stream<'a>(
+        fn execute_stream_message_with_invocation_context<'a>(
             &'a self,
-            _task: &'a str,
-        ) -> futures::future::BoxFuture<
-            'a,
-            Result<futures::stream::BoxStream<'a, Result<AgentEvent>>>,
-        > {
-            let events = self.events();
-            Box::pin(async move {
-                Ok(Box::pin(futures::stream::iter(events))
-                    as futures::stream::BoxStream<'a, Result<AgentEvent>>)
-            })
-        }
-
-        fn execute_stream_with_invocation_context<'a>(
-            &'a self,
-            _task: &'a str,
+            _message: Message,
             _cancel: CancellationToken,
-            _invocation: AgentInvocationContext,
+            invocation: AgentInvocationContext,
         ) -> futures::future::BoxFuture<
             'a,
             Result<futures::stream::BoxStream<'a, Result<AgentEvent>>>,
         > {
-            // Expose the live source directly, like `ReactAgent`/`MockAgent`.
-            // The trait default projects the source and stops forwarding items
-            // after the terminal projection, which would hide this tail before
-            // the executor drain could observe it.
-            let events = self.events();
             Box::pin(async move {
-                Ok(Box::pin(futures::stream::iter(events))
+                let identity = echo_core::agent::EventIdentity::from_invocation(&invocation)?;
+                let events = self.events(&identity);
+                Ok(Box::pin(async_stream::stream! {
+                    let _invocation = invocation;
+                    for event in events { yield event; }
+                })
                     as futures::stream::BoxStream<'a, Result<AgentEvent>>)
             })
         }
@@ -5220,21 +5171,9 @@ mod tests {
         fn system_prompt(&self) -> &str {
             ""
         }
-        fn execute<'a>(&'a self, _task: &'a str) -> futures::future::BoxFuture<'a, Result<String>> {
-            Box::pin(async { Err(ReactError::Other("live source required".to_string())) })
-        }
-        fn execute_stream<'a>(
+        fn execute_stream_message_with_invocation_context<'a>(
             &'a self,
-            _task: &'a str,
-        ) -> futures::future::BoxFuture<
-            'a,
-            Result<futures::stream::BoxStream<'a, Result<AgentEvent>>>,
-        > {
-            Box::pin(async { Err(ReactError::Other("bound invocation required".to_string())) })
-        }
-        fn execute_stream_with_invocation_context<'a>(
-            &'a self,
-            _task: &'a str,
+            _message: Message,
             cancel: CancellationToken,
             invocation: AgentInvocationContext,
         ) -> futures::future::BoxFuture<
@@ -5249,13 +5188,20 @@ mod tests {
                     .map(|value| value.as_str())
                     .unwrap_or(identity.turn_id.as_str())
                     .to_string();
-                let execution_id = identity
-                    .execution_id
-                    .as_ref()
-                    .map(|value| value.as_str().to_string());
+                // unknown与本producer原Started/Settled使用同一个有效身份；
+                // 未显式提供execution时，source_status原本就使用同一turn_id后备。
+                let execution_id = Some(
+                    identity
+                        .execution_id
+                        .as_ref()
+                        .map(|value| value.as_str())
+                        .unwrap_or(identity.turn_id.as_str())
+                        .to_string(),
+                );
                 self.executions.fetch_add(1, Ordering::SeqCst);
                 let source = async_stream::stream! {
                     let _invocation = invocation;
+                    yield Ok(source_status(&identity, echo_core::agent::ExecutionStatusKind::Started, 0));
                     if let Err(error) = tokio::fs::write(&self.effect, b"same-source-entered").await {
                         yield Err(ReactError::Other(error.to_string())); return;
                     }
@@ -5267,6 +5213,7 @@ mod tests {
                     }
                     self.release_terminal.notified().await;
                     yield Ok(AgentEvent::FinalAnswer("same source completed".to_string()));
+                    yield Ok(source_status(&identity, echo_core::agent::ExecutionStatusKind::Settled, 1));
                     self.terminal_seen.notify_one();
                     self.barrier.release_cleanup.notified().await;
                     if let Err(error) = tokio::fs::write(&self.effect, b"same-source-closed").await {
@@ -5451,27 +5398,11 @@ mod tests {
         fn system_prompt(&self) -> &str {
             ""
         }
-        fn execute<'a>(&'a self, _task: &'a str) -> futures::future::BoxFuture<'a, Result<String>> {
-            Box::pin(async { Err(ReactError::Other("fixture requires streaming".to_string())) })
-        }
-        fn execute_stream<'a>(
+        fn execute_stream_message_with_invocation_context<'a>(
             &'a self,
-            task: &'a str,
-        ) -> futures::future::BoxFuture<
-            'a,
-            Result<futures::stream::BoxStream<'a, Result<AgentEvent>>>,
-        > {
-            self.execute_stream_with_invocation_context(
-                task,
-                CancellationToken::new(),
-                AgentInvocationContext::default(),
-            )
-        }
-        fn execute_stream_with_invocation_context<'a>(
-            &'a self,
-            _task: &'a str,
+            _message: Message,
             cancel: CancellationToken,
-            _invocation: AgentInvocationContext,
+            invocation: AgentInvocationContext,
         ) -> futures::future::BoxFuture<
             'a,
             Result<futures::stream::BoxStream<'a, Result<AgentEvent>>>,
@@ -5480,8 +5411,12 @@ mod tests {
             let failure = self.failure;
             let self_barrier = barrier.clone();
             Box::pin(async move {
+                let identity = echo_core::agent::EventIdentity::from_invocation(&invocation)?;
+                let started =
+                    source_status(&identity, echo_core::agent::ExecutionStatusKind::Started, 0);
                 let (sender, receiver) = tokio::sync::mpsc::channel(2);
                 tokio::spawn(async move {
+                    let _invocation = invocation;
                     barrier.started.notify_one();
                     let item = match failure {
                         HeldStreamFailure::Cancellation => {
@@ -5505,24 +5440,36 @@ mod tests {
                         }
                     };
                     let _ = sender.send(item).await;
+                    // 保留原 Err/Error/Cancelled 的观察顺序和首因，独立声明 source 终态。
+                    let terminal = match failure {
+                        HeldStreamFailure::Cancellation | HeldStreamFailure::CancelledEvent => {
+                            echo_core::agent::ExecutionStatusKind::Cancelled
+                        }
+                        HeldStreamFailure::RawError | HeldStreamFailure::ErrorEvent => {
+                            echo_core::agent::ExecutionStatusKind::Failed
+                        }
+                    };
+                    let _ = sender.send(Ok(source_status(&identity, terminal, 1))).await;
                     barrier.cleanup_entered.notify_one();
                     barrier.release_cleanup.notified().await;
                     barrier.physical_stopped.store(true, Ordering::SeqCst);
                     drop(sender);
                 });
                 let observed = self_barrier;
-                Ok(
-                    futures::stream::unfold((receiver, false), move |(mut receiver, seen)| {
-                        let observed = observed.clone();
-                        async move {
-                            if seen {
-                                observed.collector_waiting_eof.notify_one();
+                Ok(futures::stream::once(async move { Ok(started) })
+                    .chain(futures::stream::unfold(
+                        (receiver, false),
+                        move |(mut receiver, seen)| {
+                            let observed = observed.clone();
+                            async move {
+                                if seen {
+                                    observed.collector_waiting_eof.notify_one();
+                                }
+                                receiver.recv().await.map(|item| (item, (receiver, true)))
                             }
-                            receiver.recv().await.map(|item| (item, (receiver, true)))
-                        }
-                    })
-                    .boxed(),
-                )
+                        },
+                    ))
+                    .boxed())
             })
         }
     }
@@ -6889,6 +6836,89 @@ mod tests {
         Ok(())
     }
 
+    // dispatch/原handle.join已完成后读取全部已发布原件，不按nth取terminal、不吞lag。
+    fn settled_dispatch_envelopes(
+        receiver: &mut tokio::sync::broadcast::Receiver<
+            Arc<super::super::events::SubagentEventEnvelope>,
+        >,
+    ) -> Result<Vec<Arc<super::super::events::SubagentEventEnvelope>>> {
+        let mut observed = Vec::new();
+        loop {
+            match receiver.try_recv() {
+                Ok(envelope) => observed.push(envelope),
+                Err(tokio::sync::broadcast::error::TryRecvError::Empty) => break,
+                Err(error) => return Err(ReactError::Other(error.to_string())),
+            }
+        }
+        Ok(observed)
+    }
+
+    // 当前Mock source明确拥有Started/Final/Settled；原collector会发布一次确认正文。
+    // 校验完整事件种类、正文、唯一terminal及每一条transport因果链，不能只过滤terminal过关。
+    fn assert_native_mock_dispatch_envelopes(
+        observed: &[Arc<super::super::events::SubagentEventEnvelope>],
+        started_agent: &str,
+        completed_agent: &str,
+        expected_text: &str,
+    ) -> Result<()> {
+        let started = observed
+            .first()
+            .ok_or_else(|| ReactError::Other("dispatch start envelope missing".into()))?;
+        assert!(matches!(&started.payload.event,
+            SubagentEvent::DispatchStarted { agent, .. } if agent == started_agent));
+        let terminal = observed
+            .last()
+            .ok_or_else(|| ReactError::Other("dispatch terminal envelope missing".into()))?;
+        assert!(matches!(&terminal.payload.event,
+            SubagentEvent::DispatchCompleted { agent, outcome, .. }
+                if agent == completed_agent && outcome.status == SubagentStatus::Completed));
+        let mut texts = Vec::new();
+        let mut started_count = 0_usize;
+        let mut terminal_count = 0_usize;
+        for (index, envelope) in observed.iter().enumerate() {
+            assert_eq!(envelope.stream_id, started.stream_id);
+            assert_eq!(
+                envelope.sequence,
+                u64::try_from(index.saturating_add(1))
+                    .map_err(|error| ReactError::Other(error.to_string()))?
+            );
+            assert_eq!(envelope.conversation_id, started.conversation_id);
+            assert_eq!(envelope.message_id, started.message_id);
+            assert_eq!(envelope.run_id, started.run_id);
+            assert_eq!(envelope.execution_id, started.execution_id);
+            if index > 0 {
+                assert_eq!(envelope.parent_event_id.as_ref(), Some(&started.event_id));
+            }
+            match &envelope.payload.event {
+                SubagentEvent::DispatchStarted { agent, .. } => {
+                    started_count = started_count.saturating_add(1);
+                    assert_eq!(agent, started_agent);
+                    assert_eq!(envelope.payload.invocation.agent_name, started_agent);
+                }
+                SubagentEvent::DispatchTokenDelta { agent, content, .. } => {
+                    assert_eq!(agent, completed_agent);
+                    assert_eq!(envelope.payload.invocation.agent_name, completed_agent);
+                    texts.push(content.as_str());
+                }
+                SubagentEvent::DispatchCompleted { agent, outcome, .. } => {
+                    terminal_count = terminal_count.saturating_add(1);
+                    assert_eq!(agent, completed_agent);
+                    assert_eq!(envelope.payload.invocation.agent_name, completed_agent);
+                    assert_eq!(outcome.status, SubagentStatus::Completed);
+                }
+                other => {
+                    return Err(ReactError::Other(format!(
+                        "unexpected event in completed native Mock source: {other:?}"
+                    )));
+                }
+            }
+        }
+        assert_eq!(started_count, 1);
+        assert_eq!(terminal_count, 1);
+        assert_eq!(texts, vec![expected_text]);
+        Ok(())
+    }
+
     #[tokio::test]
     async fn dispatch_started_preserves_chat_identity() -> std::result::Result<(), String> {
         let (registry, executor) = make_executor().await;
@@ -6950,7 +6980,13 @@ mod tests {
             }
             other => return Err(format!("expected DispatchStarted, got {other:?}")),
         }
-        let started_envelope = envelopes.recv().await.map_err(|error| error.to_string())?;
+        let observed =
+            settled_dispatch_envelopes(&mut envelopes).map_err(|error| error.to_string())?;
+        assert_native_mock_dispatch_envelopes(&observed, "identity", "identity", "done")
+            .map_err(|error| error.to_string())?;
+        let started_envelope = observed
+            .first()
+            .ok_or_else(|| "identity start envelope missing".to_string())?;
         assert_eq!(started_envelope.sequence, 1);
         assert_eq!(
             started_envelope
@@ -6972,30 +7008,18 @@ mod tests {
         );
         assert_eq!(started_envelope.payload.invocation.attempt, Some(3));
         assert_eq!(started_envelope.payload.invocation.plan_revision, Some(7));
-        let terminal = envelopes.recv().await.map_err(|error| error.to_string())?;
-        assert_eq!(terminal.sequence, 2);
-        assert_eq!(
-            terminal.parent_event_id,
-            Some(started_envelope.event_id.clone())
-        );
-        assert!(matches!(
-            terminal.payload.event,
-            SubagentEvent::DispatchCompleted { .. }
-        ));
+        for envelope in &observed {
+            assert_eq!(
+                envelope.payload.invocation.task_id.as_deref(),
+                Some("task-identity")
+            );
+            assert_eq!(envelope.payload.invocation.attempt, Some(3));
+            assert_eq!(envelope.payload.invocation.plan_revision, Some(7));
+        }
         Ok(())
     }
 
-    // NOTE: a unit test for multimodal dispatch forwarding (verifying a subagent
-    // receives the Message via execute_stream_message_with_cancel) is not
-    // feasible with MockAgent — the trait-object vtable routes the default
-    // trait method rather than MockAgent's override for this added method, so
-    // the message path can't be exercised in isolation. Subagent multimodal
-    // forwarding is instead verified by: (1) the text-path dispatch tests
-    // above, (2) compile-time coverage of the DispatchRequest.message field
-    // and execute_agent_streaming branch, and (3) desktop UI manual testing of
-    // attachment-bearing complex tasks. MockAgent retains the override +
-    // message-recording fields so real agents and future test harnesses can
-    // use them.
+    // 完整 Message、history 与只读上界由 canonical_consumer_tests 及 MockAgent typed 记录实测。
 
     #[tokio::test]
     async fn test_dispatch_not_found() -> Result<()> {
@@ -7197,22 +7221,8 @@ mod tests {
             Some(SubagentEvent::DispatchCompleted { outcome, .. })
                 if outcome.status == SubagentStatus::Completed
         ));
-        let mut sequences = Vec::new();
-        let mut agents = Vec::new();
-        for _ in 0..2 {
-            let envelope = envelopes
-                .recv()
-                .await
-                .map_err(|error| ReactError::Other(error.to_string()))?;
-            sequences.push(envelope.sequence);
-            agents.push(envelope.payload.invocation.agent_name.clone());
-        }
-        assert_eq!(sequences, vec![1, 2]);
-        assert_eq!(agents, vec!["primary", "recovery"]);
-        assert!(matches!(
-            envelopes.try_recv(),
-            Err(tokio::sync::broadcast::error::TryRecvError::Empty)
-        ));
+        let observed = settled_dispatch_envelopes(&mut envelopes)?;
+        assert_native_mock_dispatch_envelopes(&observed, "primary", "recovery", "recovered")?;
         Ok(())
     }
 
@@ -7459,23 +7469,32 @@ mod tests {
         assert_ne!(first.output, second.output);
         assert_ne!(first.output, "cached");
         assert_ne!(second.output, "cached");
-        let mut sequences_by_stream = HashMap::<String, Vec<u64>>::new();
-        for _ in 0..4 {
-            let envelope = envelopes
-                .recv()
-                .await
-                .map_err(|error| ReactError::Other(error.to_string()))?;
-            sequences_by_stream
+        let observed = settled_dispatch_envelopes(&mut envelopes)?;
+        let mut by_stream =
+            HashMap::<String, Vec<Arc<super::super::events::SubagentEventEnvelope>>>::new();
+        for envelope in observed {
+            by_stream
                 .entry(envelope.stream_id.as_str().to_string())
                 .or_default()
-                .push(envelope.sequence);
+                .push(envelope);
         }
-        assert_eq!(sequences_by_stream.len(), 2);
-        assert!(
-            sequences_by_stream
-                .values()
-                .all(|sequences| sequences.as_slice() == [1, 2])
-        );
+        assert_eq!(by_stream.len(), 2);
+        let mut actual_outputs = Vec::new();
+        for stream in by_stream.values() {
+            let output: String = stream
+                .iter()
+                .filter_map(|envelope| match &envelope.payload.event {
+                    SubagentEvent::DispatchTokenDelta { content, .. } => Some(content.as_str()),
+                    _ => None,
+                })
+                .collect();
+            assert_native_mock_dispatch_envelopes(stream, "explorer", "explorer", &output)?;
+            actual_outputs.push(output);
+        }
+        let mut expected_outputs = vec![first.output, second.output];
+        actual_outputs.sort();
+        expected_outputs.sort();
+        assert_eq!(actual_outputs, expected_outputs);
         Ok(())
     }
 
@@ -7666,20 +7685,8 @@ mod tests {
 
         let result = handle.join().await?;
         assert_eq!(result.output, "team result");
-        let started = envelopes
-            .recv()
-            .await
-            .map_err(|error| ReactError::Other(error.to_string()))?;
-        let terminal = envelopes
-            .recv()
-            .await
-            .map_err(|error| ReactError::Other(error.to_string()))?;
-        assert_eq!(started.sequence, 1);
-        assert_eq!(terminal.sequence, 2);
-        assert!(matches!(
-            terminal.payload.event,
-            SubagentEvent::DispatchCompleted { .. }
-        ));
+        let observed = settled_dispatch_envelopes(&mut envelopes)?;
+        assert_native_mock_dispatch_envelopes(&observed, "tm", "tm", "team result")?;
         Ok(())
     }
 
@@ -8400,24 +8407,72 @@ mod tests {
                 result.isolation_observed
             ));
         }
-        let started = events.recv().await.map_err(|error| error.to_string())?;
-        let observed = events.recv().await.map_err(|error| error.to_string())?;
-        let completed = events.recv().await.map_err(|error| error.to_string())?;
-        if !matches!(started.as_ref(), SubagentEvent::DispatchStarted { .. }) {
-            return Err(format!("first event was not started: {started:?}"));
+        let mut observed = Vec::new();
+        loop {
+            match events.try_recv() {
+                Ok(event) => observed.push(event),
+                Err(tokio::sync::broadcast::error::TryRecvError::Empty) => break,
+                Err(error) => return Err(error.to_string()),
+            }
         }
-        if !matches!(
-            observed.as_ref(),
-            SubagentEvent::DispatchIsolationObserved { isolation, .. }
-                if isolation.as_str() == "sandbox"
-        ) {
-            return Err(format!(
-                "second event was not worktree observation: {observed:?}"
-            ));
+        assert!(matches!(
+            observed.first().map(AsRef::as_ref),
+            Some(SubagentEvent::DispatchStarted { .. })
+        ));
+        assert!(matches!(observed.last().map(AsRef::as_ref),
+            Some(SubagentEvent::DispatchCompleted { outcome, .. })
+                if outcome.status == SubagentStatus::Completed));
+        let mut worktree_index = None;
+        let mut completion_index = None;
+        let mut text = Vec::new();
+        let mut starts = 0_usize;
+        let mut completions = 0_usize;
+        for (index, event) in observed.iter().enumerate() {
+            match event.as_ref() {
+                SubagentEvent::DispatchStarted { parent, agent, .. } => {
+                    starts = starts.saturating_add(1);
+                    assert_eq!((parent.as_str(), agent.as_str()), ("parent", "writer"));
+                }
+                SubagentEvent::DispatchIsolationObserved {
+                    parent,
+                    agent,
+                    isolation,
+                    ..
+                } => {
+                    assert_eq!((parent.as_str(), agent.as_str()), ("parent", "writer"));
+                    assert_eq!(isolation.as_str(), "sandbox");
+                    assert!(
+                        worktree_index.replace(index).is_none(),
+                        "duplicate worktree observation"
+                    );
+                }
+                SubagentEvent::DispatchTokenDelta {
+                    parent,
+                    agent,
+                    content,
+                    ..
+                } => {
+                    assert_eq!((parent.as_str(), agent.as_str()), ("parent", "writer"));
+                    text.push(content.as_str());
+                }
+                SubagentEvent::DispatchCompleted { parent, agent, .. } => {
+                    completions = completions.saturating_add(1);
+                    assert_eq!((parent.as_str(), agent.as_str()), ("parent", "writer"));
+                    completion_index = Some(index);
+                }
+                other => return Err(format!("unexpected worktree source event: {other:?}")),
+            }
         }
-        if !matches!(completed.as_ref(), SubagentEvent::DispatchCompleted { .. }) {
-            return Err(format!("third event was not completed: {completed:?}"));
-        }
+        assert_eq!((starts, completions), (1, 1));
+        assert_eq!(text, vec!["done"]);
+        let worktree_index =
+            worktree_index.ok_or_else(|| "worktree observation missing".to_string())?;
+        let completion_index =
+            completion_index.ok_or_else(|| "worktree completion missing".to_string())?;
+        assert!(
+            worktree_index < completion_index,
+            "worktree must be observed before original completion"
+        );
         Ok(())
     }
 

@@ -10,6 +10,8 @@ pub type TurnSteerError = echo_core::agent::AgentSteerError;
 #[derive(Default)]
 struct ActiveTurn {
     id: String,
+    // 仅观察当前调用提供的业务run id；不保有context或resource guards。
+    run_id: Option<String>,
     incarnation: Arc<()>,
     steerable: bool,
     pending: VecDeque<TrackedSteer>,
@@ -87,6 +89,7 @@ impl TurnSteerMailbox {
         let replaced = if let Ok(mut active) = self.active.lock() {
             active.replace(ActiveTurn {
                 id: turn_id.clone(),
+                run_id: None,
                 incarnation: incarnation.clone(),
                 steerable: false,
                 pending: VecDeque::new(),
@@ -101,6 +104,23 @@ impl TurnSteerMailbox {
             turn_id,
             incarnation,
             settled: false,
+        }
+    }
+
+    pub(crate) fn current_run_id(&self) -> Option<String> {
+        self.active
+            .lock()
+            .ok()
+            .and_then(|active| active.as_ref().and_then(|turn| turn.run_id.clone()))
+    }
+
+    fn set_run_id(&self, turn_id: &str, incarnation: &Arc<()>, run_id: Option<String>) {
+        if let Ok(mut active) = self.active.lock()
+            && let Some(turn) = active.as_mut()
+            && turn.id == turn_id
+            && Arc::ptr_eq(&turn.incarnation, incarnation)
+        {
+            turn.run_id = run_id;
         }
     }
 
@@ -233,6 +253,11 @@ pub(crate) struct ActiveTurnLease {
 }
 
 impl ActiveTurnLease {
+    pub(crate) fn set_run_id(&self, run_id: Option<String>) {
+        self.mailbox
+            .set_run_id(&self.turn_id, &self.incarnation, run_id);
+    }
+
     pub(crate) fn incarnation(&self) -> Arc<()> {
         self.incarnation.clone()
     }
@@ -272,6 +297,24 @@ impl Drop for ActiveTurnLease {
 mod tests {
     use super::*;
     use std::collections::HashSet;
+
+    #[test]
+    fn run_observation_uses_exact_active_incarnation_and_never_turn_identity() {
+        let mailbox = Arc::new(TurnSteerMailbox::default());
+        assert!(mailbox.current_run_id().is_none());
+        let old = mailbox.begin("same-turn".into());
+        old.set_run_id(Some("run-a".into()));
+        assert_eq!(mailbox.current_run_id().as_deref(), Some("run-a"));
+        let next = mailbox.begin("same-turn".into());
+        assert!(mailbox.current_run_id().is_none());
+        old.set_run_id(Some("stale-run".into()));
+        drop(old);
+        assert!(mailbox.current_run_id().is_none());
+        next.set_run_id(Some("run-b".into()));
+        assert_eq!(mailbox.current_run_id().as_deref(), Some("run-b"));
+        next.settle(AgentSteerTurnOutcome::Completed);
+        assert!(mailbox.current_run_id().is_none());
+    }
 
     #[test]
     fn lease_scopes_active_turn_and_preserves_fifo() {

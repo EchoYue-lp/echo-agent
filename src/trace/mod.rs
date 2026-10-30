@@ -1884,20 +1884,39 @@ mod tests {
             "model", "agent", "system",
         ));
         agent.run_store = Some(Arc::new(InMemoryRunStore::new()));
-        let legacy = agent.capture_legacy_external_context();
+
         let previous = agent
-            .start_legacy_trace_run("previous", &legacy)
+            .start_scoped_trace_run(
+                "previous",
+                None,
+                agent.config().conversation_id.as_deref(),
+                None,
+                None,
+            )
             .await
             .ok_or_else(|| ReactError::Other("previous trace did not start".to_string()))?;
-        assert_eq!(agent.capture_current_trace_run_id(), Some(previous));
+        assert!(!previous.is_empty());
+        assert!(crate::agent::Agent::current_run_id(&agent).is_none());
 
         agent.run_store = Some(Arc::new(SaveFailingRunStore));
         agent.set_diagnostic_delivery_observer(observer.clone());
 
-        let run_id = agent.start_legacy_trace_run("input", &legacy).await;
+        let run_id = agent
+            .start_scoped_trace_run(
+                "input",
+                None,
+                agent.config().conversation_id.as_deref(),
+                None,
+                None,
+            )
+            .await;
 
         assert!(run_id.is_none());
-        assert!(agent.capture_current_trace_run_id().is_none());
+        assert!(
+            crate::agent::AgentRunSnapshot::from_agent(&agent)
+                .trace_run_id
+                .is_none()
+        );
         let failures = observer.wait_for_count(1)?;
         let failure = failures
             .first()
@@ -1924,9 +1943,14 @@ mod tests {
         agent.run_store = Some(store.clone());
         agent.set_diagnostic_delivery_observer(observer.clone());
 
-        let legacy = agent.capture_legacy_external_context();
         let run_id = agent
-            .start_legacy_trace_run("password: raw-partial-secret-value", &legacy)
+            .start_scoped_trace_run(
+                "password: raw-partial-secret-value",
+                None,
+                agent.config().conversation_id.as_deref(),
+                None,
+                None,
+            )
             .await;
 
         assert!(run_id.is_none());
@@ -1993,16 +2017,23 @@ mod tests {
         ));
         agent.run_store = Some(Arc::new(MissingRunStore));
         agent.set_diagnostic_delivery_observer(observer.clone());
-        let legacy = agent.capture_legacy_external_context();
+
         let run_id = agent
-            .start_legacy_trace_run("input", &legacy)
+            .start_scoped_trace_run(
+                "input",
+                None,
+                agent.config().conversation_id.as_deref(),
+                None,
+                None,
+            )
             .await
             .ok_or_else(|| ReactError::Other("trace start did not return an id".to_string()))?;
 
-        agent
-            .record_trace_event(RunEvent::Checkpoint { id: "one".into() })
+        let mut snapshot = crate::agent::AgentRunSnapshot::from_agent(&agent);
+        snapshot.trace_run_id = Some(run_id.clone());
+        snapshot
+            .record_event(RunEvent::Checkpoint { id: "one".into() })
             .await;
-        let snapshot = crate::agent::AgentRunSnapshot::from_agent(&agent);
         assert_eq!(snapshot.trace_run_id.as_deref(), Some(run_id.as_str()));
         snapshot
             .finalize_run(RunStatus::Completed, Some("answer"), None)
@@ -2029,15 +2060,22 @@ mod tests {
         ));
         agent.run_store = Some(Arc::new(FinalizeSaveFailingRunStore::new(1)));
         agent.set_diagnostic_delivery_observer(observer.clone());
-        let legacy = agent.capture_legacy_external_context();
+
         let run_id = agent
-            .start_legacy_trace_run("input", &legacy)
+            .start_scoped_trace_run(
+                "input",
+                None,
+                agent.config().conversation_id.as_deref(),
+                None,
+                None,
+            )
             .await
             .ok_or_else(|| ReactError::Other("trace start did not return an id".to_string()))?;
 
         // Canonical finalizer: load succeeds, the final save fails, and the
         // producer terminal stays untouched while a Finalize fact is emitted.
-        let snapshot = crate::agent::AgentRunSnapshot::from_agent(&agent);
+        let mut snapshot = crate::agent::AgentRunSnapshot::from_agent(&agent);
+        snapshot.trace_run_id = Some(run_id.clone());
         assert_eq!(snapshot.trace_run_id.as_deref(), Some(run_id.as_str()));
         snapshot
             .finalize_run(RunStatus::Completed, Some("answer"), None)
@@ -2917,9 +2955,15 @@ mod tests {
             "model", "agent", "system",
         ));
         agent.run_store = Some(Arc::new(InMemoryRunStore::new()));
-        let legacy = agent.capture_legacy_external_context();
+
         let run_id = agent
-            .start_legacy_trace_run("password: raw-secret-input-value", &legacy)
+            .start_scoped_trace_run(
+                "password: raw-secret-input-value",
+                None,
+                agent.config().conversation_id.as_deref(),
+                None,
+                None,
+            )
             .await
             .ok_or_else(|| ReactError::Other("trace start did not return an id".to_string()))?;
         let stored = agent

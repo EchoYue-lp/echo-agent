@@ -196,7 +196,7 @@ impl ReactAgentBuilder {
             .build_strict()
     }
 
-    /// Create a standard Agent (tools + chain-of-thought enabled)
+    /// 创建启用工具的标准Agent；原生reasoning取决于模型能力与调用配置。
     ///
     /// Suitable for most Agent scenarios.
     pub fn standard(model: &str, name: &str, system_prompt: &str) -> Result<ReactAgent> {

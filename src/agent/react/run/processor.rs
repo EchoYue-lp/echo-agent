@@ -1,8 +1,7 @@
-//! SSE chunk processing — convert raw LLM streaming chunks into AgentEvent sequences.
+//! 当前SSE碎片累积：复用原文本/推理/工具来源，不再产生旧事件副本。
 //!
 //! These are static methods (no `&self`) — pure functions that transform chunk data.
 
-use crate::agent::AgentEvent;
 use crate::llm::types::{ChatCompletionChunk, FunctionCall, ToolCall as LlmToolCall};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
@@ -16,60 +15,26 @@ pub(crate) type ToolCallFragment = (
 );
 pub(crate) type ToolCallFragments = HashMap<u32, ToolCallFragment>;
 
-/// Process streaming response chunk, collect content and return events.
-///
-/// `in_reasoning` tracks whether reasoning_content is being output (Qwen3/DeepSeek thinking process).
-/// ThinkStart is emitted when reasoning_content is first encountered,
-/// ThinkEnd is emitted when content or tool_calls is first encountered after reasoning ends.
-#[allow(clippy::type_complexity)]
+/// 仅累积原provider的正文、推理与工具碎片；当前原生块由同一模型步骤发布。
+/// 不再生成Token/Think副本，也不拥有阶段或执行终态。
 pub(crate) fn process_stream_chunk(
     chunk: &ChatCompletionChunk,
     content_buffer: &mut String,
     reasoning_buffer: &mut String,
     tool_call_map: &mut ToolCallFragments,
-    in_reasoning: &mut bool,
-    emit_content_tokens: bool,
-) -> Vec<AgentEvent> {
-    let mut events = Vec::new();
-
+) {
     if let Some(choice) = chunk.choices.first() {
-        // Handle reasoning_content (Qwen3/DeepSeek thinking process)
         if let Some(reasoning) = &choice.delta.reasoning_content
             && !reasoning.is_empty()
         {
             reasoning_buffer.push_str(reasoning);
-            if !*in_reasoning {
-                *in_reasoning = true;
-                events.push(AgentEvent::ThinkStart);
-            }
-            events.push(AgentEvent::Token(reasoning.clone()));
         }
-
-        // When content is first encountered after reasoning ends, close the thinking block
         if let Some(content) = &choice.delta.content
             && !content.is_empty()
         {
-            if *in_reasoning {
-                *in_reasoning = false;
-                events.push(AgentEvent::ThinkEnd {
-                    prompt_tokens: 0,
-                    completion_tokens: 0,
-                });
-            }
             content_buffer.push_str(content);
-            if emit_content_tokens {
-                events.push(AgentEvent::Token(content.clone()));
-            }
         }
-
         if let Some(delta_calls) = &choice.delta.tool_calls {
-            if *in_reasoning {
-                *in_reasoning = false;
-                events.push(AgentEvent::ThinkEnd {
-                    prompt_tokens: 0,
-                    completion_tokens: 0,
-                });
-            }
             for dc in delta_calls {
                 let entry = tool_call_map
                     .entry(dc.index)
@@ -95,8 +60,6 @@ pub(crate) fn process_stream_chunk(
             }
         }
     }
-
-    events
 }
 
 /// Parse streaming tool-call arguments, tolerating the trailing-character
@@ -319,19 +282,10 @@ mod tests {
         let mut content = String::new();
         let mut reasoning = String::new();
         let mut calls = HashMap::new();
-        let mut in_reasoning = false;
 
-        let _events = process_stream_chunk(
-            &chunk,
-            &mut content,
-            &mut reasoning,
-            &mut calls,
-            &mut in_reasoning,
-            false,
-        );
+        process_stream_chunk(&chunk, &mut content, &mut reasoning, &mut calls);
 
         assert_eq!(reasoning, "先分析，再调用工具。");
-        assert!(in_reasoning);
         Ok(())
     }
 
@@ -350,7 +304,6 @@ mod tests {
         let mut content = String::new();
         let mut reasoning = String::new();
         let mut calls = HashMap::new();
-        let mut in_reasoning = false;
         for delta in [
             serde_json::json!({"tool_calls":[{"index":3,"id":"call-original","provider_source":source,"function":{"name":"read_file","arguments":"{"}}]}),
             serde_json::json!({"tool_calls":[{"index":3,"function":{"arguments":"}"}}]}),
@@ -358,14 +311,7 @@ mod tests {
             let chunk: ChatCompletionChunk = serde_json::from_value(serde_json::json!({
                 "choices":[{"index":0,"delta":delta}]
             }))?;
-            let _ = process_stream_chunk(
-                &chunk,
-                &mut content,
-                &mut reasoning,
-                &mut calls,
-                &mut in_reasoning,
-                false,
-            );
+            process_stream_chunk(&chunk, &mut content, &mut reasoning, &mut calls);
         }
         let (tool_calls, steps) = build_tool_calls_from_map(&calls)?;
         let call = tool_calls.first().ok_or("assembled tool call missing")?;

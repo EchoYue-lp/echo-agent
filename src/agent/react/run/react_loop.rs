@@ -19,7 +19,7 @@ impl ReactAgent {
         message: &str,
         mode: StreamMode,
     ) -> Result<String> {
-        // 同一流入口在排队前捕获既有legacy绑定；这里不再持有第二份execution锁/owner。
+        // 同一流入口在排队前捕获当前 invocation snapshot；这里不再持有第二份 execution 锁/owner。
         let mut stream = self.run_stream_entry(message, mode, None).await?;
         let mut answer = None;
         let mut first_error = None;
@@ -73,7 +73,6 @@ impl ReactAgent {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent::Agent;
     use crate::skills::hooks::{
         HookAction, HookEvent, HookRegistry, HookResult, HookRule, HooksDefinition,
     };
@@ -81,6 +80,17 @@ mod tests {
     use std::future::Future;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct QueuedFiniteSink;
+    #[async_trait::async_trait]
+    impl crate::runtime::EventSink for QueuedFiniteSink {
+        async fn on_event(
+            &self,
+            _event: echo_core::agent::EventEnvelope,
+        ) -> Result<crate::runtime::SinkControl> {
+            Ok(crate::runtime::SinkControl::Continue)
+        }
+    }
 
     struct QueuedGuardDrop(Arc<AtomicUsize>);
 
@@ -129,7 +139,7 @@ mod tests {
         }
     }
 
-    fn legacy_guard_context(
+    fn invocation_guard_context(
         label: &str,
         drops: Arc<AtomicUsize>,
     ) -> echo_core::tools::ExternalRunContext {
@@ -152,7 +162,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn queued_nonstream_invocations_keep_captured_resource_guards_isolated() -> Result<()> {
+    async fn queued_finite_invocations_keep_captured_resource_guards_isolated() -> Result<()> {
         let llm = Arc::new(MockLlmClient::new().with_responses(["first", "second"]));
         let trace_store = Arc::new(crate::trace::InMemoryRunStore::new());
         let mut agent = crate::agent::ReactAgentBuilder::new()
@@ -167,12 +177,30 @@ mod tests {
         let first_drops = Arc::new(AtomicUsize::new(0));
         let second_drops = Arc::new(AtomicUsize::new(0));
 
-        let first_context = legacy_guard_context("queued-first", Arc::clone(&first_drops));
-        agent.set_external_context(&first_context);
-        drop(first_context);
+        let first_context = invocation_guard_context("queued-first", Arc::clone(&first_drops));
+        let first_identity =
+            echo_core::agent::EventIdentity::from_runtime_context(Some(&first_context))?;
         let mut first = Box::pin({
             let agent = Arc::clone(&agent);
-            async move { agent.run_react_loop("first").await }
+            async move {
+                crate::runtime::AgentTurnDriver
+                    .drive(
+                        agent.as_ref(),
+                        crate::runtime::TurnRequest::from_message(
+                            first_identity,
+                            Message::user("first".into()),
+                        )
+                        .mode(crate::runtime::TurnMode::Chat)
+                        .invocation(
+                            echo_core::agent::AgentInvocationContext {
+                                runtime: Some(first_context),
+                                ..Default::default()
+                            },
+                        ),
+                        &QueuedFiniteSink,
+                    )
+                    .await
+            }
         });
         std::future::poll_fn(|context| match first.as_mut().poll(context) {
             std::task::Poll::Pending => std::task::Poll::Ready(Ok(())),
@@ -181,15 +209,32 @@ mod tests {
             ))),
         })
         .await?;
-        agent.clear_external_context();
         assert_eq!(first_drops.load(Ordering::SeqCst), 0);
 
-        let second_context = legacy_guard_context("queued-second", Arc::clone(&second_drops));
-        agent.set_external_context(&second_context);
-        drop(second_context);
+        let second_context = invocation_guard_context("queued-second", Arc::clone(&second_drops));
+        let second_identity =
+            echo_core::agent::EventIdentity::from_runtime_context(Some(&second_context))?;
         let mut second = Box::pin({
             let agent = Arc::clone(&agent);
-            async move { agent.run_react_loop("second").await }
+            async move {
+                crate::runtime::AgentTurnDriver
+                    .drive(
+                        agent.as_ref(),
+                        crate::runtime::TurnRequest::from_message(
+                            second_identity,
+                            Message::user("second".into()),
+                        )
+                        .mode(crate::runtime::TurnMode::Chat)
+                        .invocation(
+                            echo_core::agent::AgentInvocationContext {
+                                runtime: Some(second_context),
+                                ..Default::default()
+                            },
+                        ),
+                        &QueuedFiniteSink,
+                    )
+                    .await
+            }
         });
         std::future::poll_fn(|context| match second.as_mut().poll(context) {
             std::task::Poll::Pending => std::task::Poll::Ready(Ok(())),
@@ -198,15 +243,23 @@ mod tests {
             ))),
         })
         .await?;
-        agent.clear_external_context();
         assert_eq!(second_drops.load(Ordering::SeqCst), 0);
         drop(queue_barrier);
         let first = tokio::spawn(first);
         let second = tokio::spawn(second);
 
-        first
+        let first_receipt = first
             .await
             .map_err(|error| ReactError::Other(format!("first queued run failed: {error}")))??;
+        assert_eq!(
+            first_receipt.outcome,
+            crate::runtime::TurnOutcome::Completed
+        );
+        assert_eq!(first_receipt.final_answer.as_deref(), Some("first"));
+        assert_eq!(
+            first_receipt.delivery,
+            crate::runtime::TurnDeliveryOutcome::Delivered
+        );
         tokio::time::timeout(
             std::time::Duration::from_secs(2),
             second_barrier.second_started.notified(),
@@ -216,9 +269,18 @@ mod tests {
         assert_eq!(first_drops.load(Ordering::SeqCst), 1);
         assert_eq!(second_drops.load(Ordering::SeqCst), 0);
         second_barrier.release_second.notify_one();
-        second
+        let second_receipt = second
             .await
             .map_err(|error| ReactError::Other(format!("second queued run failed: {error}")))??;
+        assert_eq!(
+            second_receipt.outcome,
+            crate::runtime::TurnOutcome::Completed
+        );
+        assert_eq!(second_receipt.final_answer.as_deref(), Some("second"));
+        assert_eq!(
+            second_receipt.delivery,
+            crate::runtime::TurnDeliveryOutcome::Delivered
+        );
         assert_eq!(second_drops.load(Ordering::SeqCst), 1);
         let projection_contexts = second_barrier
             .contexts
@@ -301,11 +363,6 @@ mod tests {
             "system",
         ));
         agent.set_hook_registry(Arc::new(tokio::sync::RwLock::new(registry)));
-        *agent
-            .current_run_id
-            .lock()
-            .map_err(|_| ReactError::Other("run identity lock poisoned".to_string()))? =
-            Some("hook-block-turn".to_string());
         let agent = Arc::new(agent);
         let running = {
             let agent = agent.clone();
@@ -315,12 +372,12 @@ mod tests {
         tokio::time::timeout(std::time::Duration::from_secs(1), hook_entered.notified())
             .await
             .map_err(|_| ReactError::Other("UserPromptSubmit hook did not start".to_string()))?;
+        // String 入口不注入 runtime ID；直接向原 active mailbox 入队，
+        // receipt 返回的 turn ID 才是本次真实 owner，不把 current_run_id 当 turn_id。
         let mut receipt = agent
-            .steer_input_tracked(
-                Some("hook-block-turn"),
-                Message::user("must not be consumed".to_string()),
-            )
+            .steer_input_tracked(None, Message::user("must not be consumed".to_string()))
             .map_err(|error| ReactError::Other(error.to_string()))?;
+        assert!(!receipt.turn_id().is_empty());
         assert_eq!(receipt.state(), crate::agent::AgentSteerState::Accepted);
         release_hook.notify_one();
 

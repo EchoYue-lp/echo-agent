@@ -267,7 +267,8 @@ Agent 或 Task 终态的第二权威。见 [ADR 0060](../adr/0060-task-execution
 
 ## 退役后生命周期边界
 
-旧LSP声明不再启动manager；原prepare仍持有同generation的完整冻结文本、identity与诊断，
-缓存不重读，失效后重建。Skill/Hook/MCP/Subagent的publication、rollback和cleanup receipt
+旧LSP文件保留为用户原件；当前prepare不probe、读取、冻结、hash或缓存它，不产生专属诊断，
+其内容不参与generation身份，也不恢复语言服务；见[ADR0105](../adr/0105-current-config-and-plugin-inputs.md)。
+通用当前subagent文档冻结继续保留，Skill/Hook/MCP/Subagent的publication、rollback和cleanup receipt
 不因删除组件而丢失。原生reasoning签名、普通assistant phase、最终校验、Stop继续、持久化
 与物理结算仍沿原运行owner；运行时结束不等于EKO TaskRun／Goal完成。

@@ -103,8 +103,11 @@ cargo clippy --workspace --lib --bins --all-features --locked -- \
   -D clippy::panic \
   -D clippy::unreachable
 cargo test --workspace --all-targets --all-features --locked
+cargo test -p echo-agent-learning --doc --all-features --locked
 cargo check --workspace --lib --no-default-features --locked
 ```
+
+`--all-targets` 不执行 doctest。上面的独立命令会编译 `echo-agent-learning` 的 `no_run` 入门片段，不调用真实模型；CI 的 learning 分组执行默认 feature 的 `--doc --locked`，不替代本地全 feature 的合并门禁。
 
 等价快捷方式:`./scripts/verify.sh`(同一组命令,本地门禁入口)。
 

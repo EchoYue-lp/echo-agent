@@ -16,7 +16,7 @@ pub mod verifier;
 pub use echo_core::compression::{
     CanonicalContext, CompressionCheckpoint, CompressionInput, CompressionOutput,
     ContextCompressor, ContextProjection, PreModelContextProjector, ProjectionContext,
-    RecoveredToolKind, RecoveredToolOrigin, StructuredSummary, ToolPairFix, ToolPairFixType,
+    StructuredSummary, ToolPairFix, ToolPairFixType,
 };
 
 use crate::compression::compressor::SlidingWindowCompressor;

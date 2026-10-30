@@ -246,4 +246,36 @@ mod tests {
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         Ok(())
     }
+    #[tokio::test]
+    async fn typed_sse_provider_failure_does_not_repeat_the_original_call() -> Result<()> {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let result = retry_llm_call("provider-error", 3, 1, &None, None, || {
+            calls.fetch_add(1, Ordering::SeqCst);
+            async {
+                Err::<(), _>(
+                    LlmError::ProviderError {
+                        provider: "anthropic".into(),
+                        error_type: Some("overloaded_error".into()),
+                        code: Some(serde_json::Value::Null),
+                        message: "429 529 timeout words".into(),
+                        retryable: false,
+                    }
+                    .into(),
+                )
+            }
+        })
+        .await;
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        let failure =
+            crate::error::AgentFailure::try_from(&result.err().ok_or_else(|| {
+                ReactError::Other("provider error unexpectedly succeeded".into())
+            })?)?;
+        assert_eq!(failure.code, "llm_provider");
+        assert!(!failure.retryable);
+        assert_eq!(failure.http_status, None);
+        assert!(!super::super::super::is_retryable_llm_error(
+            &LlmError::InvalidResponse("overloaded 429".into()).into()
+        ));
+        Ok(())
+    }
 }

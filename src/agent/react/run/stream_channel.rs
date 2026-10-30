@@ -132,27 +132,6 @@ impl ReactStreamTurnOwner {
         })
     }
 
-    fn retain_pre_spawn(
-        snapshot: &crate::agent::snapshot::AgentRunSnapshot,
-        lease: crate::agent::react::lifecycle::ReactAgentTurnLease,
-        execution: tokio::sync::OwnedMutexGuard<()>,
-        steering: Option<crate::agent::steer::ActiveTurnLease>,
-        run_id: String,
-        execution_id: Option<String>,
-    ) {
-        // 准备期也保留本次实际admission的原lease/锁/资源束；身份只取原typed观察。
-        // 不制造替代任务，不从持久ledger重建已释放owner。
-        Self {
-            lease: Some(lease),
-            steering,
-            execution: Some(execution),
-            resource_guards: snapshot.resource_guards.clone(),
-            run_id: Some(run_id),
-            execution_id,
-        }
-        .retain_unknown();
-    }
-
     pub(in crate::agent::react) fn settle(&mut self, outcome: crate::agent::AgentSteerTurnOutcome) {
         if let Some(steering) = self.steering.take() {
             steering.settle(outcome);
@@ -177,26 +156,6 @@ impl ReactStreamTurnOwner {
             run_id: snapshot.current_run_id.clone(),
             execution_id: snapshot.current_execution_id.clone(),
         }
-    }
-
-    pub(in crate::agent::react) fn take_preparation_parts(
-        &mut self,
-    ) -> Result<(
-        crate::agent::react::lifecycle::ReactAgentTurnLease,
-        tokio::sync::OwnedMutexGuard<()>,
-    )> {
-        if self.lease.is_none() || self.execution.is_none() {
-            return Err(crate::error::ReactError::Other(
-                "original preparation owner resources missing".to_string(),
-            ));
-        }
-        let lease = self.lease.take().ok_or_else(|| {
-            crate::error::ReactError::Other("original preparation lease missing".to_string())
-        })?;
-        let guard = self.execution.take().ok_or_else(|| {
-            crate::error::ReactError::Other("original preparation mutex missing".to_string())
-        })?;
-        Ok((lease, guard))
     }
 
     pub(in crate::agent::react) fn observe_preparation_result<T>(&mut self, result: &Result<T>) {
@@ -460,50 +419,25 @@ impl ReactAgent {
         let mut text = init.text.clone();
         let mut message = init.message.clone();
         let label = init.label.clone();
-        let mut invocation = init.invocation;
-        // Capture value-carried run metadata before the execution mutex wait.
-        // Concurrent callers may update/clear the agent's shared external
-        // context while this invocation is queued, but this snapshot belongs
-        // to the invocation that entered here.
-        let mut legacy_runtime = if invocation.is_none() {
-            Some(self.capture_legacy_external_context())
-        } else {
-            None
-        };
+        // 在任何排队/await前值化。plain调用与显式调用只走同一条当前通路。
+        let mut invocation = init.invocation.unwrap_or_default();
         let requested_cancel = invocation
+            .runtime
             .as_ref()
-            .and_then(|context| {
-                context
-                    .runtime
-                    .as_ref()
-                    .and_then(|runtime| runtime.cancel.as_deref().cloned())
-                    .or_else(|| context.cancel.clone())
-            })
-            .or_else(|| {
-                legacy_runtime
-                    .as_ref()
-                    .and_then(|runtime| runtime.cancel.as_deref().cloned())
-            });
+            .and_then(|runtime| runtime.cancel.as_deref().cloned())
+            .or_else(|| invocation.cancel.clone());
         let (mut turn_lease, lifecycle_cancel) = self.close_authority.admit(requested_cancel)?;
-        if let Some(context) = invocation.as_mut() {
-            context.cancel = Some(lifecycle_cancel.clone());
-            if let Some(runtime) = context.runtime.as_mut() {
-                runtime.cancel = Some(Arc::new(lifecycle_cancel.clone()));
-            }
-        }
-        if let Some(runtime) = legacy_runtime.as_mut() {
+        invocation.cancel = Some(lifecycle_cancel.clone());
+        if let Some(runtime) = invocation.runtime.as_mut() {
             runtime.cancel = Some(Arc::new(lifecycle_cancel.clone()));
         }
         let runtime_state_id = crate::agent::snapshot::effective_runtime_state_id(
             self.config.conversation_id.as_deref(),
-            invocation.as_ref(),
-            legacy_runtime.as_ref(),
+            Some(&invocation),
         );
         crate::agent::snapshot::validate_transcript_generation_identity(
             runtime_state_id,
-            invocation
-                .as_ref()
-                .and_then(|context| context.transcript_generation_id.as_deref()),
+            invocation.transcript_generation_id.as_deref(),
         )?;
         self.validate_persistence_configuration()?;
 
@@ -523,37 +457,11 @@ impl ReactAgent {
         // admission must therefore remain visible as close debt.
         turn_lease.mark_started();
 
-        let admission_snapshot = match (invocation.as_ref(), legacy_runtime.as_ref()) {
-            (Some(invocation), _) => AgentSnapshot::from_agent_with_invocation(self, invocation),
-            (None, Some(legacy)) => AgentSnapshot::from_agent_with_legacy_context(self, legacy),
-            (None, None) => make_snapshot(self),
-        };
-        let mut recovery_owner =
+        let mut admission_snapshot = AgentSnapshot::from_agent_with_invocation(self, &invocation);
+        // 当前准备期的同一物理owner持有lease/mutex/资源，直到交给原producer。
+        // 去掉旧控制历史归一不代表正常Store已准入工作可因caller drop提前释放。
+        let mut preparation_owner =
             ReactStreamTurnOwner::preparation(&admission_snapshot, turn_lease, execution_guard);
-        let normalization: Result<()> = async {
-            if let (Some(scope_id), Some(runtime_id)) = (
-                admission_snapshot.config.conversation_id.as_deref(),
-                runtime_state_id,
-            ) {
-                self.normalize_pending_control_checkpoint(
-                    scope_id,
-                    runtime_id,
-                    crate::memory::PersistenceCallContext::with_timeout(
-                        std::time::Duration::from_secs(10),
-                    )?,
-                    &lifecycle_cancel,
-                )
-                .await?;
-            }
-            Ok(())
-        }
-        .await;
-        if normalization.is_err() {
-            recovery_owner.observe_preparation_result(&normalization);
-        }
-        normalization?;
-        let (turn_lease, execution_guard) = recovery_owner.take_preparation_parts()?;
-        drop(recovery_owner);
         let pending_settlement = match admission_snapshot
             .reconcile_pending_transcript_projection()
             .await
@@ -565,16 +473,11 @@ impl ReactAgent {
                     execution_id,
                 } = &error
                 {
-                    ReactStreamTurnOwner::retain_pre_spawn(
-                        &admission_snapshot,
-                        turn_lease,
-                        execution_guard,
-                        None,
-                        run_id.clone(),
-                        execution_id.clone(),
-                    );
+                    preparation_owner.run_id = Some(run_id.clone());
+                    preparation_owner.execution_id = execution_id.clone();
+                    preparation_owner.retain_unknown();
                 } else {
-                    turn_lease.settle();
+                    preparation_owner.settle(crate::agent::AgentSteerTurnOutcome::Failed);
                 }
                 return Err(error);
             }
@@ -583,7 +486,7 @@ impl ReactAgent {
             if settlement.status != crate::memory::TranscriptProjectionSettlementStatus::Settled {
                 let error =
                     crate::agent::snapshot::transcript_settlement_admission_error(&settlement);
-                turn_lease.settle();
+                preparation_owner.settle(crate::agent::AgentSteerTurnOutcome::Failed);
                 return Err(error);
             }
             if tx
@@ -591,7 +494,7 @@ impl ReactAgent {
                 .await
                 .is_err()
             {
-                turn_lease.settle();
+                preparation_owner.settle(crate::agent::AgentSteerTurnOutcome::Failed);
                 return Err(crate::error::ReactError::Other(
                     "event consumer closed during transcript recovery".to_string(),
                 ));
@@ -599,40 +502,38 @@ impl ReactAgent {
         }
         if admission_snapshot.conversation_store.is_some() {
             let Some(scope_id) = admission_snapshot.config.conversation_id.as_deref() else {
-                turn_lease.settle();
+                preparation_owner.settle(crate::agent::AgentSteerTurnOutcome::Failed);
                 return Err(crate::error::ConfigError::ConfigFileError(
                     "managed transcript persistence requires a conversation identity".to_string(),
                 )
                 .into());
             };
             let Some(runtime_state_id) = runtime_state_id else {
-                turn_lease.settle();
+                preparation_owner.settle(crate::agent::AgentSteerTurnOutcome::Failed);
                 return Err(crate::error::ConfigError::ConfigFileError(
                     "managed transcript persistence requires a runtime-state identity".to_string(),
                 )
                 .into());
             };
-            if let Err(error) = self
+            match self
                 .hydrate_managed_runtime_before_input_guard(scope_id, runtime_state_id)
                 .await
             {
-                if let crate::error::ReactError::ExecutionNotSettled {
-                    run_id,
-                    execution_id,
-                } = &error
-                {
-                    ReactStreamTurnOwner::retain_pre_spawn(
-                        &admission_snapshot,
-                        turn_lease,
-                        execution_guard,
-                        None,
-                        run_id.clone(),
-                        execution_id.clone(),
-                    );
-                } else {
-                    turn_lease.settle();
+                Ok(event) => admission_snapshot.pending_checkpoint_resume = event,
+                Err(error) => {
+                    if let crate::error::ReactError::ExecutionNotSettled {
+                        run_id,
+                        execution_id,
+                    } = &error
+                    {
+                        preparation_owner.run_id = Some(run_id.clone());
+                        preparation_owner.execution_id = execution_id.clone();
+                        preparation_owner.retain_unknown();
+                    } else {
+                        preparation_owner.settle(crate::agent::AgentSteerTurnOutcome::Failed);
+                    }
+                    return Err(error);
                 }
-                return Err(error);
             }
         }
 
@@ -650,16 +551,11 @@ impl ReactAgent {
                         execution_id,
                     } = &error
                     {
-                        ReactStreamTurnOwner::retain_pre_spawn(
-                            &admission_snapshot,
-                            turn_lease,
-                            execution_guard,
-                            None,
-                            run_id.clone(),
-                            execution_id.clone(),
-                        );
+                        preparation_owner.run_id = Some(run_id.clone());
+                        preparation_owner.execution_id = execution_id.clone();
+                        preparation_owner.retain_unknown();
                     } else {
-                        turn_lease.settle();
+                        preparation_owner.settle(crate::agent::AgentSteerTurnOutcome::Failed);
                     }
                     return Err(error);
                 }
@@ -680,35 +576,21 @@ impl ReactAgent {
                         );
                         self.record_audit_event(event).await;
                     }
-                    let trace_run_id = if let Some(runtime) = invocation
-                        .as_ref()
-                        .and_then(|context| context.runtime.as_ref())
-                    {
-                        self.start_scoped_trace_run(
+                    let trace_run_id = self
+                        .start_scoped_trace_run(
                             "[input blocked by guard]",
-                            runtime.run_id.as_deref(),
-                            runtime.conversation_id.as_deref(),
-                            runtime.turn_id.as_deref(),
-                            runtime.execution_id.as_deref(),
+                            admission_snapshot.current_run_id.as_deref(),
+                            admission_snapshot.config.conversation_id.as_deref(),
+                            admission_snapshot.current_turn_id.as_deref(),
+                            admission_snapshot.current_execution_id.as_deref(),
                         )
-                        .await
-                    } else if let Some(legacy) = legacy_runtime.as_ref() {
-                        self.start_legacy_trace_run("[input blocked by guard]", legacy)
-                            .await
-                    } else {
-                        None
-                    };
-                    let mut terminal_snapshot = match (invocation.as_ref(), legacy_runtime.as_ref())
-                    {
-                        (Some(invocation), _) => {
-                            AgentSnapshot::from_agent_with_invocation(self, invocation)
-                        }
-                        (None, Some(legacy)) => {
-                            AgentSnapshot::from_agent_with_legacy_context(self, legacy)
-                        }
-                        (None, None) => make_snapshot(self),
-                    };
+                        .await;
+                    let mut terminal_snapshot =
+                        AgentSnapshot::from_agent_with_invocation(self, &invocation);
                     terminal_snapshot.trace_run_id = trace_run_id;
+                    if let Some(event) = admission_snapshot.pending_checkpoint_resume.take() {
+                        terminal_snapshot.record_event(event).await;
+                    }
                     let terminal_reason = format!("Request blocked by safety guard: {reason}");
                     let (_, events) = finish_pre_spawn_terminal(
                         &terminal_snapshot,
@@ -724,18 +606,12 @@ impl ReactAgent {
                     if let Some((run_id, execution_id)) =
                         ReactStreamTurnOwner::unknown_identity(&events)
                     {
-                        ReactStreamTurnOwner::retain_pre_spawn(
-                            &terminal_snapshot,
-                            turn_lease,
-                            execution_guard,
-                            None,
-                            run_id,
-                            execution_id,
-                        );
+                        preparation_owner.run_id = Some(run_id);
+                        preparation_owner.execution_id = execution_id;
+                        preparation_owner.retain_unknown();
                         return Ok(Box::pin(futures::stream::iter(events)));
                     }
-                    turn_lease.settle();
-                    drop(execution_guard);
+                    preparation_owner.settle(crate::agent::AgentSteerTurnOutcome::Failed);
                     return Ok(Box::pin(futures::stream::iter(events)));
                 }
                 crate::guard::GuardResult::Transform { content, .. } => {
@@ -750,81 +626,51 @@ impl ReactAgent {
 
         // Start a unique trace invocation after guard transformation. Product run identity
         // remains in ExternalRunContext and is only used as correlation.
-        let trace_run_id;
-        if let Some(invocation) = invocation.as_ref() {
-            let parent_run_id = invocation
-                .runtime
-                .as_ref()
-                .and_then(|runtime| runtime.run_id.clone());
-            let conversation_id = invocation
-                .runtime
-                .as_ref()
-                .and_then(|runtime| runtime.conversation_id.clone());
-            let trace_turn_id = invocation
-                .runtime
-                .as_ref()
-                .and_then(|runtime| runtime.turn_id.clone());
-            let execution_id = invocation
-                .runtime
-                .as_ref()
-                .and_then(|runtime| runtime.execution_id.clone());
-            trace_run_id = self
-                .start_scoped_trace_run(
-                    &text,
-                    parent_run_id.as_deref(),
-                    conversation_id.as_deref(),
-                    trace_turn_id.as_deref(),
-                    execution_id.as_deref(),
-                )
-                .await;
-        } else {
-            trace_run_id = match legacy_runtime.as_ref() {
-                Some(legacy) => self.start_legacy_trace_run(&text, legacy).await,
-                None => None,
-            };
-        }
+        let trace_run_id = self
+            .start_scoped_trace_run(
+                &text,
+                admission_snapshot.current_run_id.as_deref(),
+                admission_snapshot.config.conversation_id.as_deref(),
+                admission_snapshot.current_turn_id.as_deref(),
+                admission_snapshot.current_execution_id.as_deref(),
+            )
+            .await;
+        admission_snapshot.trace_run_id = trace_run_id.clone();
+        // 普通prepare会用当前trace重读并发布实际恢复记录；Guard专用暂存不重复发布。
+        admission_snapshot.pending_checkpoint_resume = None;
         let turn_id = invocation
+            .runtime
             .as_ref()
-            .and_then(|value| value.runtime.as_ref())
             .and_then(|runtime| runtime.turn_id.clone().or_else(|| runtime.run_id.clone()))
-            .or_else(|| {
-                legacy_runtime
-                    .as_ref()
-                    .and_then(|runtime| runtime.turn_id.clone())
-                    .or_else(|| {
-                        legacy_runtime
-                            .as_ref()
-                            .and_then(|runtime| runtime.current_run_id.clone())
-                    })
-            })
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
         let active_turn_lease = self.turn_steer_mailbox.begin(turn_id.clone());
+        active_turn_lease.set_run_id(admission_snapshot.current_run_id.clone());
         // admission与实际drain分开：准备期可排队，只有原safe point才消费。
         // Hook拒绝/恢复失败仍由同一lease结算Accepted且未drain的receipt。
         active_turn_lease.set_steerable(true);
+        let turn_steer_incarnation = active_turn_lease.incarnation();
+        preparation_owner.steering = Some(active_turn_lease);
 
         // ── Restore thread context (Execute mode) + memory triggers/recall ──
-        let history = invocation
-            .as_ref()
-            .and_then(|value| value.history.as_deref())
-            .unwrap_or_default();
         let persistence_scope_id = admission_snapshot.config.conversation_id.as_deref();
         let recalled_result = if let Some(ref msg) = message {
             self.prepare_stream_context_with_message(
                 mode,
                 msg,
-                history,
+                &invocation,
                 persistence_scope_id,
                 runtime_state_id,
+                Some(&admission_snapshot),
             )
             .await
         } else {
             self.prepare_stream_context(
                 mode,
                 &text,
-                history,
+                &invocation,
                 persistence_scope_id,
                 runtime_state_id,
+                Some(&admission_snapshot),
             )
             .await
         };
@@ -836,15 +682,8 @@ impl ReactAgent {
                     .starts_with("Blocked by UserPromptSubmit hook:") =>
             {
                 let reason = error.to_string();
-                let mut terminal_snapshot = match (invocation.as_ref(), legacy_runtime.as_ref()) {
-                    (Some(invocation), _) => {
-                        AgentSnapshot::from_agent_with_invocation(self, invocation)
-                    }
-                    (None, Some(legacy)) => {
-                        AgentSnapshot::from_agent_with_legacy_context(self, legacy)
-                    }
-                    (None, None) => make_snapshot(self),
-                };
+                let mut terminal_snapshot =
+                    AgentSnapshot::from_agent_with_invocation(self, &invocation);
                 terminal_snapshot.trace_run_id = trace_run_id;
                 let (outcome, events) = finish_pre_spawn_terminal(
                     &terminal_snapshot,
@@ -860,19 +699,12 @@ impl ReactAgent {
                 if let Some((run_id, execution_id)) =
                     ReactStreamTurnOwner::unknown_identity(&events)
                 {
-                    ReactStreamTurnOwner::retain_pre_spawn(
-                        &terminal_snapshot,
-                        turn_lease,
-                        execution_guard,
-                        Some(active_turn_lease),
-                        run_id,
-                        execution_id,
-                    );
+                    preparation_owner.run_id = Some(run_id);
+                    preparation_owner.execution_id = execution_id;
+                    preparation_owner.retain_unknown();
                     return Ok(Box::pin(futures::stream::iter(events)));
                 }
-                active_turn_lease.settle(outcome);
-                turn_lease.settle();
-                drop(execution_guard);
+                preparation_owner.settle(outcome);
                 return Ok(Box::pin(futures::stream::iter(events)));
             }
             Err(error) => {
@@ -881,25 +713,13 @@ impl ReactAgent {
                     execution_id,
                 } = &error
                 {
-                    ReactStreamTurnOwner::retain_pre_spawn(
-                        &admission_snapshot,
-                        turn_lease,
-                        execution_guard,
-                        Some(active_turn_lease),
-                        run_id.clone(),
-                        execution_id.clone(),
-                    );
+                    preparation_owner.run_id = Some(run_id.clone());
+                    preparation_owner.execution_id = execution_id.clone();
+                    preparation_owner.retain_unknown();
                     return Err(error);
                 }
-                let mut terminal_snapshot = match (invocation.as_ref(), legacy_runtime.as_ref()) {
-                    (Some(invocation), _) => {
-                        AgentSnapshot::from_agent_with_invocation(self, invocation)
-                    }
-                    (None, Some(legacy)) => {
-                        AgentSnapshot::from_agent_with_legacy_context(self, legacy)
-                    }
-                    (None, None) => make_snapshot(self),
-                };
+                let mut terminal_snapshot =
+                    AgentSnapshot::from_agent_with_invocation(self, &invocation);
                 terminal_snapshot.trace_run_id = trace_run_id;
                 let terminal = AgentEvent::from_error("react_loop", &error)?;
                 let (outcome, events) = finish_pre_spawn_terminal(
@@ -912,19 +732,12 @@ impl ReactAgent {
                 if let Some((run_id, execution_id)) =
                     ReactStreamTurnOwner::unknown_identity(&events)
                 {
-                    ReactStreamTurnOwner::retain_pre_spawn(
-                        &terminal_snapshot,
-                        turn_lease,
-                        execution_guard,
-                        Some(active_turn_lease),
-                        run_id,
-                        execution_id,
-                    );
+                    preparation_owner.run_id = Some(run_id);
+                    preparation_owner.execution_id = execution_id;
+                    preparation_owner.retain_unknown();
                     return Ok(Box::pin(futures::stream::iter(events)));
                 }
-                active_turn_lease.settle(outcome);
-                turn_lease.settle();
-                drop(execution_guard);
+                preparation_owner.settle(outcome);
                 return Ok(Box::pin(futures::stream::iter(events)));
             }
         };
@@ -933,10 +746,7 @@ impl ReactAgent {
         // routing or provider execution begins. Generic Agent implementations
         // that do not provide this publisher intentionally leave the receipt
         // at `drained = false`.
-        if let Some(lifecycle) = invocation
-            .as_ref()
-            .and_then(|context| context.input_lifecycle.as_ref())
-        {
+        if let Some(lifecycle) = invocation.input_lifecycle.as_ref() {
             lifecycle.mark_drained();
         }
 
@@ -945,16 +755,7 @@ impl ReactAgent {
         // so every invocation has the same lifecycle and terminal authority.
         if let Some(ref router) = self.intent_router {
             let messages = self.memory.context.lock().await.messages().to_vec();
-            let cancel = invocation
-                .as_ref()
-                .and_then(|context| context.cancel.clone())
-                .or_else(|| {
-                    legacy_runtime
-                        .as_ref()
-                        .and_then(|runtime| runtime.cancel.as_ref())
-                        .map(|token| token.as_ref().clone())
-                })
-                .unwrap_or_default();
+            let cancel = invocation.cancel.clone().unwrap_or_default();
             let intent = router.classify_with_cancel(&text, &messages, cancel).await;
             match intent {
                 crate::intent::Intent::DirectAnswer { confidence } => {
@@ -992,16 +793,12 @@ impl ReactAgent {
             }
         }
 
-        let mut snap = match (invocation.as_ref(), legacy_runtime.as_ref()) {
-            (Some(invocation), _) => AgentSnapshot::from_agent_with_invocation(self, invocation),
-            (None, Some(legacy)) => AgentSnapshot::from_agent_with_legacy_context(self, legacy),
-            (None, None) => make_snapshot(self),
-        };
+        let mut snap = AgentSnapshot::from_agent_with_invocation(self, &invocation);
         snap.current_turn_id = Some(turn_id.clone());
         if snap.current_execution_id.is_none() {
             snap.current_execution_id = Some(format!("execution:{}", uuid::Uuid::new_v4()));
         }
-        snap.turn_steer_incarnation = Some(active_turn_lease.incarnation());
+        snap.turn_steer_incarnation = Some(turn_steer_incarnation);
         snap.current_message = message.clone();
         snap.trace_run_id = trace_run_id;
         let consumer_cancel = snap
@@ -1018,41 +815,22 @@ impl ReactAgent {
         let runtime = match tokio::runtime::Handle::try_current() {
             Ok(runtime) => runtime,
             Err(error) => {
-                active_turn_lease.settle(crate::agent::AgentSteerTurnOutcome::Failed);
-                turn_lease.settle();
+                preparation_owner.settle(crate::agent::AgentSteerTurnOutcome::Failed);
                 return Err(crate::error::ReactError::Other(format!(
                     "stream execution requires a Tokio runtime: {error}"
                 )));
             }
         };
-        let observation_run_id = invocation
-            .as_ref()
-            .and_then(|context| context.runtime.as_ref())
-            .and_then(|runtime| runtime.run_id.clone())
-            .or_else(|| {
-                legacy_runtime
-                    .as_ref()
-                    .and_then(|runtime| runtime.current_run_id.clone())
-            })
+        // 流观察身份可使用turn id；它不回填snapshot或current_run_id公共观察值。
+        let observation_run_id = snap
+            .current_run_id
+            .clone()
             .unwrap_or_else(|| turn_id.clone());
-        let observation_execution_id = invocation
-            .as_ref()
-            .and_then(|context| context.runtime.as_ref())
-            .and_then(|runtime| runtime.execution_id.clone())
-            .or_else(|| {
-                legacy_runtime
-                    .as_ref()
-                    .and_then(|runtime| runtime.execution_id.clone())
-            })
-            .or_else(|| snap.current_execution_id.clone());
-        let mut physical_owner = ReactStreamTurnOwner {
-            lease: Some(turn_lease),
-            steering: Some(active_turn_lease),
-            execution: Some(execution_guard),
-            resource_guards: snap.resource_guards.clone(),
-            run_id: Some(observation_run_id.clone()),
-            execution_id: observation_execution_id.clone(),
-        };
+        let observation_execution_id = snap.current_execution_id.clone();
+        preparation_owner.run_id = Some(observation_run_id.clone());
+        preparation_owner.execution_id = observation_execution_id.clone();
+        preparation_owner.resource_guards = snap.resource_guards.clone();
+        let mut physical_owner = preparation_owner;
         let task = runtime.spawn(async move {
             // The same original resources survive either an explicit unknown
             // result or producer unwind; no parked replacement task is made.
@@ -1156,9 +934,6 @@ fn message_with_replaced_text(mut message: Message, replacement: &str) -> Messag
 use crate::agent::snapshot::AgentRunSnapshot as AgentSnapshot;
 
 // Helper to create snapshot from agent (keeps the same API for rest of file)
-fn make_snapshot(agent: &ReactAgent) -> AgentSnapshot {
-    AgentSnapshot::from_agent(agent)
-}
 
 impl AgentSnapshot {
     fn failure_terminal(&self) -> crate::agent::AgentSteerTurnOutcome {
@@ -1452,6 +1227,7 @@ impl AgentSnapshot {
                 phases::ThinkOutcome::TerminalSettled { outcome } => return Ok(outcome),
             };
 
+            let response_observation = think.provider_response.clone();
             let iteration_tokens = think.pt.saturating_add(think.ct);
             state
                 .budget
@@ -1484,6 +1260,11 @@ impl AgentSnapshot {
             }
 
             if state.budget.final_only && !think.tool_call_map.is_empty() {
+                phases::retain_provider_response_observation(
+                    &context,
+                    response_observation.as_ref(),
+                )
+                .await;
                 super::context::push_runtime_context_note(
                     &context,
                     "RunBudget:BlockedTools",
@@ -1529,6 +1310,7 @@ impl AgentSnapshot {
                 );
                 message.assistant_blocks = Some(think.assistant_blocks);
                 message.approved_assistant_blocks = Some(think.approved_assistant_blocks);
+                message.provider_response = think.provider_response;
                 context.lock().await.push(message);
                 self.save_runtime_checkpoint(&context, None).await?;
                 IterOutcome::Continue
@@ -1541,6 +1323,7 @@ impl AgentSnapshot {
                 );
                 assistant_draft.assistant_blocks = Some(think.assistant_blocks.clone());
                 assistant_draft.approved_assistant_blocks = Some(Vec::new());
+                assistant_draft.provider_response = think.provider_response.clone();
                 if self
                     .drain_steer_into_context(&context, Some(assistant_draft))
                     .await
@@ -1553,6 +1336,11 @@ impl AgentSnapshot {
                 think.content_buffer = match self.check_final_answer_guard(&candidate).await {
                     Ok(answer) => answer,
                     Err(error) => {
+                        phases::retain_provider_response_observation(
+                            &context,
+                            response_observation.as_ref(),
+                        )
+                        .await;
                         return phases::finalize::settle_final_guard_failure(
                             &self, &context, &tx, error,
                         )
@@ -1570,8 +1358,20 @@ impl AgentSnapshot {
                 .await
                 {
                     Ok(true) => {}
-                    Ok(false) => continue,
+                    Ok(false) => {
+                        phases::retain_provider_response_observation(
+                            &context,
+                            response_observation.as_ref(),
+                        )
+                        .await;
+                        continue;
+                    }
                     Err(error) => {
+                        phases::retain_provider_response_observation(
+                            &context,
+                            response_observation.as_ref(),
+                        )
+                        .await;
                         phases::finalize::settle_terminal_projection(
                             &self,
                             &context,
@@ -1585,6 +1385,11 @@ impl AgentSnapshot {
                 let pt = think.pt;
                 let ct = think.ct;
                 if phases::cancellation_requested(&self) {
+                    phases::retain_provider_response_observation(
+                        &context,
+                        response_observation.as_ref(),
+                    )
+                    .await;
                     return phases::finalize::settle_cancelled_final_candidate(
                         &self, &context, &tx,
                     )
@@ -1595,25 +1400,77 @@ impl AgentSnapshot {
                         &self, &context, &tx, &mut state, iteration, think, &label,
                     ) => verified,
                     _ = phases::wait_for_cancellation(&self) => {
+                        phases::retain_provider_response_observation(&context, response_observation.as_ref()).await;
                         return phases::finalize::settle_cancelled_final_candidate(
                             &self, &context, &tx,
                         ).await;
                     }
                 };
+                // Critic等待可取消；选中普通失败后由原owner在select外完整等待持久化。
+                // 先处理原失败/unknown，避免通用取消再写或改写首因。
+                let verified = match verified {
+                    Ok(IterOutcome::TerminalSettled { outcome }) => return Ok(outcome),
+                    Ok(verified) => verified,
+                    Err(error) => {
+                        phases::retain_provider_response_observation(
+                            &context,
+                            response_observation.as_ref(),
+                        )
+                        .await;
+                        let terminal = AgentEvent::from_error("critic", &error)?;
+                        let cancelled = match &terminal {
+                            AgentEvent::Cancelled => true,
+                            AgentEvent::Error { failure, .. } => {
+                                failure.terminal_kind == crate::error::AgentTerminalKind::Cancelled
+                            }
+                            _ => false,
+                        };
+                        phases::finalize::settle_terminal_projection(
+                            &self,
+                            &context,
+                            Some(error.to_string()),
+                            &tx,
+                        )
+                        .await?;
+                        self.finalize_run(
+                            if cancelled {
+                                crate::trace::RunStatus::Cancelled
+                            } else {
+                                crate::trace::RunStatus::Failed
+                            },
+                            None,
+                            Some(&error.to_string()),
+                        )
+                        .await;
+                        let _ = tx.send(Ok(terminal)).await;
+                        return Ok(if cancelled {
+                            crate::agent::AgentSteerTurnOutcome::Cancelled
+                        } else {
+                            crate::agent::AgentSteerTurnOutcome::Failed
+                        });
+                    }
+                };
                 if phases::cancellation_requested(&self) {
+                    phases::retain_provider_response_observation(
+                        &context,
+                        response_observation.as_ref(),
+                    )
+                    .await;
                     return phases::finalize::settle_cancelled_final_candidate(
                         &self, &context, &tx,
                     )
                     .await;
                 }
-                match verified? {
+                match verified {
                     IterOutcome::Continue => continue,
                     IterOutcome::FinalText {
                         answer,
                         reasoning_content,
                         reasoning_blocks,
                         assistant_blocks,
+                        provider_response,
                     } => {
+                        let provider_response = provider_response.map(|observation| *observation);
                         match phases::finalize::emit_final_text(
                             &self,
                             &context,
@@ -1626,6 +1483,7 @@ impl AgentSnapshot {
                             reasoning_content,
                             reasoning_blocks,
                             assistant_blocks,
+                            provider_response,
                             true,
                         )
                         .await?
@@ -1654,10 +1512,17 @@ impl AgentSnapshot {
                     reasoning_content,
                     reasoning_blocks,
                     assistant_blocks,
+                    provider_response,
                 } => {
+                    let provider_response = provider_response.map(|observation| *observation);
                     let answer = match self.check_final_answer_guard(&answer).await {
                         Ok(answer) => answer,
                         Err(error) => {
+                            phases::retain_provider_response_observation(
+                                &context,
+                                provider_response.as_ref(),
+                            )
+                            .await;
                             return phases::finalize::settle_final_guard_failure(
                                 &self, &context, &tx, error,
                             )
@@ -1675,8 +1540,20 @@ impl AgentSnapshot {
                     .await
                     {
                         Ok(true) => {}
-                        Ok(false) => continue,
+                        Ok(false) => {
+                            phases::retain_provider_response_observation(
+                                &context,
+                                provider_response.as_ref(),
+                            )
+                            .await;
+                            continue;
+                        }
                         Err(error) => {
+                            phases::retain_provider_response_observation(
+                                &context,
+                                provider_response.as_ref(),
+                            )
+                            .await;
                             phases::finalize::settle_terminal_projection(
                                 &self,
                                 &context,
@@ -1701,6 +1578,7 @@ impl AgentSnapshot {
                         reasoning_content,
                         reasoning_blocks,
                         assistant_blocks,
+                        provider_response,
                         true,
                     )
                     .await?
@@ -1710,11 +1588,21 @@ impl AgentSnapshot {
                     }
                 }
                 IterOutcome::NoResponse => {
+                    phases::retain_provider_response_observation(
+                        &context,
+                        response_observation.as_ref(),
+                    )
+                    .await;
                     phases::finalize::finalize_no_response(&self, &context, tx).await?;
                     return Ok(crate::agent::AgentSteerTurnOutcome::Failed);
                 }
                 IterOutcome::TerminalSettled { outcome } => return Ok(outcome),
                 IterOutcome::Abandoned => {
+                    phases::retain_provider_response_observation(
+                        &context,
+                        response_observation.as_ref(),
+                    )
+                    .await;
                     self.settle_unobserved_terminal(
                         &context,
                         "event consumer disconnected or tool batch was abandoned",
@@ -1802,10 +1690,14 @@ mod tests {
             "最后一次真实status：{events:?}"
         );
         assert!(
-            !events.iter().any(|event| matches!(
-                event,
-                AgentEvent::Token(_) | AgentEvent::ThinkStart | AgentEvent::ThinkEnd { .. }
-            )),
+            events
+                .iter()
+                .all(|event| serde_json::to_value(event).is_ok_and(|value| {
+                    value
+                        .get("type")
+                        .and_then(serde_json::Value::as_str)
+                        .is_some_and(|kind| !matches!(kind, "token" | "think_start" | "think_end"))
+                })),
             "新执行不再重复旧正文/思考事件：{events:?}"
         );
         let answers = events
@@ -1864,7 +1756,7 @@ mod tests {
             serde_json::json!({"role":"assistant","content":content,"assistant_blocks":blocks}),
         )?;
         Ok(vec![
-            StreamChunk::Delta(delta),
+            StreamChunk::Delta(Box::new(delta)),
             StreamChunk::Terminal {
                 finish_reason: Some("stop".into()),
                 usage: None,
@@ -2751,24 +2643,27 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn legacy_guard_block_trace_uses_captured_context() -> Result<()> {
+    async fn invocation_guard_block_trace_uses_current_context() -> Result<()> {
         let mut agent = agent_with_blocking_guard();
         let store = Arc::new(crate::trace::InMemoryRunStore::new());
         agent.set_run_store(store.clone());
-        agent.set_external_context(&echo_core::tools::ExternalRunContext {
-            conversation_id: Some("blocked-conversation".to_string()),
-            run_id: Some("blocked-parent".to_string()),
-            turn_id: Some("blocked-turn".to_string()),
-            execution_id: Some("blocked-execution".to_string()),
-            isolation_id: None,
-            message_id: Some("blocked-message".to_string()),
-            cancel: None,
-            trace_sink: None,
-            delegation_policy: None,
-            resource_guards: Vec::new(),
-            subagent_lineage: None,
-            uplink: None,
-        });
+        let invocation = echo_core::agent::AgentInvocationContext {
+            runtime: Some(echo_core::tools::ExternalRunContext {
+                conversation_id: Some("blocked-conversation".to_string()),
+                run_id: Some("blocked-parent".to_string()),
+                turn_id: Some("blocked-turn".to_string()),
+                execution_id: Some("blocked-execution".to_string()),
+                isolation_id: None,
+                message_id: Some("blocked-message".to_string()),
+                cancel: None,
+                trace_sink: None,
+                delegation_policy: None,
+                resource_guards: Vec::new(),
+                subagent_lineage: None,
+                uplink: None,
+            }),
+            ..Default::default()
+        };
 
         let stream = agent
             .run_stream_channel(
@@ -2776,13 +2671,12 @@ mod tests {
                     text: "blocked input".to_string(),
                     message: None,
                     label: String::new(),
-                    invocation: None,
+                    invocation: Some(invocation),
                 },
                 StreamMode::Chat,
             )
             .await?;
         let _: Vec<_> = stream.collect().await;
-        agent.clear_external_context();
 
         let traces = crate::trace::RunStore::list_all(store.as_ref(), 10).await?;
         let trace = traces
@@ -3309,6 +3203,143 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn checkpoint_resume_trace_is_scoped_for_standalone_cold_chat_and_execute() -> Result<()>
+    {
+        for mode in [None, Some(StreamMode::Chat), Some(StreamMode::Execute)] {
+            let root = tempfile::tempdir().map_err(|error| ReactError::Other(error.to_string()))?;
+            let state = Arc::new(crate::state::FileRuntimeStateStore::new(root.path())?);
+            let mut checkpoint = crate::state::AgentCheckpoint::new("current-trace-state");
+            checkpoint.messages_json = crate::state::AgentCheckpoint::serialize_payload(
+                vec![
+                    Message::system("system".into()),
+                    Message::user("historical-current-input".into()),
+                ],
+                None,
+            )
+            .map_err(|error| ReactError::Other(error.to_string()))?;
+            state.save_checkpoint(&checkpoint).await?;
+            let traces = Arc::new(crate::trace::InMemoryRunStore::new());
+            let client = Arc::new(MockLlmClient::new().with_response("current answer"));
+            let agent = ReactAgentBuilder::new()
+                .llm_client(client.clone())
+                .system_prompt("system")
+                .conversation_id("current-trace-state")
+                .state_store(state)
+                .with_run_store(traces.clone())
+                .build()?;
+            match mode {
+                Some(mode) => {
+                    agent
+                        .run_stream_channel(
+                            StreamInit {
+                                text: "current input".into(),
+                                message: None,
+                                label: String::new(),
+                                invocation: Some(echo_core::agent::AgentInvocationContext {
+                                    runtime: Some(echo_core::tools::ExternalRunContext::default()),
+                                    ..Default::default()
+                                }),
+                            },
+                            mode,
+                        )
+                        .await?
+                        .collect::<Vec<_>>()
+                        .await
+                        .into_iter()
+                        .collect::<Result<Vec<_>>>()?;
+                    assert!(
+                        client
+                            .last_messages()
+                            .is_some_and(|messages| messages.iter().any(|message| message
+                                .text_content()
+                                .is_some_and(|text| text == "historical-current-input")))
+                    );
+                }
+                None => {
+                    assert!(agent.resume_from_state_store().await?.is_some());
+                }
+            }
+            assert!(agent.current_run_id().is_none());
+            let recorded = crate::trace::RunStore::list_all(traces.as_ref(), 10).await?;
+            assert_eq!(recorded.len(), 1);
+            let id = &recorded
+                .first()
+                .ok_or_else(|| ReactError::Other("current trace missing".into()))?
+                .run_id;
+            let run = crate::trace::RunStore::load(traces.as_ref(), id)
+                .await?
+                .ok_or_else(|| ReactError::Other("current trace body missing".into()))?;
+            assert_eq!(run.session_id, "current-trace-state");
+            assert!(run.parent_run_id.is_none());
+            assert_eq!(run.events.iter().filter(|event| matches!(event,
+                crate::trace::RunEvent::CheckpointResumed { conversation_id, .. } if conversation_id == "current-trace-state"
+            )).count(), 1);
+            assert_eq!(run.status, crate::trace::RunStatus::Completed);
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn anonymous_runtime_keeps_run_none_with_configured_trace_conversation() -> Result<()> {
+        let mut agent = agent_with_mock_llm(MockLlmClient::new().with_response("answer"));
+        agent.config.conversation_id = Some("configured-trace-conversation".into());
+        let traces = Arc::new(crate::trace::InMemoryRunStore::new());
+        agent.set_run_store(traces.clone());
+        let projector = Arc::new(BlockingRunIdProjection::new());
+        agent.set_pre_model_context_projector(Some(projector.clone()));
+        let invocation = echo_core::agent::AgentInvocationContext {
+            runtime: Some(echo_core::tools::ExternalRunContext {
+                turn_id: Some("anonymous-turn".into()),
+                execution_id: Some("anonymous-execution".into()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let stream = agent
+            .execute_stream_with_invocation_context(
+                "input",
+                crate::agent::CancellationToken::new(),
+                invocation,
+            )
+            .await?;
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            projector.first_started.notified(),
+        )
+        .await
+        .map_err(|_| ReactError::Other("anonymous projection did not start".into()))?;
+        assert!(agent.current_run_id().is_none());
+        let recorded = crate::trace::RunStore::list_all(traces.as_ref(), 10).await?;
+        let trace = recorded
+            .first()
+            .ok_or_else(|| ReactError::Other("anonymous trace missing".into()))?;
+        assert_eq!(trace.session_id, "configured-trace-conversation");
+        assert!(trace.parent_run_id.is_none());
+        assert_eq!(trace.turn_id.as_deref(), Some("anonymous-turn"));
+        projector.release_first.notify_one();
+        let events = stream
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>>>()?;
+        assert!(
+            events.iter().any(
+                |event| matches!(event, AgentEvent::FinalAnswer(answer) if answer == "answer")
+            )
+        );
+        assert!(agent.current_run_id().is_none());
+        assert_eq!(
+            projector
+                .run_ids
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .as_slice(),
+            &[None]
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn queued_stream_keeps_invocation_run_contexts_atomic() -> Result<()> {
         let llm = MockLlmClient::new().with_responses(["first", "second"]);
         let agent = Arc::new(agent_with_mock_llm(llm));
@@ -3362,6 +3393,7 @@ mod tests {
             crate::error::ReactError::Other("first projection did not start".to_string())
         })?;
 
+        assert_eq!(agent.current_run_id().as_deref(), Some("run-a"));
         let invocation_b = echo_core::agent::AgentInvocationContext {
             runtime: Some(echo_core::tools::ExternalRunContext {
                 conversation_id: None,
@@ -3408,11 +3440,13 @@ mod tests {
             }
             _ = tokio::task::yield_now() => {}
         }
+        assert_eq!(agent.current_run_id().as_deref(), Some("run-a"));
         projector.release_first.notify_one();
 
         let _: Vec<_> = first_stream.collect().await;
         let second_stream = queued.await?;
         let _: Vec<_> = second_stream.collect().await;
+        assert!(agent.current_run_id().is_none());
         let run_ids = projector
             .run_ids
             .lock()
@@ -3530,10 +3564,11 @@ mod tests {
                     "Agent close attempt {attempt} ignored abandoned preparation debt"
                 ))
             })?;
+            // 输入guard尚未发布原生execution；同一Agent的未知资源仍阻断每次close。
             assert!(
-                close_error
-                    .to_string()
-                    .contains("without canonical settlement")
+                matches!(&close_error, crate::error::ReactError::Other(message)
+                    if message == "Agent close blocked by an admitted recovery whose physical settlement is unknown"),
+                "actual_close_error={close_error:?}"
             );
         }
         Ok(())
@@ -3734,25 +3769,32 @@ mod tests {
 
     #[derive(Default)]
     struct UnknownToolCallbacks {
+        start_call_ids: std::sync::Mutex<Vec<String>>,
         starts: std::sync::atomic::AtomicUsize,
         completions: std::sync::atomic::AtomicUsize,
     }
 
     impl crate::agent::AgentCallback for UnknownToolCallbacks {
-        fn on_tool_start<'a>(
+        fn on_tool_start_with_id<'a>(
             &'a self,
             _agent: &'a str,
+            call_id: &'a str,
             _tool: &'a str,
             _args: &'a serde_json::Value,
         ) -> futures::future::BoxFuture<'a, ()> {
-            Box::pin(async {
+            Box::pin(async move {
+                self.start_call_ids
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .push(call_id.to_string());
                 self.starts
                     .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             })
         }
-        fn on_tool_end<'a>(
+        fn on_tool_end_with_id<'a>(
             &'a self,
             _agent: &'a str,
+            _call_id: &'a str,
             _tool: &'a str,
             _result: &'a str,
         ) -> futures::future::BoxFuture<'a, ()> {
@@ -3761,9 +3803,10 @@ mod tests {
                     .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             })
         }
-        fn on_tool_error<'a>(
+        fn on_tool_error_with_id<'a>(
             &'a self,
             _agent: &'a str,
+            _call_id: &'a str,
             _tool: &'a str,
             _error: &'a ReactError,
         ) -> futures::future::BoxFuture<'a, ()> {
@@ -3856,6 +3899,14 @@ mod tests {
                 .await;
             assert_eq!(executions.load(Ordering::SeqCst), 1);
             assert_eq!(callbacks.starts.load(Ordering::SeqCst), 1);
+            assert_eq!(
+                callbacks
+                    .start_call_ids
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .as_slice(),
+                &["unknown-tool-call".to_string()]
+            );
             assert_eq!(callbacks.completions.load(Ordering::SeqCst), 0);
             assert_eq!(hooks.load(Ordering::SeqCst), 0);
             assert_eq!(llm.call_count(), 1);
@@ -4915,8 +4966,9 @@ mod tests {
             ),
         ];
         let mut checkpoint = crate::state::AgentCheckpoint::new("resume-conversation");
-        checkpoint.messages_json = serde_json::to_string(&checkpoint_messages)
-            .map_err(|error| crate::error::ReactError::Other(error.to_string()))?;
+        checkpoint.messages_json =
+            crate::state::AgentCheckpoint::serialize_payload(checkpoint_messages, None)
+                .map_err(|error| crate::error::ReactError::Other(error.to_string()))?;
         store.save_checkpoint(&checkpoint).await?;
 
         let run_store = Arc::new(crate::trace::InMemoryRunStore::new());
@@ -4981,18 +5033,24 @@ mod tests {
         let store = Arc::new(crate::state::FileRuntimeStateStore::new(root.path())?);
 
         let mut configured = crate::state::AgentCheckpoint::new("configured-state");
-        configured.messages_json = serde_json::to_string(&vec![
-            Message::system("system".to_string()),
-            Message::user("configured checkpoint marker".to_string()),
-        ])
+        configured.messages_json = crate::state::AgentCheckpoint::serialize_payload(
+            vec![
+                Message::system("system".to_string()),
+                Message::user("configured checkpoint marker".to_string()),
+            ],
+            None,
+        )
         .map_err(|error| ReactError::Other(error.to_string()))?;
         store.save_checkpoint(&configured).await?;
 
         let mut invocation_checkpoint = crate::state::AgentCheckpoint::new("runtime-incarnation");
-        invocation_checkpoint.messages_json = serde_json::to_string(&vec![
-            Message::system("system".to_string()),
-            Message::user("invocation checkpoint marker".to_string()),
-        ])
+        invocation_checkpoint.messages_json = crate::state::AgentCheckpoint::serialize_payload(
+            vec![
+                Message::system("system".to_string()),
+                Message::user("invocation checkpoint marker".to_string()),
+            ],
+            None,
+        )
         .map_err(|error| ReactError::Other(error.to_string()))?;
         store
             .save_checkpoint_for_scope("product-conversation", &invocation_checkpoint)
@@ -5082,52 +5140,53 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn nonstream_legacy_runtime_identity_controls_restore_and_save() -> Result<()> {
+    async fn nonstream_configured_runtime_identity_controls_restore_and_save() -> Result<()> {
         let root = tempfile::tempdir().map_err(|error| ReactError::Other(error.to_string()))?;
         let store = Arc::new(crate::state::FileRuntimeStateStore::new(root.path())?);
 
         let mut configured = crate::state::AgentCheckpoint::new("configured-state");
-        configured.messages_json = serde_json::to_string(&vec![
-            Message::system("system".to_string()),
-            Message::user("configured checkpoint marker".to_string()),
-        ])
+        configured.messages_json = crate::state::AgentCheckpoint::serialize_payload(
+            vec![
+                Message::system("system".to_string()),
+                Message::user("configured checkpoint marker".to_string()),
+            ],
+            None,
+        )
         .map_err(|error| ReactError::Other(error.to_string()))?;
         store.save_checkpoint(&configured).await?;
 
-        let mut legacy = crate::state::AgentCheckpoint::new("legacy-runtime");
-        legacy.messages_json = serde_json::to_string(&vec![
-            Message::system("system".to_string()),
-            Message::user("legacy checkpoint marker".to_string()),
-        ])
+        let mut invocation = crate::state::AgentCheckpoint::new("invocation-runtime");
+        invocation.messages_json = crate::state::AgentCheckpoint::serialize_payload(
+            vec![
+                Message::system("system".to_string()),
+                Message::user("invocation checkpoint marker".to_string()),
+            ],
+            None,
+        )
         .map_err(|error| ReactError::Other(error.to_string()))?;
         store
-            .save_checkpoint_for_scope("legacy-runtime", &legacy)
+            .save_checkpoint_for_scope("invocation-runtime", &invocation)
             .await?;
 
-        let llm = Arc::new(MockLlmClient::new().with_response("legacy answer"));
+        let llm = Arc::new(MockLlmClient::new().with_response("invocation answer"));
         let agent = ReactAgentBuilder::new()
             .llm_client(llm.clone())
             .system_prompt("system")
-            .conversation_id("configured-state")
+            .conversation_id("invocation-runtime")
             .state_store(store.clone())
             .build()?;
-        agent.set_external_context(&echo_core::tools::ExternalRunContext {
-            conversation_id: Some("legacy-runtime".to_string()),
-            ..echo_core::tools::ExternalRunContext::default()
-        });
 
         let answer = agent
-            .run_react_loop_mode("continue legacy runtime", StreamMode::Chat)
+            .run_react_loop_mode("continue invocation runtime", StreamMode::Chat)
             .await?;
-        agent.clear_external_context();
-        assert_eq!(answer, "legacy answer");
+        assert_eq!(answer, "invocation answer");
         let request = llm
             .last_messages()
             .ok_or_else(|| ReactError::Other("mock LLM request was not recorded".to_string()))?;
         assert!(request.iter().any(|message| {
             message
                 .text_content()
-                .is_some_and(|content| content == "legacy checkpoint marker")
+                .is_some_and(|content| content == "invocation checkpoint marker")
         }));
         assert!(!request.iter().any(|message| {
             message
@@ -5139,14 +5198,14 @@ mod tests {
             .await?
             .ok_or_else(|| ReactError::Other("configured checkpoint disappeared".to_string()))?;
         assert_eq!(configured_after.messages_json, configured.messages_json);
-        let legacy_after = store
-            .get_checkpoint("legacy-runtime")
+        let invocation_after = store
+            .get_checkpoint("invocation-runtime")
             .await?
-            .ok_or_else(|| ReactError::Other("legacy checkpoint was not saved".to_string()))?;
-        assert!(legacy_after.restore_messages()?.iter().any(|message| {
+            .ok_or_else(|| ReactError::Other("invocation checkpoint was not saved".to_string()))?;
+        assert!(invocation_after.restore_messages()?.iter().any(|message| {
             message
                 .text_content()
-                .is_some_and(|content| content == "legacy answer")
+                .is_some_and(|content| content == "invocation answer")
         }));
         Ok(())
     }
@@ -5252,10 +5311,13 @@ mod tests {
         let root = tempfile::tempdir().map_err(|error| ReactError::Other(error.to_string()))?;
         let store = Arc::new(crate::state::FileRuntimeStateStore::new(root.path())?);
         let mut configured = crate::state::AgentCheckpoint::new("configured-state");
-        configured.messages_json = serde_json::to_string(&vec![
-            Message::system("system".to_string()),
-            Message::user("configured-only-marker".to_string()),
-        ])
+        configured.messages_json = crate::state::AgentCheckpoint::serialize_payload(
+            vec![
+                Message::system("system".to_string()),
+                Message::user("configured-only-marker".to_string()),
+            ],
+            None,
+        )
         .map_err(|error| ReactError::Other(error.to_string()))?;
         store.save_checkpoint(&configured).await?;
         let llm = Arc::new(MockLlmClient::new().with_responses([
@@ -5323,15 +5385,6 @@ mod tests {
                     ReactError::Other("runtime A snapshot was not captured".to_string())
                 })?;
                 assert!(!snapshot_id.is_empty());
-                let mut legacy_a = store.get_checkpoint("runtime-a").await?.ok_or_else(|| {
-                    ReactError::Other(
-                        "runtime A checkpoint missing before legacy write".to_string(),
-                    )
-                })?;
-                legacy_a.current_plan = Some("runtime-a-only-plan".to_string());
-                store
-                    .save_checkpoint_for_scope("product-conversation", &legacy_a)
-                    .await?;
                 agent
                     .tools
                     .skill_registry
@@ -5399,13 +5452,13 @@ mod tests {
             .get_checkpoint("runtime-a")
             .await?
             .ok_or_else(|| ReactError::Other("runtime A checkpoint missing".to_string()))?;
-        assert!(runtime_a_checkpoint.current_plan.is_none());
+
         let runtime_a = runtime_a_checkpoint.restore_messages()?;
         let runtime_b_checkpoint = store
             .get_checkpoint("runtime-b")
             .await?
             .ok_or_else(|| ReactError::Other("runtime B checkpoint missing".to_string()))?;
-        assert!(runtime_b_checkpoint.current_plan.is_none());
+
         assert!(runtime_b_checkpoint.active_skills.is_empty());
         assert!(runtime_b_checkpoint.working_dir.is_none());
         let runtime_b = runtime_b_checkpoint.restore_messages()?;
@@ -5425,11 +5478,14 @@ mod tests {
         let root = tempfile::tempdir().map_err(|error| ReactError::Other(error.to_string()))?;
         let store = Arc::new(crate::state::FileRuntimeStateStore::new(root.path())?);
         let mut runtime_b = crate::state::AgentCheckpoint::new("runtime-b");
-        runtime_b.current_plan = Some("stale runtime B plan".to_string());
-        runtime_b.messages_json = serde_json::to_string(&vec![
-            Message::system("system".to_string()),
-            Message::user("runtime-b-checkpoint-marker".to_string()),
-        ])
+
+        runtime_b.messages_json = crate::state::AgentCheckpoint::serialize_payload(
+            vec![
+                Message::system("system".to_string()),
+                Message::user("runtime-b-checkpoint-marker".to_string()),
+            ],
+            None,
+        )
         .map_err(|error| ReactError::Other(error.to_string()))?;
         store
             .save_checkpoint_for_scope("product-conversation", &runtime_b)
@@ -5540,14 +5596,10 @@ mod tests {
             .err()
             .ok_or_else(|| ReactError::Other("runtime B switch was not cancelled".to_string()))?;
         assert!(cancelled.is_cancelled());
-        assert_eq!(
-            store
-                .get_checkpoint("runtime-b")
-                .await?
-                .and_then(|checkpoint| checkpoint.current_plan)
-                .as_deref(),
-            Some("stale runtime B plan")
-        );
+        let retained = store.get_checkpoint("runtime-b").await?.ok_or_else(|| {
+            ReactError::Other("runtime B checkpoint missing after cancellation".to_string())
+        })?;
+        assert_eq!(retained.messages_json, runtime_b.messages_json);
 
         // Caller abort is not a physical receipt for an admitted preparation.
         // Preserve the original atomic-hydration assertions without admitting
@@ -5575,7 +5627,7 @@ mod tests {
             .get_checkpoint("runtime-a")
             .await?
             .ok_or_else(|| ReactError::Other("runtime A checkpoint missing".to_string()))?;
-        assert!(original_checkpoint.current_plan.is_none());
+
         let original = original_checkpoint.restore_messages()?;
         assert!(original.iter().any(|message| {
             message
@@ -5587,62 +5639,65 @@ mod tests {
                 .text_content()
                 .is_some_and(|content| content == "runtime-b-checkpoint-marker")
         }));
-        assert!(
-            store
-                .get_checkpoint("runtime-a")
-                .await?
-                .is_some_and(|checkpoint| checkpoint.current_plan.is_none())
-        );
         Ok(())
     }
 
     #[tokio::test]
-    async fn legacy_runtime_conversation_controls_restore_and_save() -> Result<()> {
+    async fn invocation_runtime_conversation_controls_restore_and_save() -> Result<()> {
         let root = tempfile::tempdir().map_err(|error| ReactError::Other(error.to_string()))?;
         let store = Arc::new(crate::state::FileRuntimeStateStore::new(root.path())?);
         let mut configured = crate::state::AgentCheckpoint::new("configured-a");
-        configured.messages_json = serde_json::to_string(&vec![
-            Message::system("system".to_string()),
-            Message::user("configured-a-marker".to_string()),
-        ])
+        configured.messages_json = crate::state::AgentCheckpoint::serialize_payload(
+            vec![
+                Message::system("system".to_string()),
+                Message::user("configured-a-marker".to_string()),
+            ],
+            None,
+        )
         .map_err(|error| ReactError::Other(error.to_string()))?;
         store.save_checkpoint(&configured).await?;
-        let mut legacy = crate::state::AgentCheckpoint::new("legacy-b");
-        legacy.messages_json = serde_json::to_string(&vec![
-            Message::system("system".to_string()),
-            Message::user("legacy-b-marker".to_string()),
-        ])
+        let mut invocation = crate::state::AgentCheckpoint::new("invocation-b");
+        invocation.messages_json = crate::state::AgentCheckpoint::serialize_payload(
+            vec![
+                Message::system("system".to_string()),
+                Message::user("invocation-b-marker".to_string()),
+            ],
+            None,
+        )
         .map_err(|error| ReactError::Other(error.to_string()))?;
-        store.save_checkpoint(&legacy).await?;
+        store.save_checkpoint(&invocation).await?;
 
-        let llm = Arc::new(MockLlmClient::new().with_response("legacy-b-answer"));
+        let llm = Arc::new(MockLlmClient::new().with_response("invocation-b-answer"));
         let agent = ReactAgentBuilder::new()
             .llm_client(llm.clone())
             .system_prompt("system")
             .conversation_id("configured-a")
             .state_store(store.clone())
             .build()?;
-        agent.set_external_context(&echo_core::tools::ExternalRunContext {
-            conversation_id: Some("legacy-b".to_string()),
-            run_id: Some("legacy-run".to_string()),
-            turn_id: Some("legacy-turn".to_string()),
-            execution_id: None,
-            isolation_id: None,
-            message_id: None,
-            cancel: None,
-            trace_sink: None,
-            delegation_policy: None,
-            resource_guards: Vec::new(),
-            subagent_lineage: None,
-            uplink: None,
-        });
+        let invocation = echo_core::agent::AgentInvocationContext {
+            runtime: Some(echo_core::tools::ExternalRunContext {
+                conversation_id: Some("invocation-b".to_string()),
+                run_id: Some("invocation-run".to_string()),
+                turn_id: Some("invocation-turn".to_string()),
+                execution_id: None,
+                isolation_id: None,
+                message_id: None,
+                cancel: None,
+                trace_sink: None,
+                delegation_policy: None,
+                resource_guards: Vec::new(),
+                subagent_lineage: None,
+                uplink: None,
+            }),
+            ..Default::default()
+        };
         agent
             .run_stream_channel(
                 StreamInit {
-                    text: "legacy-b-user".to_string(),
+                    text: "invocation-b-user".to_string(),
                     message: None,
                     label: String::new(),
-                    invocation: None,
+                    invocation: Some(invocation),
                 },
                 StreamMode::Chat,
             )
@@ -5654,11 +5709,11 @@ mod tests {
 
         let request = llm
             .last_messages()
-            .ok_or_else(|| ReactError::Other("legacy LLM request missing".to_string()))?;
+            .ok_or_else(|| ReactError::Other("invocation LLM request missing".to_string()))?;
         assert!(request.iter().any(|message| {
             message
                 .text_content()
-                .is_some_and(|content| content == "legacy-b-marker")
+                .is_some_and(|content| content == "invocation-b-marker")
         }));
         assert!(!request.iter().any(|message| {
             message
@@ -5670,15 +5725,15 @@ mod tests {
             .await?
             .ok_or_else(|| ReactError::Other("configured checkpoint missing".to_string()))?;
         assert_eq!(configured_after.messages_json, configured.messages_json);
-        let legacy_after = store
-            .get_checkpoint("legacy-b")
+        let invocation_after = store
+            .get_checkpoint("invocation-b")
             .await?
-            .ok_or_else(|| ReactError::Other("legacy checkpoint missing".to_string()))?
+            .ok_or_else(|| ReactError::Other("invocation checkpoint missing".to_string()))?
             .restore_messages()?;
-        assert!(legacy_after.iter().any(|message| {
+        assert!(invocation_after.iter().any(|message| {
             message
                 .text_content()
-                .is_some_and(|content| content == "legacy-b-answer")
+                .is_some_and(|content| content == "invocation-b-answer")
         }));
         Ok(())
     }
@@ -5831,7 +5886,10 @@ mod tests {
         assert!(
             matches!(last_confirmed_final(&events), Some(AgentEvent::FinalAnswer(text)) if text == "final without tools")
         );
-        assert_eq!(llm.all_tool_choices(), vec![None, Some("none".to_string())]);
+        assert_eq!(
+            llm.all_tool_choices(),
+            vec![None, Some(crate::llm::ToolChoice::None)]
+        );
         Ok(())
     }
 
@@ -5873,15 +5931,22 @@ mod tests {
         let llm = Arc::new(MockLlmClient::new().with_response(r#"{"ok":true}"#));
         let agent = ReactAgentBuilder::new()
             .llm_client(llm.clone())
-            .response_format(crate::llm::ResponseFormat::JsonObject)
+            // 未知模型不能静默获得schema能力；JsonObject走已有独立允许路径。
+            .response_format(crate::llm::ResponseFormat::json_schema(
+                "ok",
+                serde_json::json!({"type":"object","properties":{"ok":{"type":"boolean"}},"required":["ok"],"additionalProperties":false}),
+            ))
             .build()?;
 
         let events = collect_events(&agent, "run").await;
-        assert!(events.iter().any(|event| matches!(
-            event,
-            AgentEvent::Error { message, .. }
-                if message.contains("structured-output model capability")
-        )));
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                AgentEvent::Error { message, .. }
+                    if message.contains("structured-output model capability")
+            )),
+            "actual_structured_output_events={events:#?}"
+        );
         assert!(
             !events
                 .iter()
@@ -7983,14 +8048,15 @@ mod tests {
             ..Default::default()
         };
         let llm = MockLlmClient::new().with_stream_script(vec![
-            StreamChunk::Delta(DeltaMessage {
+            StreamChunk::Delta(Box::new(DeltaMessage {
+                provider_response: None,
                 role: Some("assistant".to_string()),
                 content: Some("Hello world".to_string()),
                 reasoning_content: None,
                 reasoning_blocks: None,
                 assistant_blocks: None,
                 tool_calls: None,
-            }),
+            })),
             StreamChunk::Terminal {
                 finish_reason: Some("stop".to_string()),
                 usage: Some(usage),
@@ -8033,14 +8099,15 @@ mod tests {
         // single-chunk mock certified the impossible; this fixture pins the
         // honest negative).
         let llm = MockLlmClient::new().with_stream_script(vec![
-            StreamChunk::Delta(DeltaMessage {
+            StreamChunk::Delta(Box::new(DeltaMessage {
+                provider_response: None,
                 role: Some("assistant".to_string()),
                 content: Some("No usage here".to_string()),
                 reasoning_content: None,
                 reasoning_blocks: None,
                 assistant_blocks: None,
                 tool_calls: None,
-            }),
+            })),
             StreamChunk::Terminal {
                 finish_reason: Some("stop".to_string()),
                 usage: None,
@@ -8999,14 +9066,15 @@ mod tests {
     #[tokio::test]
     async fn truncated_stream_is_not_accepted_as_complete() {
         let llm = MockLlmClient::new().with_stream_script(vec![
-            StreamChunk::Delta(DeltaMessage {
+            StreamChunk::Delta(Box::new(DeltaMessage {
+                provider_response: None,
                 role: Some("assistant".to_string()),
                 content: Some("Partial answer that never finished".to_string()),
                 reasoning_content: None,
                 reasoning_blocks: None,
                 assistant_blocks: None,
                 tool_calls: None,
-            }),
+            })),
             StreamChunk::Err(ReactError::Llm(Box::new(LlmError::NetworkError(
                 "connection closed mid-stream".to_string(),
             )))),

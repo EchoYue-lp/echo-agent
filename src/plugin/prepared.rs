@@ -108,9 +108,6 @@ pub struct PreparedPlugin {
     #[cfg(feature = "mcp")]
     mcp: Option<crate::mcp::McpConfigFile>,
     subagent_documents: Vec<PreparedPluginDocument>,
-    // 已退役声明仍属于此原prepare generation的冻结输入，不参与wire或执行。
-    // 复用同一document/hash，不恢复具名公开getter或另建来源reader。
-    _retired_documents: Vec<PreparedPluginDocument>,
 }
 
 impl PreparedPlugin {
@@ -771,9 +768,6 @@ impl PluginIntegrator {
                 ));
                 continue;
             }
-            let retired_lsp_path =
-                inspect_lsp_source(&plugin_id, None, &variables.plugin_root, &mut diagnostics)
-                    .await;
             let resolved = match registry.resolve_components_async(&plugin_id).await {
                 Ok(resolved) => resolved,
                 Err(message) => {
@@ -788,16 +782,9 @@ impl PluginIntegrator {
                 }
             };
             diagnostics.extend(
-                // 原prepare在下面给同一旧源结构化诊断；原resolver的直接SDK消费者
-                // 仍得到通用diagnostics，此处避免重复同一退役Warning。
-                resolved
-                    .diagnostics
-                    .iter()
-                    .filter(|message| !message.starts_with("LSP component is retired:"))
-                    .cloned()
-                    .map(|message| {
-                        warning_diagnostic(Some(&plugin_id), "components", None, message)
-                    }),
+                resolved.diagnostics.iter().cloned().map(|message| {
+                    warning_diagnostic(Some(&plugin_id), "components", None, message)
+                }),
             );
 
             let mut skills = Vec::new();
@@ -977,30 +964,6 @@ impl PluginIntegrator {
                     subagent_documents.push(document);
                 }
             }
-            let lsp_path = retired_lsp_path;
-            let lsp_document = match lsp_path {
-                Some(path) => {
-                    freeze_document(&plugin_id, path, &variables, "lsp", &mut diagnostics).await
-                }
-                None => None,
-            };
-            if let Some(document) = lsp_document.as_ref() {
-                hash_document(
-                    &mut plugin_identity,
-                    "lsp",
-                    &variables.plugin_root,
-                    document.source_path(),
-                    document.contents().as_bytes(),
-                );
-                diagnostics.push(warning_diagnostic(
-                    Some(&plugin_id),
-                    "lsp",
-                    Some(document.source_path().to_path_buf()),
-                    "LSP component is retired; its original declaration remains preserved"
-                        .to_string(),
-                ));
-            }
-
             let content_identity = format!("{:x}", plugin_identity.finalize());
             hash_field(&mut identity, "plugin-id", plugin_id.as_bytes());
             hash_field(
@@ -1018,7 +981,6 @@ impl PluginIntegrator {
                 #[cfg(feature = "mcp")]
                 mcp,
                 subagent_documents,
-                _retired_documents: lsp_document.into_iter().collect(),
             });
         }
 
@@ -1429,37 +1391,30 @@ fn hash_document(
     hash_field(hasher, "component-content", contents);
 }
 
-/// Inspect only on a cold preparation. A missing optional declaration is silent,
-/// but dangling links and non-regular files must retain structured diagnostics.
-/// In particular, never open a FIFO/device while collecting frozen text.
-async fn inspect_lsp_source(
+/// 当前冻结文档只接受实际普通文件，避免本地误配FIFO/device阻塞原prepare。
+/// 这是通用文档边界，不扫描或解释已退役LSP文件，也不增加权限门控。
+async fn inspect_document_source(
     plugin_id: &str,
-    resolved_path: Option<PathBuf>,
-    plugin_root: &Path,
+    path: &Path,
+    component: &str,
     diagnostics: &mut Vec<PluginPreparationDiagnostic>,
-) -> Option<PathBuf> {
-    let was_resolved = resolved_path.is_some();
-    let path = resolved_path.unwrap_or_else(|| plugin_root.join("lsp.yaml"));
-    let metadata = match tokio::fs::symlink_metadata(&path).await {
-        Ok(metadata) if metadata.file_type().is_symlink() => tokio::fs::metadata(&path).await,
-        Ok(metadata) => Ok(metadata),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound && !was_resolved => {
-            return None;
-        }
-        Err(error) => Err(error),
+) -> bool {
+    let metadata = match tokio::fs::symlink_metadata(path).await {
+        Ok(metadata) if metadata.file_type().is_symlink() => tokio::fs::metadata(path).await,
+        result => result,
     };
     let message = match metadata {
-        Ok(metadata) if metadata.is_file() => return Some(path),
-        Ok(_) => "LSP component source must be a regular file".to_string(),
+        Ok(metadata) if metadata.is_file() => return true,
+        Ok(_) => "component document must be a regular file".to_string(),
         Err(error) => error.to_string(),
     };
     diagnostics.push(error_diagnostic(
         Some(plugin_id),
-        "lsp",
-        Some(path),
+        component,
+        Some(path.to_path_buf()),
         message,
     ));
-    None
+    false
 }
 
 async fn read_text(
@@ -1490,6 +1445,9 @@ async fn freeze_document(
     component: &str,
     diagnostics: &mut Vec<PluginPreparationDiagnostic>,
 ) -> Option<PreparedPluginDocument> {
+    if !inspect_document_source(plugin_id, &path, component, diagnostics).await {
+        return None;
+    }
     read_text(&path, variables, plugin_id, component, diagnostics)
         .await
         .map(|contents| PreparedPluginDocument {
@@ -1626,7 +1584,6 @@ mod tests {
             "---\nname: reviewer\ndescription: Reviews changes\n---\nReview carefully.\n",
         )?;
         std::fs::write(root.join("hooks/hooks.yaml"), "{}\n")?;
-        std::fs::write(root.join("lsp.yaml"), "languages: {}\n")?;
         std::fs::write(
             root.join("mcp.json"),
             "{\"$schema\":\"https://agent-plugins.org/schemas/1.0.0/mcp.schema.json\",\"mcpServers\":{}}",
@@ -1659,369 +1616,6 @@ mod tests {
 
     fn missing(message: &str) -> std::io::Error {
         std::io::Error::other(message.to_string())
-    }
-
-    #[tokio::test]
-    async fn lsp_frozen_build_boundary_uses_generic_diagnostics()
-    -> Result<(), Box<dyn std::error::Error>> {
-        for contents in ["languages: {}\n", "not: [valid YAML\n"] {
-            let temporary = tempfile::tempdir()?;
-            let source = create_plugin(temporary.path(), "lsp.boundary", serde_json::json!([]))?;
-            let mut registry = registry(temporary.path());
-            let id = registry.install(&InstallSource::Local(source), PluginScope::Local)?;
-            let path = registry
-                .get(&id)
-                .ok_or_else(|| missing("plugin missing"))?
-                .root
-                .join("lsp.yaml");
-            std::fs::write(&path, contents)?;
-            let prepared = PluginIntegrator::new().prepare(&mut registry).await;
-            let document = prepared
-                .plugins()
-                .first()
-                .and_then(|plugin| plugin._retired_documents.first())
-                .ok_or_else(|| missing("frozen retired source text missing"))?;
-            assert_eq!(document.contents(), contents);
-            let diagnostics: Vec<_> = prepared
-                .diagnostics()
-                .iter()
-                .filter(|d| d.component() == "lsp")
-                .collect();
-            assert_eq!(diagnostics.len(), 1, "retired LSP declaration was silent");
-            let diagnostic = diagnostics
-                .first()
-                .ok_or_else(|| missing("diagnostic missing"))?;
-            assert_eq!(diagnostic.plugin_id(), Some(id.as_str()));
-            assert_eq!(diagnostic.path(), Some(path.as_path()));
-            assert_eq!(diagnostic.severity(), PluginDiagnosticSeverity::Warning);
-        }
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn lsp_frozen_wrong_kind_and_utf8_errors_keep_healthy_components()
-    -> Result<(), Box<dyn std::error::Error>> {
-        for directory in [true, false] {
-            let temporary = tempfile::tempdir()?;
-            let source = create_plugin(temporary.path(), "lsp.errors", serde_json::json!([]))?;
-            std::fs::write(
-                source.join("hooks/hooks.yaml"),
-                "SessionStart:\n  - matcher: startup\n    hooks:\n      - type: prompt\n        prompt: ready\n",
-            )?;
-            let mut registry = registry(temporary.path());
-            let id = registry.install(&InstallSource::Local(source), PluginScope::Local)?;
-            let path = registry
-                .get(&id)
-                .ok_or_else(|| missing("plugin missing"))?
-                .root
-                .join("lsp.yaml");
-            std::fs::remove_file(&path)?;
-            if directory {
-                std::fs::create_dir(&path)?;
-            } else {
-                std::fs::write(&path, [0xff, 0xfe])?;
-            }
-            let integrator = PluginIntegrator::new();
-            let prepared = integrator.prepare(&mut registry).await;
-            assert!(prepared.is_applicable());
-            let plugin = prepared
-                .plugins()
-                .first()
-                .ok_or_else(|| missing("plugin missing"))?;
-            assert!(plugin._retired_documents.is_empty());
-            assert_eq!(plugin.skills().len(), 1);
-            assert!(plugin.hooks().is_some());
-            assert_eq!(plugin.subagent_documents().len(), 1);
-            let diagnostics: Vec<_> = prepared
-                .diagnostics()
-                .iter()
-                .filter(|d| d.component() == "lsp")
-                .collect();
-            assert_eq!(
-                diagnostics.len(),
-                1,
-                "LSP error lost structured component/path"
-            );
-            let diagnostic = diagnostics
-                .first()
-                .ok_or_else(|| missing("diagnostic missing"))?;
-            assert_eq!(diagnostic.severity(), PluginDiagnosticSeverity::Error);
-            assert_eq!(diagnostic.plugin_id(), Some(id.as_str()));
-            assert_eq!(diagnostic.path(), Some(path.as_path()));
-            let mut agent = crate::agent::ReactAgentBuilder::new()
-                .model("prepared-test")
-                .llm_client(Arc::new(crate::testing::MockLlmClient::new()))
-                .build()?;
-            let receipt = integrator.wire_prepared(&mut agent, &prepared).await?;
-            assert_eq!(receipt.skills_loaded.len(), 1);
-            assert_eq!(receipt.hooks_registered.len(), 1);
-            integrator.rollback(&mut agent, &receipt).await?;
-        }
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn lsp_frozen_diagnostics_are_cached_until_invalidation()
-    -> Result<(), Box<dyn std::error::Error>> {
-        let temporary = tempfile::tempdir()?;
-        let source = create_plugin(temporary.path(), "lsp.cache", serde_json::json!([]))?;
-        let mut registry = registry(temporary.path());
-        let id = registry.install(&InstallSource::Local(source), PluginScope::Local)?;
-        let path = registry
-            .get(&id)
-            .ok_or_else(|| missing("plugin missing"))?
-            .root
-            .join("lsp.yaml");
-        let integrator = PluginIntegrator::new();
-        let first = integrator.prepare(&mut registry).await;
-        assert_eq!(
-            first
-                .diagnostics()
-                .iter()
-                .filter(|d| d.component() == "lsp")
-                .count(),
-            1
-        );
-        let original_text = first
-            .plugins()
-            .first()
-            .and_then(|plugin| plugin._retired_documents.first())
-            .ok_or_else(|| missing("original retired document absent"))?
-            .contents()
-            .to_string();
-        std::fs::write(&path, [0xff])?;
-        for _ in 0..2 {
-            let cached = integrator.prepare(&mut registry).await;
-            assert!(Arc::ptr_eq(&first, &cached));
-            assert_eq!(cached.identity(), first.identity());
-            assert_eq!(cached.generation(), first.generation());
-            assert_eq!(cached.diagnostics(), first.diagnostics());
-            assert_eq!(
-                cached
-                    .plugins()
-                    .first()
-                    .and_then(|plugin| plugin._retired_documents.first())
-                    .map(|document| document.contents()),
-                Some(original_text.as_str())
-            );
-        }
-        std::fs::remove_file(&path)?;
-        let deleted_source_cached = integrator.prepare(&mut registry).await;
-        assert!(Arc::ptr_eq(&first, &deleted_source_cached));
-        assert_eq!(
-            deleted_source_cached
-                .plugins()
-                .first()
-                .and_then(|plugin| plugin._retired_documents.first())
-                .map(|document| document.contents()),
-            Some(original_text.as_str())
-        );
-        std::fs::write(&path, [0xff])?;
-        integrator.invalidate(&registry);
-        let changed = integrator.prepare(&mut registry).await;
-        assert!(changed.generation() > first.generation());
-        assert!(
-            changed
-                .diagnostics()
-                .iter()
-                .any(|d| d.component() == "lsp" && d.severity() == PluginDiagnosticSeverity::Error)
-        );
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn lsp_frozen_true_absence_stays_optional() -> Result<(), Box<dyn std::error::Error>> {
-        let temporary = tempfile::tempdir()?;
-        let source = create_plugin(temporary.path(), "lsp.absent", serde_json::json!([]))?;
-        let mut registry = registry(temporary.path());
-        let id = registry.install(&InstallSource::Local(source), PluginScope::Local)?;
-        let path = registry
-            .get(&id)
-            .ok_or_else(|| missing("plugin missing"))?
-            .root
-            .join("lsp.yaml");
-        std::fs::remove_file(path)?;
-        let prepared = PluginIntegrator::new().prepare(&mut registry).await;
-        assert!(
-            prepared
-                .diagnostics()
-                .iter()
-                .all(|d| d.component() != "lsp")
-        );
-        assert!(prepared.is_applicable());
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn lsp_frozen_read_failure_retains_existing_error()
-    -> Result<(), Box<dyn std::error::Error>> {
-        let temporary = tempfile::tempdir()?;
-        let source = create_plugin(temporary.path(), "lsp.read", serde_json::json!([]))?;
-        let mut registry = registry(temporary.path());
-        let id = registry.install(&InstallSource::Local(source), PluginScope::Local)?;
-        registry.resolve_components_async(&id).await?;
-        let path = registry
-            .get(&id)
-            .ok_or_else(|| missing("plugin missing"))?
-            .root
-            .join("lsp.yaml");
-        let variables = registry.variables_for(&id)?;
-        std::fs::remove_file(&path)?;
-        let mut diagnostics = Vec::new();
-        assert!(
-            freeze_document(&id, path.clone(), &variables, "lsp", &mut diagnostics)
-                .await
-                .is_none()
-        );
-        let diagnostic = diagnostics
-            .first()
-            .ok_or_else(|| missing("read error missing"))?;
-        assert_eq!(diagnostic.component(), "lsp");
-        assert_eq!(diagnostic.plugin_id(), Some(id.as_str()));
-        assert_eq!(diagnostic.path(), Some(path.as_path()));
-        assert_eq!(diagnostic.severity(), PluginDiagnosticSeverity::Error);
-        Ok(())
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn lsp_frozen_fifo_is_rejected_before_text_read() -> Result<(), Box<dyn std::error::Error>>
-    {
-        let temporary = tempfile::tempdir()?;
-        let path = temporary.path().join("lsp.yaml");
-        let status = std::process::Command::new("mkfifo").arg(&path).status()?;
-        assert!(status.success(), "could not create FIFO fixture");
-        let mut diagnostics = Vec::new();
-        // Call the metadata boundary directly: a regression fails without ever
-        // opening a FIFO, which could block the test runtime indefinitely.
-        assert!(
-            inspect_lsp_source("fifo", None, temporary.path(), &mut diagnostics)
-                .await
-                .is_none()
-        );
-        let diagnostic = diagnostics
-            .first()
-            .ok_or_else(|| missing("FIFO error missing"))?;
-        assert_eq!(diagnostic.component(), "lsp");
-        assert_eq!(diagnostic.path(), Some(path.as_path()));
-        assert_eq!(diagnostic.severity(), PluginDiagnosticSeverity::Error);
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn lsp_frozen_resolved_source_disappearance_is_an_error()
-    -> Result<(), Box<dyn std::error::Error>> {
-        let temporary = tempfile::tempdir()?;
-        let path = temporary.path().join("lsp.yaml");
-        std::fs::write(&path, "languages: {}\n")?;
-        std::fs::remove_file(&path)?;
-        let mut diagnostics = Vec::new();
-        assert!(
-            inspect_lsp_source(
-                "gone",
-                Some(path.clone()),
-                temporary.path(),
-                &mut diagnostics
-            )
-            .await
-            .is_none()
-        );
-        let diagnostic = diagnostics
-            .first()
-            .ok_or_else(|| missing("disappearance error missing"))?;
-        assert_eq!(diagnostic.path(), Some(path.as_path()));
-        assert_eq!(diagnostic.severity(), PluginDiagnosticSeverity::Error);
-        Ok(())
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn lsp_frozen_broken_looping_and_valid_links_are_distinguished()
-    -> Result<(), Box<dyn std::error::Error>> {
-        for kind in ["broken", "loop", "valid"] {
-            let temporary = tempfile::tempdir()?;
-            let source = create_plugin(temporary.path(), "lsp.links", serde_json::json!([]))?;
-            let mut registry = registry(temporary.path());
-            let id = registry.install(&InstallSource::Local(source), PluginScope::Local)?;
-            let root = registry
-                .get(&id)
-                .ok_or_else(|| missing("plugin missing"))?
-                .root
-                .clone();
-            let path = root.join("lsp.yaml");
-            std::fs::remove_file(&path)?;
-            let target = if kind == "loop" {
-                path.clone()
-            } else {
-                root.join("target.yaml")
-            };
-            if kind == "valid" {
-                std::fs::write(&target, "languages: {}\n")?;
-            }
-            std::os::unix::fs::symlink(&target, &path)?;
-            let integrator = PluginIntegrator::new();
-            let prepared = integrator.prepare(&mut registry).await;
-            let diagnostics: Vec<_> = prepared
-                .diagnostics()
-                .iter()
-                .filter(|d| d.component() == "lsp")
-                .collect();
-            assert_eq!(
-                diagnostics.len(),
-                1,
-                "{kind} declaration lost its diagnostic"
-            );
-            let diagnostic = diagnostics
-                .first()
-                .ok_or_else(|| missing("link diagnostic missing"))?;
-            assert_eq!(diagnostic.plugin_id(), Some(id.as_str()));
-            assert_eq!(diagnostic.path(), Some(path.as_path()));
-            assert_eq!(
-                diagnostic.severity(),
-                if kind == "valid" {
-                    PluginDiagnosticSeverity::Warning
-                } else {
-                    PluginDiagnosticSeverity::Error
-                }
-            );
-            if kind == "valid" {
-                let original = prepared
-                    .plugins()
-                    .first()
-                    .and_then(|plugin| plugin._retired_documents.first())
-                    .ok_or_else(|| missing("frozen valid link text absent"))?
-                    .contents()
-                    .to_string();
-                let second = root.join("second.yaml");
-                let changed = "languages: {}\nsource: changed\n";
-                std::fs::write(&second, changed)?;
-                std::fs::remove_file(&path)?;
-                std::os::unix::fs::symlink(&second, &path)?;
-                let cached = integrator.prepare(&mut registry).await;
-                assert!(Arc::ptr_eq(&prepared, &cached));
-                assert_eq!(
-                    cached
-                        .plugins()
-                        .first()
-                        .and_then(|plugin| plugin._retired_documents.first())
-                        .map(|document| document.contents()),
-                    Some(original.as_str())
-                );
-                assert_eq!(cached.identity(), prepared.identity());
-                integrator.invalidate(&registry);
-                let refreshed = integrator.prepare(&mut registry).await;
-                assert_eq!(
-                    refreshed
-                        .plugins()
-                        .first()
-                        .and_then(|plugin| plugin._retired_documents.first())
-                        .map(|document| document.contents()),
-                    Some(changed)
-                );
-                assert_ne!(refreshed.identity(), prepared.identity());
-            }
-        }
-        Ok(())
     }
 
     #[tokio::test]
@@ -2157,7 +1751,6 @@ mod tests {
                 "agents/reviewer.md",
                 "---\nname: reviewer\ndescription: Reviews changes\n---\nChanged.\n",
             ),
-            ("lsp.yaml", "languages:\n  rust: {}\n"),
         ];
         let mut previous_identity = first.identity().to_string();
         let mut previous_plugin_identity = first
@@ -2533,14 +2126,7 @@ mod tests {
         assert_eq!(plugin.skills().len(), 1);
         assert!(plugin.hooks().is_none());
         assert_eq!(plugin.subagent_documents().len(), 1);
-        assert_eq!(plugin._retired_documents.len(), 1);
-        assert!(
-            prepared
-                .diagnostics()
-                .iter()
-                .any(|diagnostic| diagnostic.component() == "lsp"
-                    && diagnostic.severity() == PluginDiagnosticSeverity::Warning)
-        );
+
         assert!(prepared.diagnostics().iter().any(|diagnostic| {
             diagnostic.plugin_id() == Some("invalid.test")
                 && diagnostic.component() == "hooks"
@@ -2600,13 +2186,7 @@ mod tests {
         );
         assert!(plugin.hooks().is_some());
         assert_eq!(plugin.subagent_documents().len(), 1);
-        assert!(
-            prepared
-                .diagnostics()
-                .iter()
-                .any(|diagnostic| diagnostic.component() == "lsp"
-                    && diagnostic.severity() == PluginDiagnosticSeverity::Warning)
-        );
+
         assert!(prepared.diagnostics().iter().any(|diagnostic| {
             diagnostic.plugin_id() == Some("skills.test")
                 && diagnostic.component() == "skill"
@@ -3298,6 +2878,267 @@ mod tests {
             Err(PluginWiringError::InvalidReceipt { .. })
         ));
         integrator.rollback(&mut agent, &published).await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn current_subagent_document_errors_keep_healthy_sibling_components()
+    -> Result<(), Box<dyn std::error::Error>> {
+        for directory in [true, false] {
+            let temporary = tempfile::tempdir()?;
+            let source = create_plugin(temporary.path(), "document.errors", serde_json::json!([]))?;
+            std::fs::write(
+                source.join("hooks/hooks.yaml"),
+                "SessionStart:\n  - matcher: startup\n    hooks:\n      - type: prompt\n        prompt: ready\n",
+            )?;
+            let mut registry = registry(temporary.path());
+            let id = registry.install(&InstallSource::Local(source), PluginScope::Local)?;
+            let variables = registry.variables_for(&id)?;
+            let path = variables.plugin_root.join("agents/reviewer.md");
+            std::fs::remove_file(&path)?;
+            if directory {
+                std::fs::create_dir(&path)?;
+            } else {
+                std::fs::write(&path, [0xff, 0xfe])?;
+            }
+            let mut diagnostics = Vec::new();
+            assert!(
+                freeze_document(&id, path.clone(), &variables, "subagent", &mut diagnostics)
+                    .await
+                    .is_none()
+            );
+            let error = diagnostics
+                .first()
+                .ok_or_else(|| missing("document error missing"))?;
+            assert_eq!(error.plugin_id(), Some(id.as_str()));
+            assert_eq!(error.path(), Some(path.as_path()));
+            assert_eq!(error.component(), "subagent");
+            assert_eq!(error.severity(), PluginDiagnosticSeverity::Error);
+            let integrator = PluginIntegrator::new();
+            let prepared = integrator.prepare(&mut registry).await;
+            assert!(prepared.is_applicable());
+            let plugin = prepared
+                .plugins()
+                .first()
+                .ok_or_else(|| missing("plugin missing"))?;
+            assert_eq!(plugin.skills().len(), 1);
+            assert!(plugin.hooks().is_some());
+            assert!(plugin.subagent_documents().is_empty());
+            let mut agent = crate::agent::ReactAgentBuilder::new()
+                .model("prepared-test")
+                .llm_client(Arc::new(crate::testing::MockLlmClient::new()))
+                .build()?;
+            let receipt = integrator.wire_prepared(&mut agent, &prepared).await?;
+            assert_eq!(receipt.skills_loaded.len(), 1);
+            assert_eq!(receipt.hooks_registered.len(), 1);
+            integrator.rollback(&mut agent, &receipt).await?;
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn current_subagent_documents_remain_frozen_until_cache_invalidation()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temporary = tempfile::tempdir()?;
+        let source = create_plugin(temporary.path(), "document.cache", serde_json::json!([]))?;
+        let mut registry = registry(temporary.path());
+        let id = registry.install(&InstallSource::Local(source), PluginScope::Local)?;
+        let path = registry
+            .get(&id)
+            .ok_or_else(|| missing("plugin missing"))?
+            .root
+            .join("agents/reviewer.md");
+        let integrator = PluginIntegrator::new();
+        let first = integrator.prepare(&mut registry).await;
+        let original = first
+            .plugins()
+            .first()
+            .and_then(|plugin| plugin.subagent_documents().first())
+            .ok_or_else(|| missing("frozen document missing"))?
+            .contents()
+            .to_string();
+        std::fs::write(&path, [0xff])?;
+        for _ in 0..2 {
+            let cached = integrator.prepare(&mut registry).await;
+            assert!(Arc::ptr_eq(&first, &cached));
+            assert_eq!(cached.identity(), first.identity());
+            assert_eq!(cached.generation(), first.generation());
+            assert_eq!(cached.diagnostics(), first.diagnostics());
+            assert_eq!(
+                cached
+                    .plugins()
+                    .first()
+                    .and_then(|plugin| plugin.subagent_documents().first())
+                    .map(|doc| doc.contents()),
+                Some(original.as_str())
+            );
+        }
+        std::fs::remove_file(&path)?;
+        let cached = integrator.prepare(&mut registry).await;
+        assert!(Arc::ptr_eq(&first, &cached));
+        assert_eq!(
+            cached
+                .plugins()
+                .first()
+                .and_then(|plugin| plugin.subagent_documents().first())
+                .map(|doc| doc.contents()),
+            Some(original.as_str())
+        );
+        std::fs::write(&path, [0xff])?;
+        integrator.invalidate(&registry);
+        let changed = integrator.prepare(&mut registry).await;
+        assert!(changed.generation() > first.generation());
+        assert!(
+            changed
+                .diagnostics()
+                .iter()
+                .any(|error| error.component() == "subagent"
+                    && error.path() == Some(path.as_path())
+                    && error.severity() == PluginDiagnosticSeverity::Error)
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn current_resolved_document_disappearance_retains_structured_error()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temporary = tempfile::tempdir()?;
+        let source = create_plugin(temporary.path(), "document.gone", serde_json::json!([]))?;
+        let mut registry = registry(temporary.path());
+        let id = registry.install(&InstallSource::Local(source), PluginScope::Local)?;
+        registry.resolve_components_async(&id).await?;
+        let variables = registry.variables_for(&id)?;
+        let path = variables.plugin_root.join("agents/reviewer.md");
+        std::fs::remove_file(&path)?;
+        let mut diagnostics = Vec::new();
+        assert!(
+            freeze_document(&id, path.clone(), &variables, "subagent", &mut diagnostics)
+                .await
+                .is_none()
+        );
+        let error = diagnostics
+            .first()
+            .ok_or_else(|| missing("read error missing"))?;
+        assert_eq!(error.plugin_id(), Some(id.as_str()));
+        assert_eq!(error.path(), Some(path.as_path()));
+        assert_eq!(error.component(), "subagent");
+        assert_eq!(error.severity(), PluginDiagnosticSeverity::Error);
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn current_document_fifo_is_rejected_before_open()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temporary = tempfile::tempdir()?;
+        let path = temporary.path().join("agent.md");
+        let status = std::process::Command::new("mkfifo").arg(&path).status()?;
+        assert!(status.success());
+        let mut diagnostics = Vec::new();
+        assert!(!inspect_document_source("fifo", &path, "subagent", &mut diagnostics).await);
+        let error = diagnostics
+            .first()
+            .ok_or_else(|| missing("FIFO error missing"))?;
+        assert_eq!(error.path(), Some(path.as_path()));
+        assert_eq!(error.severity(), PluginDiagnosticSeverity::Error);
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn current_document_links_keep_source_identity_without_rereading_frozen_text()
+    -> Result<(), Box<dyn std::error::Error>> {
+        for kind in ["broken", "loop", "valid"] {
+            let temporary = tempfile::tempdir()?;
+            let source = create_plugin(temporary.path(), "document.links", serde_json::json!([]))?;
+            let mut registry = registry(temporary.path());
+            let id = registry.install(&InstallSource::Local(source), PluginScope::Local)?;
+            let variables = registry.variables_for(&id)?;
+            let path = variables.plugin_root.join("frozen-agent.md");
+            let target = if kind == "loop" {
+                path.clone()
+            } else {
+                variables.plugin_root.join("target-agent.md")
+            };
+            if kind == "valid" {
+                std::fs::write(&target, "Original generic document 🧭")?;
+            }
+            std::os::unix::fs::symlink(&target, &path)?;
+            let mut diagnostics = Vec::new();
+            let document =
+                freeze_document(&id, path.clone(), &variables, "subagent", &mut diagnostics).await;
+            if kind == "valid" {
+                let document = document.ok_or_else(|| missing("valid linked document missing"))?;
+                assert_eq!(document.contents(), "Original generic document 🧭");
+                assert_eq!(document.source_path(), path.as_path());
+                let second = variables.plugin_root.join("second-agent.md");
+                std::fs::write(&second, "Changed generic document")?;
+                std::fs::remove_file(&path)?;
+                std::os::unix::fs::symlink(&second, &path)?;
+                assert_eq!(
+                    document.contents(),
+                    "Original generic document 🧭",
+                    "frozen source never rereads changed links"
+                );
+                let changed =
+                    freeze_document(&id, path.clone(), &variables, "subagent", &mut Vec::new())
+                        .await
+                        .ok_or_else(|| missing("updated linked document missing"))?;
+                assert_eq!(changed.contents(), "Changed generic document");
+            } else {
+                assert!(document.is_none());
+                let error = diagnostics
+                    .first()
+                    .ok_or_else(|| missing("link error missing"))?;
+                assert_eq!(error.path(), Some(path.as_path()));
+                assert_eq!(error.severity(), PluginDiagnosticSeverity::Error);
+            }
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn obsolete_plugin_files_do_not_enter_current_preparation_or_identity()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temporary = tempfile::tempdir()?;
+        let source = create_plugin(temporary.path(), "current.inputs", serde_json::json!([]))?;
+        let mut registry = registry(temporary.path());
+        let id = registry.install(&InstallSource::Local(source), PluginScope::Local)?;
+        let root = registry
+            .get(&id)
+            .ok_or_else(|| missing("plugin missing"))?
+            .root
+            .clone();
+        let integrator = PluginIntegrator::new();
+        let first = integrator.prepare(&mut registry).await;
+        let obsolete = root.join("lsp.yaml");
+        let bytes = [0xff, 0xfe];
+        std::fs::write(&obsolete, bytes)?;
+        integrator.invalidate(&registry);
+        let second = integrator.prepare(&mut registry).await;
+        assert_eq!(first.identity(), second.identity());
+        assert!(second.generation() > first.generation());
+        assert_eq!(
+            first
+                .plugins()
+                .first()
+                .map(|plugin| plugin.content_identity()),
+            second
+                .plugins()
+                .first()
+                .map(|plugin| plugin.content_identity())
+        );
+        assert!(
+            second
+                .diagnostics()
+                .iter()
+                .all(|diagnostic| diagnostic.component() != "lsp")
+        );
+        assert_eq!(
+            std::fs::read(&obsolete)?,
+            bytes,
+            "user-owned obsolete files are neither interpreted nor changed"
+        );
         Ok(())
     }
 }

@@ -15,7 +15,10 @@
 //! cargo run -p echo-agent-learning --example demo50_subagent_communication --features subagent
 //! ```
 
-use echo_agent::agent::{Agent, AgentEvent, AgentSteerError, AgentSteerReceipt, CancellationToken};
+use echo_agent::agent::{
+    Agent, AgentEvent, AgentInvocationContext, AgentPhase, AgentSteerError, AgentSteerReceipt,
+    CancellationToken, EventIdentity, ExecutionStatus, ExecutionStatusKind,
+};
 use echo_agent::error::{ReactError, Result};
 use echo_agent::llm::types::Message;
 use echo_agent::subagent::{
@@ -61,13 +64,48 @@ struct SteerableSubagent {
 }
 
 impl SteerableSubagent {
-    fn blocking_stream<'a>(&'a self) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
+    fn blocking_stream<'a>(
+        &'a self,
+        message: Message,
+        cancel: CancellationToken,
+        invocation: AgentInvocationContext,
+    ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
         let release = self.release.clone();
         Box::pin(async move {
-            Ok(Box::pin(futures::stream::once(async move {
+            let identity = EventIdentity::from_invocation(&invocation)?;
+            let execution_id = identity
+                .execution_id
+                .as_ref()
+                .map(|value| value.as_str())
+                .unwrap_or(identity.turn_id.as_str())
+                .to_string();
+            let request_id = identity
+                .message_id
+                .as_ref()
+                .map(|value| value.as_str().to_string())
+                .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+            let status = move |kind, sequence| {
+                AgentEvent::ExecutionStatus(ExecutionStatus {
+                    adapter_generated: false,
+                    execution_id: execution_id.clone(),
+                    request_id: Some(request_id.clone()),
+                    sequence,
+                    phase: AgentPhase::Thinking,
+                    status: kind,
+                    reason: None,
+                })
+            };
+            // 本示例 source 自己拥有释放与终态；完整输入及资源随原流保留到 EOF。
+            let source = async_stream::stream! {
+                let _message = message;
+                let _invocation = invocation;
+                let _cancel = cancel;
+                yield Ok(status(ExecutionStatusKind::Started, 0));
                 release.notified().await;
-                Ok(AgentEvent::FinalAnswer("subagent finished".to_string()))
-            })) as BoxStream<'a, Result<AgentEvent>>)
+                yield Ok(AgentEvent::FinalAnswer("subagent finished".to_string()));
+                yield Ok(status(ExecutionStatusKind::Settled, 1));
+            };
+            Ok(Box::pin(source) as BoxStream<'a, Result<AgentEvent>>)
         })
     }
 
@@ -89,23 +127,13 @@ impl Agent for SteerableSubagent {
         "demo subagent"
     }
 
-    fn execute<'a>(&'a self, _task: &'a str) -> BoxFuture<'a, Result<String>> {
-        Box::pin(async { Ok("done".to_string()) })
-    }
-
-    fn execute_stream<'a>(
+    fn execute_stream_message_with_invocation_context<'a>(
         &'a self,
-        _task: &'a str,
+        message: Message,
+        cancel: CancellationToken,
+        invocation: AgentInvocationContext,
     ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
-        self.blocking_stream()
-    }
-
-    fn execute_stream_message_with_cancel<'a>(
-        &'a self,
-        _message: Message,
-        _cancel: CancellationToken,
-    ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
-        self.blocking_stream()
+        self.blocking_stream(message, cancel, invocation)
     }
 
     fn steer_input_tracked(

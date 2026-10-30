@@ -47,7 +47,7 @@ execute(task)
           ├─ 并行执行所有工具调用：
           │     ├─ 人工审批检查（若该工具已标记）
           │     ├─ ToolManager.execute_tool()
-          │     └─ 触发 on_tool_start / on_tool_end 回调
+          │     └─ 触发 on_tool_start_with_id / on_tool_end_with_id 回调
           │
           ├─ 原生最终候选 → 校验/Stop/持久化/结算后返回
           │
@@ -142,16 +142,16 @@ impl AgentCallback for MyCallback {
         })
     }
 
-    fn on_tool_start<'a>(&'a self, agent: &'a str, tool: &'a str, args: &'a Value) -> BoxFuture<'a, ()> {
+    fn on_tool_start_with_id<'a>(&'a self, agent: &'a str, call_id: &'a str, tool: &'a str, args: &'a Value) -> BoxFuture<'a, ()> {
         Box::pin(async move {
-            println!("[{}] 调用工具: {} {:?}", agent, tool, args);
+            println!("[{}] 调用工具: {} call_id={call_id} {:?}", agent, tool, args);
         })
     }
 
-    fn on_tool_end<'a>(&'a self, agent: &'a str, tool: &'a str, result: &'a str) -> BoxFuture<'a, ()> {
+    fn on_tool_end_with_id<'a>(&'a self, agent: &'a str, call_id: &'a str, tool: &'a str, result: &'a str) -> BoxFuture<'a, ()> {
         Box::pin(async move {
             let preview: String = result.chars().take(80).collect();
-            println!("[{}] 工具结果: {} -> {}", agent, tool, preview);
+            println!("[{}] 工具结果: {} call_id={call_id} -> {}", agent, tool, preview);
         })
     }
 
@@ -192,10 +192,10 @@ use std::sync::Arc;
 
 struct LogCallback;
 
-#[async_trait::async_trait]
-impl AgentCallback for LogCallback {
-    async fn on_tool_start(&self, agent: &str, tool: &str, args: &serde_json::Value) {
-        println!("  [{}] 调用工具 {} args={}", agent, tool, args);
+#[echo_agent::callback]
+impl LogCallback {
+    async fn on_tool_start_with_id(&self, agent: &str, call_id: &str, tool: &str, args: &serde_json::Value) {
+        println!("  [{}] 调用工具 {} call_id={call_id} args={}", agent, tool, args);
     }
     async fn on_final_answer(&self, _agent: &str, answer: &str) {
         println!("最终答案: {}", answer);

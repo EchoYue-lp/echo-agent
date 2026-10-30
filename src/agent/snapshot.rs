@@ -151,7 +151,7 @@ fn transcript_projection_messages(
 }
 
 /// 沿现有context-only transform计算派生cursor，原source/cursor不改。
-pub(crate) fn derive_control_recovery_checkpoint(
+pub(crate) fn derive_context_view_checkpoint(
     original: &crate::state::ManagedRuntimeStateSnapshot,
     messages: Vec<Message>,
 ) -> crate::error::Result<crate::state::AgentCheckpoint> {
@@ -159,7 +159,7 @@ pub(crate) fn derive_control_recovery_checkpoint(
         .checkpoint
         .as_ref()
         .ok_or_else(|| persistence_configuration_error("checkpoint recovery source missing"))?;
-    let payload = source.inspect_payload_for_recovery()?;
+    let payload = source.restore_managed_runtime_payload()?;
     if payload.pending_transcript_projection.is_some() {
         return Err(persistence_configuration_error(
             "checkpoint recovery cannot overwrite pending projection",
@@ -302,6 +302,24 @@ impl TranscriptProjectionCursor {
         self.projected = checkpoint.projected;
         self.context_only = checkpoint.context_only;
     }
+}
+
+/// 原read-map的来源观察；None是未取得source证明的诊断事实，不能授予写许可。
+/// 仅进程内Rust数据，没有序列化或新wire字段。
+pub type FileReadHistory = std::collections::HashMap<
+    String,
+    Vec<(
+        Option<Arc<dyn echo_core::tools::filesystem::FileSystem>>,
+        std::time::Instant,
+    )>,
+>;
+
+pub(crate) fn same_file_tracking_source(
+    left: &Arc<dyn echo_core::tools::filesystem::FileSystem>,
+    right: &Arc<dyn echo_core::tools::filesystem::FileSystem>,
+) -> bool {
+    // paths_are_native明确声明本进程同一namespace；其它来源只认同一保留Arc。
+    (left.paths_are_native() && right.paths_are_native()) || Arc::ptr_eq(left, right)
 }
 
 // ── RuntimeConfig ────────────────────────────────────────────────────
@@ -474,13 +492,7 @@ impl RuntimeConfig {
 pub(crate) fn effective_runtime_state_id<'a>(
     configured_runtime_state_id: Option<&'a str>,
     invocation: Option<&'a echo_core::agent::AgentInvocationContext>,
-    legacy: Option<&'a crate::agent::react::LegacyExternalContextSnapshot>,
 ) -> Option<&'a str> {
-    let legacy_conversation_id = if invocation.is_none() {
-        legacy.and_then(|context| context.conversation_id.as_deref())
-    } else {
-        None
-    };
     invocation
         .and_then(|context| context.runtime_state_id.as_deref())
         .or_else(|| {
@@ -488,7 +500,6 @@ pub(crate) fn effective_runtime_state_id<'a>(
                 .and_then(|context| context.runtime.as_ref())
                 .and_then(|runtime| runtime.conversation_id.as_deref())
         })
-        .or(legacy_conversation_id)
         .or(configured_runtime_state_id)
 }
 
@@ -813,8 +824,7 @@ pub struct AgentRunSnapshot {
     /// Shared same-turn input mailbox.
     pub(crate) turn_steer_mailbox: Arc<crate::agent::steer::TurnSteerMailbox>,
     /// Recently read files for read-before-edit enforcement (path → read instant).
-    pub recently_read_files:
-        Arc<std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>>>,
+    pub recently_read_files: Arc<std::sync::Mutex<FileReadHistory>>,
     /// Run store for trace persistence.
     pub run_store: Option<Arc<dyn RunStore>>,
     /// Observer for Trace and Audit persistence delivery failures.
@@ -824,6 +834,8 @@ pub struct AgentRunSnapshot {
     /// Unique trace invocation ID. This is intentionally distinct from the
     /// product/business run ID in `current_run_id`.
     pub trace_run_id: Option<String>,
+    /// Guard前恢复只暂存本次恢复事实；trace准入后才发布，不借用上一轮trace。
+    pub(crate) pending_checkpoint_resume: Option<crate::trace::RunEvent>,
     /// Invocation-local authority for calls that actually entered ExecuteStage.
     executing_tool_call_ids: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
     /// Current user-input/agent turn ID.
@@ -836,8 +848,7 @@ pub struct AgentRunSnapshot {
     pub current_message: Option<crate::llm::types::Message>,
     /// Current concrete subagent/tool execution ID.
     pub current_execution_id: Option<String>,
-    /// 外部 run 级上下文（跨 spawn 安全，从 ReactAgent.external_* 抓取）。
-    /// 与 current_run_id 同源、同生命周期（set/clear 在同一处）。
+    /// 调用值携带的run上下文；随同一快照跨spawn保留，绝不回读Agent共享setter。
     pub external_cancel: Option<std::sync::Arc<tokio_util::sync::CancellationToken>>,
     pub external_trace_sink: Option<echo_core::tools::TraceSinkFn>,
     pub external_delegation_policy: Option<echo_core::tools::NestedDelegationPolicy>,
@@ -863,7 +874,7 @@ pub struct AgentRunSnapshot {
     /// and compression estimates converge to the model's actual tokenization.
     pub calibrated_tokenizer: Arc<echo_core::tokenizer::CalibratedTokenizer>,
     /// Runtime state store for ReAct checkpointing (messages + skills).
-    /// Legacy `current_plan` values remain raw Store data and are not restored.
+    /// 计划状态由revisioned Task graph持有，运行时检查点不承载计划文本。
     pub state_store: Option<Arc<dyn crate::state::RuntimeStateStore>>,
     /// Conversation store for user-visible transcript projection. When both
     /// this and `config.conversation_id` are set, the run loop persists
@@ -1252,7 +1263,7 @@ impl<'a> AgentPersistenceCoordinator<'a> {
         Ok(crate::state::AgentCheckpoint {
             conversation_id: runtime_state_id.clone(),
             messages_json,
-            current_plan: None,
+
             active_skills: self.snapshot.active_skill_names(),
             blocked_reason,
             working_dir: self.snapshot.config.working_dir.clone(),
@@ -1834,7 +1845,7 @@ impl<'a> AgentPersistenceCoordinator<'a> {
                 matches!(version, crate::state::RuntimeStateVersion::Managed { .. })
             });
         if versioned {
-            // 已经通过原恢复CAS进入revisioned owner，不能退回无版本save覆盖。
+            // 当前revisioned owner的保存仍须沿原CAS，不能退回无版本save覆盖。
             let (scope_revision, expected, current) = self
                 .current_runtime_state_observed(store.as_ref(), scope_id, runtime_state_id, true)
                 .await?;
@@ -1849,7 +1860,7 @@ impl<'a> AgentPersistenceCoordinator<'a> {
                 // 不把未投递到ConversationStore的内容伪造为耐久transcript事实。
                 let messages = checkpoint.restore_messages()?;
                 checkpoint.messages_json =
-                    derive_control_recovery_checkpoint(current, messages)?.messages_json;
+                    derive_context_view_checkpoint(current, messages)?.messages_json;
             }
             let receipt = self
                 .save_frozen_checkpoint_observed(
@@ -1925,29 +1936,17 @@ impl AgentRunSnapshot {
 
     /// Create a snapshot from a [`super::ReactAgent`].
     pub fn from_agent(agent: &super::ReactAgent) -> Self {
-        let legacy = agent.capture_legacy_external_context();
-        Self::from_agent_source(agent, None, Some(&legacy))
+        Self::from_agent_with_invocation(
+            agent,
+            &echo_core::agent::AgentInvocationContext::default(),
+        )
     }
 
-    pub(crate) fn from_agent_with_legacy_context(
-        agent: &super::ReactAgent,
-        legacy: &crate::agent::react::LegacyExternalContextSnapshot,
-    ) -> Self {
-        Self::from_agent_source(agent, None, Some(legacy))
-    }
-
-    /// Create a snapshot whose run-scoped fields come from one invocation value.
+    /// 所有调用级状态从一个显式值复制；plain快照使用默认invocation。
+    /// 不读取Agent共享可变run状态，也不以trace/turn id补齐缺失业务run id。
     pub fn from_agent_with_invocation(
         agent: &super::ReactAgent,
         invocation: &echo_core::agent::AgentInvocationContext,
-    ) -> Self {
-        Self::from_agent_source(agent, Some(invocation), None)
-    }
-
-    fn from_agent_source(
-        agent: &super::ReactAgent,
-        invocation: Option<&echo_core::agent::AgentInvocationContext>,
-        legacy: Option<&crate::agent::react::LegacyExternalContextSnapshot>,
     ) -> Self {
         let now = std::time::SystemTime::now();
         let retained_model_profile = agent
@@ -1972,41 +1971,31 @@ impl AgentRunSnapshot {
         config.input_modalities = agent
             .llm_config()
             .map(|llm_config| llm_config.input_modalities.clone());
-        if let Some(working_dir) = invocation.and_then(|context| context.working_dir.as_ref()) {
+        if let Some(working_dir) = invocation.working_dir.as_ref() {
             config.working_dir = Some(working_dir.clone());
         }
-        if let Some(run_budget) = invocation.and_then(|context| context.run_budget.as_ref()) {
+        if let Some(run_budget) = invocation.run_budget.as_ref() {
             config.run_budget = run_budget.clone();
         }
-        let runtime = invocation.and_then(|context| context.runtime.as_ref());
-        // Select once with the original precedence: an explicit invocation,
-        // including one with no runtime policy, never falls back to legacy.
-        let external_delegation_policy = if invocation.is_some() {
-            runtime.and_then(|context| context.delegation_policy)
-        } else {
-            legacy.and_then(|context| context.delegation_policy)
-        };
+        let runtime = invocation.runtime.as_ref();
+        let external_delegation_policy = runtime.and_then(|context| context.delegation_policy);
         if let Some(conversation_id) = runtime.and_then(|context| context.conversation_id.clone()) {
-            config.conversation_id = Some(conversation_id.clone());
-        } else if invocation.is_none()
-            && let Some(conversation_id) =
-                legacy.and_then(|context| context.conversation_id.clone())
-        {
-            config.conversation_id = Some(conversation_id.clone());
+            config.conversation_id = Some(conversation_id);
         }
         config.runtime_state_id =
-            effective_runtime_state_id(configured_runtime_state_id.as_deref(), invocation, legacy)
+            effective_runtime_state_id(configured_runtime_state_id.as_deref(), Some(invocation))
                 .map(str::to_string);
         let transcript_generation_id = invocation
-            .and_then(|context| context.transcript_generation_id.clone())
+            .transcript_generation_id
+            .clone()
             .or_else(|| config.runtime_state_id.clone());
         let tools = ToolRuntime::from_agent_with_tool_scope(
             agent,
             model_profile.as_ref(),
-            invocation.and_then(|context| context.disabled_tools.as_ref()),
-            invocation.and_then(|context| context.visible_tools.as_ref()),
-            invocation.and_then(|context| context.allowed_tools.as_ref()),
-            invocation.and_then(|context| context.tool_access),
+            invocation.disabled_tools.as_ref(),
+            invocation.visible_tools.as_ref(),
+            invocation.allowed_tools.as_ref(),
+            invocation.tool_access,
             external_delegation_policy,
         );
         let skill_activation = agent.tools.skill_registry.activation_handle();
@@ -2025,80 +2014,39 @@ impl AgentRunSnapshot {
             client: agent.client().clone(),
             llm_client: agent.llm_client().cloned(),
             thinking: agent.thinking().cloned(),
-            cancel_token: invocation.and_then(|context| {
-                context.cancel.clone().or_else(|| {
-                    runtime
-                        .and_then(|value| value.cancel.as_ref())
-                        .map(|cancel| cancel.as_ref().clone())
-                })
+            cancel_token: invocation.cancel.clone().or_else(|| {
+                runtime
+                    .and_then(|value| value.cancel.as_ref())
+                    .map(|cancel| cancel.as_ref().clone())
             }),
             turn_steer_mailbox: Arc::clone(&agent.turn_steer_mailbox),
             recently_read_files: Arc::clone(&agent.recently_read_files),
             run_store: agent.run_store.clone(),
             diagnostic_delivery_observer: agent.diagnostic_delivery_observer.clone(),
-            current_run_id: if invocation.is_some() {
-                runtime.and_then(|context| context.run_id.clone())
-            } else {
-                legacy.and_then(|context| context.current_run_id.clone())
-            },
-            trace_run_id: if invocation.is_some() {
-                None
-            } else {
-                agent.capture_current_trace_run_id()
-            },
+            current_run_id: runtime.and_then(|context| context.run_id.clone()),
+            trace_run_id: None,
+            pending_checkpoint_resume: None,
             executing_tool_call_ids: Arc::new(std::sync::Mutex::new(
                 std::collections::HashSet::new(),
             )),
-            current_turn_id: if invocation.is_some() {
-                runtime.and_then(|context| context.turn_id.clone())
-            } else {
-                legacy.and_then(|context| context.turn_id.clone())
-            },
+            current_turn_id: runtime.and_then(|context| context.turn_id.clone()),
             turn_steer_incarnation: None,
-            current_message_id: if invocation.is_some() {
-                runtime.and_then(|context| context.message_id.clone())
-            } else {
-                legacy.and_then(|context| context.message_id.clone())
-            },
+            current_message_id: runtime.and_then(|context| context.message_id.clone()),
             current_message: None,
-            current_execution_id: if invocation.is_some() {
-                runtime.and_then(|context| context.execution_id.clone())
-            } else {
-                legacy.and_then(|context| context.execution_id.clone())
-            },
-            external_cancel: if let Some(context) = invocation {
-                runtime
-                    .and_then(|value| value.cancel.clone())
-                    .or_else(|| context.cancel.clone().map(Arc::new))
-            } else {
-                legacy.and_then(|context| context.cancel.clone())
-            },
-            external_trace_sink: if invocation.is_some() {
-                runtime.and_then(|context| context.trace_sink.clone())
-            } else {
-                legacy.and_then(|context| context.trace_sink.clone())
-            },
+            current_execution_id: runtime.and_then(|context| context.execution_id.clone()),
+            external_cancel: runtime
+                .and_then(|value| value.cancel.clone())
+                .or_else(|| invocation.cancel.clone().map(Arc::new)),
+            external_trace_sink: runtime.and_then(|context| context.trace_sink.clone()),
             external_delegation_policy,
-            subagent_lineage: if invocation.is_some() {
-                runtime.and_then(|context| context.subagent_lineage.clone())
-            } else {
-                None
-            },
-            external_uplink: if invocation.is_some() {
-                runtime.and_then(|context| context.uplink.clone())
-            } else {
-                None
-            },
-            resource_guards: if let Some(context) = invocation {
+            subagent_lineage: runtime.and_then(|context| context.subagent_lineage.clone()),
+            external_uplink: runtime.and_then(|context| context.uplink.clone()),
+            resource_guards: {
                 let mut guards = runtime
                     .map(|runtime| runtime.resource_guards.clone())
                     .unwrap_or_default();
-                guards.extend(context.resource_guards.iter().cloned());
+                guards.extend(invocation.resource_guards.iter().cloned());
                 guards
-            } else {
-                legacy
-                    .map(|context| context.resource_guards.clone())
-                    .unwrap_or_default()
             },
             #[cfg(feature = "human-loop")]
             permission_service: agent.approval.permission_service.clone(),
@@ -2668,12 +2616,19 @@ impl AgentRunSnapshot {
         Option<echo_orchestration::human_loop::PermissionCheck>,
         echo_core::error::ReactError,
     > {
+        let permissions = self
+            .tools
+            .tool_manager
+            .get_tool(tool_name)
+            .map(|tool| tool.permissions())
+            .unwrap_or_default();
         self.check_tool_approval_with_intent(
             request_id,
             tool_name,
             input,
             permission_mode_override,
             None,
+            &permissions,
         )
         .await
     }
@@ -2689,6 +2644,7 @@ impl AgentRunSnapshot {
         input: &serde_json::Value,
         permission_mode_override: Option<echo_core::tools::permission::PermissionMode>,
         approval_suggestions: Option<&[String]>,
+        permissions: &[echo_core::tools::permission::ToolPermission],
     ) -> std::result::Result<
         Option<echo_orchestration::human_loop::PermissionCheck>,
         echo_core::error::ReactError,
@@ -2701,12 +2657,6 @@ impl AgentRunSnapshot {
             if !pending.is_empty() {
                 service.add_rules(pending).await;
             }
-            let permissions = self
-                .tools
-                .tool_manager
-                .get_tool(tool_name)
-                .map(|tool| tool.permissions())
-                .unwrap_or_default();
             let classifier_context = {
                 let messages = self.context.lock().await.messages().to_vec();
                 let recent_files = self
@@ -2775,7 +2725,7 @@ impl AgentRunSnapshot {
                         .request_approval_with_context(
                             tool_name,
                             input,
-                            &permissions,
+                            permissions,
                             permission_mode_override,
                             Some(&permission_context),
                             suggestions,
@@ -2786,7 +2736,7 @@ impl AgentRunSnapshot {
                         .check_with_permissions_result_in_mode_and_context(
                             tool_name,
                             input,
-                            &permissions,
+                            permissions,
                             permission_mode_override,
                             Some(&permission_context),
                         )
@@ -2864,6 +2814,7 @@ impl AgentRunSnapshot {
         _input: &serde_json::Value,
         _permission_mode_override: Option<echo_core::tools::permission::PermissionMode>,
         approval_suggestions: Option<&[String]>,
+        _permissions: &[echo_core::tools::permission::ToolPermission],
     ) -> std::result::Result<
         Option<echo_orchestration::human_loop::PermissionCheck>,
         echo_core::error::ReactError,
@@ -2897,25 +2848,63 @@ impl AgentRunSnapshot {
         .map(|check| check.and_then(|value| value.updated_input))
     }
 
-    /// Record a file read for read-before-edit enforcement.
-    pub fn record_file_read(&self, path: &str) {
-        let path = std::path::Path::new(path);
-        let resolved = if path.is_absolute() {
-            path.to_path_buf()
-        } else if let Some(working_dir) = self.config.working_dir.as_deref() {
-            working_dir.join(path)
-        } else {
-            path.to_path_buf()
-        };
-        let canonical = std::fs::canonicalize(&resolved)
-            .unwrap_or(resolved)
-            .to_string_lossy()
-            .to_string();
+    /// 记录调用方已确认的原source及resolved路径；不再用host/snapshot猜来源。
+    /// 公开Rust签名显式携带source，自动pipeline也只以真实owned工具证明调用它。
+    pub fn record_file_read(
+        &self,
+        path: &str,
+        source: Arc<dyn echo_core::tools::filesystem::FileSystem>,
+    ) {
+        self.record_file_read_observation(path, Some(source));
+    }
+
+    pub(crate) fn record_file_read_observation(
+        &self,
+        path: &str,
+        source: Option<Arc<dyn echo_core::tools::filesystem::FileSystem>>,
+    ) {
         let mut files = self
             .recently_read_files
             .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        files.insert(canonical, std::time::Instant::now());
+            .unwrap_or_else(|error| error.into_inner());
+        let observations = files.entry(path.to_string()).or_default();
+        let existing =
+            observations
+                .iter_mut()
+                .find(|(old, _)| match (old.as_ref(), source.as_ref()) {
+                    (Some(old), Some(new)) => same_file_tracking_source(old, new),
+                    (None, None) => true,
+                    _ => false,
+                });
+        if let Some((_, at)) = existing {
+            *at = std::time::Instant::now();
+        } else {
+            observations.push((source, std::time::Instant::now()));
+        }
+    }
+
+    pub(crate) async fn resolve_file_tracking_path(
+        &self,
+        tool: Arc<dyn echo_core::tools::Tool>,
+        path: &str,
+        parameters: &crate::tools::ToolParameters,
+        context: &echo_core::tools::ToolContext,
+    ) -> crate::error::Result<(
+        Arc<dyn echo_core::tools::filesystem::FileSystem>,
+        std::path::PathBuf,
+    )> {
+        let path = path.to_string();
+        let parameters = parameters.clone();
+        let context = context.clone();
+        let guards = self.resource_guards.clone();
+        tokio::task::spawn_blocking(move || {
+            let _guards = guards;
+            tool.resolve_file_tracking_path(&path, &parameters, &context)
+        })
+        .await
+        .map_err(|error| {
+            crate::error::ReactError::Other(format!("File tracking task failed: {error}"))
+        })?
     }
 
     /// Check tool output guard and return filtered output if modified.
@@ -3374,6 +3363,7 @@ impl AgentRunSnapshot {
                 plan_mode: self.config.plan_mode,
                 permission_decision: None,
                 approval_receipt: None,
+                authorized_tool: None,
                 permission_mode_override: None,
                 rewrites: Vec::new(),
                 invocation_emitted: false,
@@ -4098,6 +4088,21 @@ mod transcript_filter_tests {
             .build()?;
         let cancel = std::sync::Arc::new(crate::agent::CancellationToken::new());
         let trace_sink: echo_core::tools::TraceSinkFn = std::sync::Arc::new(|_| {});
+        let lineage = echo_core::tools::SubagentLineage {
+            agent_name: Some("child-atomic".into()),
+            run_id: Some("run-atomic".into()),
+            execution_id: Some("execution-atomic".into()),
+            ..Default::default()
+        };
+        let uplink: echo_core::tools::SubagentUplinkFn = Arc::new(|_| {
+            Box::pin(async {
+                echo_core::tools::SubagentUplinkReceipt {
+                    accepted: true,
+                    status: "observed".into(),
+                    detail: String::new(),
+                }
+            })
+        });
         let invocation = echo_core::agent::AgentInvocationContext {
             runtime_state_id: None,
             transcript_generation_id: None,
@@ -4118,8 +4123,8 @@ mod transcript_filter_tests {
                 resource_guards: vec![echo_core::tools::InvocationResourceGuard::new(
                     "runtime-guard".to_string(),
                 )],
-                subagent_lineage: None,
-                uplink: None,
+                subagent_lineage: Some(lineage.clone()),
+                uplink: Some(uplink.clone()),
             }),
             working_dir: Some(std::path::PathBuf::from("/tmp/worktree-atomic")),
             cancel: None,
@@ -4162,6 +4167,13 @@ mod transcript_filter_tests {
             })
         );
         assert_eq!(snapshot.resource_guards.len(), 2);
+        assert_eq!(snapshot.subagent_lineage.as_ref(), Some(&lineage));
+        assert!(
+            snapshot
+                .external_uplink
+                .as_ref()
+                .is_some_and(|value| Arc::ptr_eq(value, &uplink))
+        );
         Ok(())
     }
 
@@ -5163,6 +5175,7 @@ mod transcript_filter_tests {
             plan_mode: false,
             permission_decision: None,
             approval_receipt: None,
+            authorized_tool: None,
             permission_mode_override: None,
             rewrites: Vec::new(),
             invocation_emitted: false,
@@ -5179,6 +5192,8 @@ mod transcript_filter_tests {
             executions: Arc::clone(&executions),
         }));
 
+        // 本独立stage控制在replace后绑定B，继续验证原physical readonly拒绝。
+        ctx.authorized_tool = snapshot.tools.tool_manager.get_tool(&ctx.tool_name);
         ExecuteStage.run(&mut ctx, &snapshot).await?;
         assert!(ctx.blocked);
         assert_eq!(
@@ -5428,7 +5443,7 @@ mod transcript_filter_tests {
     }
 
     #[test]
-    fn policy_snapshot_preserves_explicit_invocation_and_legacy_precedence() -> Result<()> {
+    fn policy_snapshot_is_invocation_local_and_plain_call_has_no_policy() -> Result<()> {
         let agent = crate::agent::ReactAgentBuilder::new()
             .model("test-model")
             .tool(Box::new(NamedTool("agent_tool")))
@@ -5438,31 +5453,29 @@ mod transcript_filter_tests {
             delegate_depth: 1,
             max_delegate_depth: 1,
         };
-        let legacy = crate::agent::react::LegacyExternalContextSnapshot {
-            delegation_policy: Some(stopped),
+        let invocation = echo_core::agent::AgentInvocationContext {
+            runtime: Some(echo_core::tools::ExternalRunContext {
+                delegation_policy: Some(stopped),
+                ..Default::default()
+            }),
             ..Default::default()
         };
-        let legacy_snapshot = AgentRunSnapshot::from_agent_with_legacy_context(&agent, &legacy);
-        assert_eq!(legacy_snapshot.external_delegation_policy, Some(stopped));
+        let restricted = AgentRunSnapshot::from_agent_with_invocation(&agent, &invocation);
+        assert_eq!(restricted.external_delegation_policy, Some(stopped));
         assert!(
-            !tool_names(&legacy_snapshot)
+            !tool_names(&restricted)
                 .iter()
                 .any(|name| name == "agent_tool")
         );
-        let explicit = echo_core::agent::AgentInvocationContext::default();
-        let explicit_none =
-            AgentRunSnapshot::from_agent_source(&agent, Some(&explicit), Some(&legacy));
-        assert!(explicit_none.external_delegation_policy.is_none());
-        assert!(explicit_none.tools.visibility.is_none());
-        assert!(
-            tool_names(&explicit_none)
-                .iter()
-                .any(|name| name == "agent_tool")
-        );
-        let plain = AgentRunSnapshot::from_agent(&agent);
-        assert!(plain.external_delegation_policy.is_none());
-        assert!(plain.tools.visibility.is_none());
-        assert!(tool_names(&plain).iter().any(|name| name == "agent_tool"));
+        for plain in [
+            AgentRunSnapshot::from_agent(&agent),
+            AgentRunSnapshot::from_agent_with_invocation(&agent, &Default::default()),
+        ] {
+            assert!(plain.external_delegation_policy.is_none());
+            assert!(plain.tools.visibility.is_none());
+            assert!(tool_names(&plain).iter().any(|name| name == "agent_tool"));
+        }
+        assert_eq!(restricted.external_delegation_policy, Some(stopped));
         Ok(())
     }
 

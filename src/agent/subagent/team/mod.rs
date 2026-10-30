@@ -1973,7 +1973,8 @@ mod tests {
     use echo_core::agent::AgentEvent;
     use echo_core::error::Result as CoreResult;
     use echo_orchestration::tasks::PlanValidator;
-    use futures::stream::{self, BoxStream};
+    use futures::StreamExt;
+    use futures::stream::BoxStream;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::Duration;
 
@@ -3011,6 +3012,8 @@ mod tests {
         name: String,
         response: String,
         inputs: Arc<Mutex<Vec<String>>>,
+        messages: Arc<Mutex<Vec<echo_core::llm::types::Message>>>,
+        invocations: Arc<Mutex<Vec<echo_core::agent::AgentInvocationContext>>>,
         executed: Arc<AtomicBool>,
     }
 
@@ -3018,32 +3021,59 @@ mod tests {
         fn name(&self) -> &str {
             &self.name
         }
-
         fn model_name(&self) -> &str {
             "recording"
         }
-
         fn system_prompt(&self) -> &str {
             ""
         }
 
-        fn execute<'a>(&'a self, task: &'a str) -> BoxFuture<'a, CoreResult<String>> {
-            Box::pin(async move {
-                self.inputs.lock().await.push(task.to_string());
-                self.executed.store(true, Ordering::SeqCst);
-                Ok(self.response.clone())
-            })
-        }
-
-        fn execute_stream<'a>(
+        fn execute_stream_message_with_invocation_context<'a>(
             &'a self,
-            task: &'a str,
+            message: echo_core::llm::types::Message,
+            _cancel: CancellationToken,
+            invocation: echo_core::agent::AgentInvocationContext,
         ) -> BoxFuture<'a, CoreResult<BoxStream<'a, CoreResult<AgentEvent>>>> {
             Box::pin(async move {
-                let output = self.execute(task).await?;
-                Ok(Box::pin(stream::once(
-                    async move { Ok(AgentEvent::FinalAnswer(output)) },
-                )) as BoxStream<'a, CoreResult<AgentEvent>>)
+                let task = message.content.as_text().ok_or_else(|| {
+                    ReactError::Other("pipeline fixture expected original text input".into())
+                })?;
+                self.inputs.lock().await.push(task);
+                self.messages.lock().await.push(message);
+                self.invocations.lock().await.push(invocation.clone());
+                self.executed.store(true, Ordering::SeqCst);
+                let identity = echo_core::agent::EventIdentity::from_invocation(&invocation)?;
+                let execution = identity
+                    .execution_id
+                    .as_ref()
+                    .map(|value| value.as_str())
+                    .unwrap_or(identity.turn_id.as_str())
+                    .to_string();
+                let request = identity
+                    .message_id
+                    .as_ref()
+                    .map(|value| value.as_str())
+                    .unwrap_or(identity.turn_id.as_str())
+                    .to_string();
+                let output = self.response.clone();
+                // 本测试producer自己拥有成功事实并保invocation至原EOF；不是wrapper补成功。
+                Ok(async_stream::stream! {
+                    let _invocation = invocation;
+                    yield Ok(AgentEvent::ExecutionStatus(echo_core::agent::ExecutionStatus {
+                        execution_id: execution.clone(), request_id: Some(request.clone()),
+                        sequence: 0, phase: echo_core::agent::AgentPhase::Thinking,
+                        status: echo_core::agent::ExecutionStatusKind::Started,
+                        reason: None, adapter_generated: false,
+                    }));
+                    yield Ok(AgentEvent::FinalAnswer(output));
+                    yield Ok(AgentEvent::ExecutionStatus(echo_core::agent::ExecutionStatus {
+                        execution_id: execution, request_id: Some(request),
+                        sequence: 1, phase: echo_core::agent::AgentPhase::Thinking,
+                        status: echo_core::agent::ExecutionStatusKind::Settled,
+                        reason: None, adapter_generated: false,
+                    }));
+                }
+                .boxed())
             })
         }
     }
@@ -3053,6 +3083,10 @@ mod tests {
     {
         let first_inputs = Arc::new(Mutex::new(Vec::new()));
         let second_inputs = Arc::new(Mutex::new(Vec::new()));
+        let first_messages = Arc::new(Mutex::new(Vec::new()));
+        let second_messages = Arc::new(Mutex::new(Vec::new()));
+        let first_invocations = Arc::new(Mutex::new(Vec::new()));
+        let second_invocations = Arc::new(Mutex::new(Vec::new()));
         let first_executed = Arc::new(AtomicBool::new(false));
         let second_executed = Arc::new(AtomicBool::new(false));
         let team = TeamAgent::builder()
@@ -3063,6 +3097,8 @@ mod tests {
                     name: "first".to_string(),
                     response: "first-output".to_string(),
                     inputs: first_inputs.clone(),
+                    messages: first_messages.clone(),
+                    invocations: first_invocations.clone(),
                     executed: first_executed.clone(),
                 }),
                 SubagentDefinition::simple_sync("placeholder-first"),
@@ -3073,6 +3109,8 @@ mod tests {
                     name: "second".to_string(),
                     response: "second-output".to_string(),
                     inputs: second_inputs.clone(),
+                    messages: second_messages.clone(),
+                    invocations: second_invocations.clone(),
                     executed: second_executed.clone(),
                 }),
                 SubagentDefinition::simple_sync("placeholder-second"),
@@ -3091,6 +3129,49 @@ mod tests {
         assert_eq!(output, "second-output");
         assert!(first_executed.load(Ordering::SeqCst));
         assert!(second_executed.load(Ordering::SeqCst));
+        assert!(
+            first_inputs
+                .lock()
+                .await
+                .first()
+                .is_some_and(|input| input.contains("pipeline-objective"))
+        );
+        assert_eq!(first_inputs.lock().await.len(), 1);
+        assert_eq!(second_inputs.lock().await.len(), 1);
+        // 完整值也保留并验原Run/claim上下文；文本只是上述旧输入断言的观察值。
+        for (messages, invocations, inputs) in [
+            (&first_messages, &first_invocations, &first_inputs),
+            (&second_messages, &second_invocations, &second_inputs),
+        ] {
+            let messages = messages.lock().await;
+            let invocations = invocations.lock().await;
+            let inputs = inputs.lock().await;
+            assert_eq!(messages.len(), 1);
+            assert_eq!(invocations.len(), 1);
+            let message = messages
+                .first()
+                .ok_or_else(|| ReactError::Other("typed Message missing".into()))?;
+            assert_eq!(message.content.as_text().as_ref(), inputs.first());
+            let invocation = invocations
+                .first()
+                .ok_or_else(|| ReactError::Other("typed invocation missing".into()))?;
+            let runtime = invocation
+                .runtime
+                .as_ref()
+                .ok_or_else(|| ReactError::Other("original Team runtime context missing".into()))?;
+            assert!(runtime.run_id.as_ref().is_some_and(|id| !id.is_empty()));
+            assert!(
+                runtime
+                    .execution_id
+                    .as_ref()
+                    .is_some_and(|id| !id.is_empty())
+            );
+            assert!(runtime.subagent_lineage.as_ref().is_some_and(|lineage| {
+                lineage.task_id.is_some()
+                    && lineage.attempt.is_some()
+                    && lineage.plan_revision.is_some()
+            }));
+        }
         assert!(
             second_inputs
                 .lock()
@@ -3281,6 +3362,8 @@ mod tests {
                         name: "slow".to_string(),
                         response: "unused".to_string(),
                         inputs: Arc::new(Mutex::new(Vec::new())),
+                        messages: Arc::new(Mutex::new(Vec::new())),
+                        invocations: Arc::new(Mutex::new(Vec::new())),
                         executed: Arc::new(AtomicBool::new(false)),
                     }),
                     SubagentDefinition::simple_sync("slow"),
@@ -3349,6 +3432,8 @@ mod tests {
             name: "shared".to_string(),
             response: "shared-output".to_string(),
             inputs: Arc::new(Mutex::new(Vec::new())),
+            messages: Arc::new(Mutex::new(Vec::new())),
+            invocations: Arc::new(Mutex::new(Vec::new())),
             executed: Arc::new(AtomicBool::new(false)),
         });
         let team = TeamAgent::builder()
@@ -3375,12 +3460,16 @@ mod tests {
             name: "duplicate".to_string(),
             response: "first".to_string(),
             inputs: Arc::new(Mutex::new(Vec::new())),
+            messages: Arc::new(Mutex::new(Vec::new())),
+            invocations: Arc::new(Mutex::new(Vec::new())),
             executed: Arc::new(AtomicBool::new(false)),
         });
         let second: Arc<dyn Agent> = Arc::new(RecordingAgent {
             name: "duplicate".to_string(),
             response: "second".to_string(),
             inputs: Arc::new(Mutex::new(Vec::new())),
+            messages: Arc::new(Mutex::new(Vec::new())),
+            invocations: Arc::new(Mutex::new(Vec::new())),
             executed: Arc::new(AtomicBool::new(false)),
         });
         let result = TeamAgent::builder()

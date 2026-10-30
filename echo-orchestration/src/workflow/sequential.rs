@@ -25,7 +25,7 @@ pub struct WorkflowStep {
 /// use echo_core::error::Result;
 /// use echo_orchestration::workflow::{SequentialWorkflow, Workflow};
 /// use futures::future::BoxFuture;
-/// use futures::stream::{self, BoxStream};
+/// use futures::stream::BoxStream;
 ///
 /// # struct DummyAgent {
 /// #     name: String,
@@ -41,13 +41,24 @@ pub struct WorkflowStep {
 /// #     fn name(&self) -> &str { &self.name }
 /// #     fn model_name(&self) -> &str { "mock-model" }
 /// #     fn system_prompt(&self) -> &str { "You are a mock agent" }
-/// #     fn execute<'a>(&'a self, task: &'a str) -> BoxFuture<'a, Result<String>> {
-/// #         Box::pin(async move { Ok(format!("{}: {task}", self.name)) })
-/// #     }
-/// #     fn execute_stream<'a>(&'a self, _task: &'a str) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
+/// #     fn execute_stream_message_with_invocation_context<'a>(
+/// #         &'a self, message: echo_core::llm::types::Message,
+/// #         _cancel: tokio_util::sync::CancellationToken, invocation: echo_core::agent::AgentInvocationContext,
+/// #     ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
 /// #         Box::pin(async move {
-/// #             let s: BoxStream<'a, Result<AgentEvent>> = Box::pin(stream::empty());
-/// #             Ok(s)
+/// #             let text = message.text_content().ok_or_else(|| echo_core::error::ReactError::Other("示例需要文本输入".into()))?;
+/// #             let answer = format!("{}: {text}", self.name);
+/// #             let execution = format!("example:{}", self.name);
+/// #             let status = |kind, sequence| AgentEvent::ExecutionStatus(echo_core::agent::ExecutionStatus {
+/// #                 adapter_generated: false, execution_id: execution.clone(), request_id: Some("example-response".into()), sequence,
+/// #                 phase: echo_core::agent::AgentPhase::Terminal, status: kind, reason: None,
+/// #             });
+/// #             let events = vec![Ok(status(echo_core::agent::ExecutionStatusKind::Started, 0)),
+/// #                 Ok(AgentEvent::FinalAnswer(answer)), Ok(status(echo_core::agent::ExecutionStatusKind::Settled, 1))];
+/// #             Ok(Box::pin(async_stream::stream! {
+/// #                 let _retained = (message, invocation);
+/// #                 for event in events { yield event; }
+/// #             }) as BoxStream<'a, Result<AgentEvent>>)
 /// #         })
 /// #     }
 /// # }

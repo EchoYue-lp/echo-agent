@@ -329,10 +329,118 @@ impl From<&str> for Role {
 
 // ── Conversation Messages ─────────────────────────────────────────────────────
 
-/// Conversation message
+/// 同一供应商响应的原始观察；不授予模型能力、正文批准或执行终态。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProviderResponseMetadata {
+    pub protocol: crate::llm::LlmApiProtocol,
+    pub provider: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "response_present_text",
+        serialize_with = "response_optional_text"
+    )]
+    pub model: Option<serde_json::Value>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "response_present_text",
+        serialize_with = "response_optional_text"
+    )]
+    pub stop_reason: Option<serde_json::Value>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "response_present_text",
+        serialize_with = "response_optional_text"
+    )]
+    pub stop_sequence: Option<serde_json::Value>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "response_present_text",
+        serialize_with = "response_optional_text"
+    )]
+    pub status: Option<serde_json::Value>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "response_present_object",
+        serialize_with = "response_optional_object"
+    )]
+    pub incomplete_details: Option<serde_json::Value>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "response_present_object",
+        serialize_with = "response_optional_object"
+    )]
+    pub usage: Option<serde_json::Value>,
+}
+
+// key缺失由default处理；存在时直接解码Value，保留Some(Null)。普通Option解码会丢此区别。
+fn response_present_text<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<serde_json::Value>, D::Error> {
+    let value = serde_json::Value::deserialize(deserializer)?;
+    if value.is_null() || value.is_string() {
+        Ok(Some(value))
+    } else {
+        Err(serde::de::Error::custom(
+            "provider response field must be string or null",
+        ))
+    }
+}
+
+fn response_present_object<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<serde_json::Value>, D::Error> {
+    let value = serde_json::Value::deserialize(deserializer)?;
+    if value.is_null() || value.is_object() {
+        Ok(Some(value))
+    } else {
+        Err(serde::de::Error::custom(
+            "provider response field must be object or null",
+        ))
+    }
+}
+
+fn response_optional_text<S: serde::Serializer>(
+    value: &Option<serde_json::Value>,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    if value
+        .as_ref()
+        .is_some_and(|value| !value.is_null() && !value.is_string())
+    {
+        return Err(serde::ser::Error::custom(
+            "provider response field must be string or null",
+        ));
+    }
+    value.serialize(serializer)
+}
+
+fn response_optional_object<S: serde::Serializer>(
+    value: &Option<serde_json::Value>,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    if value
+        .as_ref()
+        .is_some_and(|value| !value.is_null() && !value.is_object())
+    {
+        return Err(serde::ser::Error::custom(
+            "provider response field must be object or null",
+        ));
+    }
+    value.serialize(serializer)
+}
+
+/// Conversation message.
 ///
-/// The `content` field uniformly uses the [`MessageContent`] enum, supporting
-/// plain text and multimodal content.
+/// The content field preserves plain text or structured multimodal content.
 #[derive(Debug, Clone, Default)]
 pub struct Message {
     /// Message role: `system`, `user`, `assistant`, `tool`, or `Custom`.
@@ -345,6 +453,10 @@ pub struct Message {
     pub name: Option<String>,
     /// Optional tool call identifier for tool messages.
     pub tool_call_id: Option<String>,
+    /// 工具结果的错误观察；None为未知，不授予Run/TaskRun终态资格。
+    pub tool_result_is_error: Option<bool>,
+    /// 当前响应的完整观察快照；不得用它推断执行完成或展示未批准正文。
+    pub provider_response: Option<ProviderResponseMetadata>,
     /// Reasoning content from models like Qwen3/DeepSeek (thinking process).
     pub reasoning_content: Option<String>,
     /// Signed or redacted reasoning blocks needed for provider-valid replay.
@@ -384,6 +496,12 @@ impl Serialize for Message {
         if let Some(ref id) = self.tool_call_id {
             map.serialize_entry("tool_call_id", id)?;
         }
+        if let Some(is_error) = self.tool_result_is_error {
+            map.serialize_entry("tool_result_is_error", &is_error)?;
+        }
+        if let Some(ref observation) = self.provider_response {
+            map.serialize_entry("provider_response", observation)?;
+        }
         if let Some(ref rc) = self.reasoning_content {
             map.serialize_entry("reasoning_content", rc)?;
         }
@@ -418,6 +536,10 @@ impl<'de> Deserialize<'de> for Message {
             #[serde(default)]
             tool_call_id: Option<String>,
             #[serde(default)]
+            tool_result_is_error: Option<bool>,
+            #[serde(default)]
+            provider_response: Option<ProviderResponseMetadata>,
+            #[serde(default)]
             reasoning_content: Option<String>,
             #[serde(default)]
             reasoning_blocks: Option<Vec<ReasoningBlock>>,
@@ -441,6 +563,8 @@ impl<'de> Deserialize<'de> for Message {
             tool_calls: raw.tool_calls,
             name: raw.name,
             tool_call_id: raw.tool_call_id,
+            tool_result_is_error: raw.tool_result_is_error,
+            provider_response: raw.provider_response,
             reasoning_content: raw.reasoning_content,
             reasoning_blocks: raw.reasoning_blocks,
             assistant_blocks: raw.assistant_blocks,
@@ -451,6 +575,36 @@ impl<'de> Deserialize<'de> for Message {
 }
 
 impl Message {
+    /// 只保存失败请求的观察，不把partial正文或未执行工具片段放回模型历史。
+    pub fn provider_response_observation(observation: ProviderResponseMetadata) -> Self {
+        Self {
+            role: Role::Assistant,
+            content: MessageContent::Empty,
+            provider_response: Some(observation),
+            approved_assistant_blocks: Some(Vec::new()),
+            ..Default::default()
+        }
+    }
+
+    /// 协议边界排除整条观察记录；合法空正文加工具或signed reasoning不匹配。
+    pub fn is_provider_response_observation_only(&self) -> bool {
+        matches!(&self.role, Role::Assistant)
+            && matches!(&self.content, MessageContent::Empty)
+            && self.provider_response.is_some()
+            && self.tool_calls.is_none()
+            && self.name.is_none()
+            && self.tool_call_id.is_none()
+            && self.tool_result_is_error.is_none()
+            && self.reasoning_content.is_none()
+            && self.reasoning_blocks.is_none()
+            && self.assistant_blocks.is_none()
+            && self.execution_status.is_none()
+            && self
+                .approved_assistant_blocks
+                .as_ref()
+                .is_some_and(Vec::is_empty)
+    }
+
     /// Create a system message
     pub fn system(content: String) -> Self {
         Self {
@@ -459,6 +613,8 @@ impl Message {
             tool_calls: None,
             name: None,
             tool_call_id: None,
+            tool_result_is_error: None,
+            provider_response: None,
             reasoning_content: None,
             reasoning_blocks: None,
             assistant_blocks: None,
@@ -475,6 +631,8 @@ impl Message {
             tool_calls: None,
             name: None,
             tool_call_id: None,
+            tool_result_is_error: None,
+            provider_response: None,
             reasoning_content: None,
             reasoning_blocks: None,
             assistant_blocks: None,
@@ -491,6 +649,8 @@ impl Message {
             tool_calls: None,
             name: None,
             tool_call_id: None,
+            tool_result_is_error: None,
+            provider_response: None,
             reasoning_content: None,
             reasoning_blocks: None,
             assistant_blocks: None,
@@ -549,6 +709,8 @@ impl Message {
             tool_calls: None,
             name: None,
             tool_call_id: None,
+            tool_result_is_error: None,
+            provider_response: None,
             reasoning_content: None,
             reasoning_blocks: None,
             assistant_blocks: None,
@@ -565,6 +727,8 @@ impl Message {
             tool_calls: Some(tool_calls),
             name: None,
             tool_call_id: None,
+            tool_result_is_error: None,
+            provider_response: None,
             reasoning_content: None,
             reasoning_blocks: None,
             assistant_blocks: None,
@@ -581,12 +745,20 @@ impl Message {
             tool_calls: None,
             name: Some(name),
             tool_call_id: Some(tool_call_id),
+            tool_result_is_error: None,
+            provider_response: None,
             reasoning_content: None,
             reasoning_blocks: None,
             assistant_blocks: None,
             execution_status: None,
             approved_assistant_blocks: None,
         }
+    }
+
+    /// 将真实工具结果观察附到同一消息，不改调用身份或执行权威。
+    pub fn with_tool_result_is_error(mut self, is_error: bool) -> Self {
+        self.tool_result_is_error = Some(is_error);
+        self
     }
 
     /// Get plain text content.
@@ -617,7 +789,10 @@ impl Message {
 pub struct ProviderOutputSource {
     /// The wire protocol that owns these native coordinates.
     pub protocol: crate::llm::LlmApiProtocol,
-    /// Native response/message identity for one model request.
+    /// 服务实际响应／消息 ID。仅 D2 不完整 ToolCall 的坐标允许空字符串表示
+    /// 未观察到原生 ID，此时同消息 provider_response.request_id 仍为 None。
+    /// 空值只保当前请求局部的原始 index，不是 runtime ID、跨请求 owner
+    /// 或可成功重放的身份；适配器不得用生成 ID 冒充服务原生 ID。
     pub request_id: String,
     /// Native item identity, or the adapter's stable block fallback when the
     /// protocol does not assign a separate item id.
@@ -720,9 +895,9 @@ pub struct ChatCompletionRequest {
     /// Optional tool definition list
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tools: Option<Vec<ToolDefinition>>,
-    /// Tool call strategy (e.g. "auto", "none", or a specific tool name)
+    /// 通用工具选择；具名函数按Chat wire object序列化。
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub tool_choice: Option<String>,
+    pub tool_choice: Option<crate::llm::ToolChoice>,
     /// Sampling temperature (0.0-2.0)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f32>,
@@ -796,6 +971,9 @@ pub struct FunctionSpec {
     pub description: String,
     /// Function parameter JSON Schema
     pub parameters: serde_json::Value,
+    /// 函数参数严格生成；None沿协议默认，不等同最终输出schema strict。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub strict: Option<bool>,
 }
 
 impl ToolDefinition {
@@ -807,6 +985,7 @@ impl ToolDefinition {
                 name: tool.name().to_string(),
                 description: tool.description().to_string(),
                 parameters: tool.parameters(),
+                strict: None,
             },
         }
     }
@@ -867,7 +1046,12 @@ pub struct Usage {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub input_tokens_details: Option<TokenUsageDetails>,
     /// Provider-specific output-token details, including reasoning tokens.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Chat Completions/DeepSeek的completion_tokens_details归入同一用量权威。
+    #[serde(
+        default,
+        alias = "completion_tokens_details",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub output_tokens_details: Option<TokenUsageDetails>,
     /// Anthropic cache writes for this request.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1036,6 +1220,9 @@ pub struct ChunkChoice {
 /// Incremental message body in a streaming response
 #[derive(Debug, Deserialize, Clone, Default)]
 pub struct DeltaMessage {
+    /// 同一请求的完整已观察快照，不能跨请求叠加usage或推断终态。
+    #[serde(default)]
+    pub provider_response: Option<ProviderResponseMetadata>,
     /// Role (present on first occurrence)
     #[serde(default)]
     pub role: Option<String>,
@@ -1616,5 +1803,275 @@ mod tests {
             decoded.and_then(|value| value.reasoning_blocks),
             message.reasoning_blocks
         );
+    }
+}
+
+#[cfg(test)]
+mod public_transport_regression_tests {
+    use super::*;
+
+    #[test]
+    fn explicit_function_strict_survives_declaration_serde()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        for strict in [false, true] {
+            let wire = serde_json::json!({"name":"inspect", "description":"检查🙂", "parameters":{"type":"object"}, "strict":strict});
+            let function: FunctionSpec = serde_json::from_value(wire.clone())?;
+            assert_eq!(serde_json::to_value(function)?, wire);
+        }
+        let legacy = serde_json::json!({"name":"inspect", "description":"检查🙂", "parameters":{}});
+        let function: FunctionSpec = serde_json::from_value(legacy.clone())?;
+        assert_eq!(serde_json::to_value(function)?, legacy);
+        Ok(())
+    }
+
+    #[test]
+    fn tool_error_observation_survives_manual_message_serde()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        for is_error in [false, true] {
+            let wire = serde_json::json!({"role":"tool", "content":[{"type":"text","text":"失败仍是正文🙂"},{"type":"image_url","image_url":{"url":"data:image/png;base64,AA=="}}], "name":"inspect", "tool_call_id":"call-1", "tool_result_is_error":is_error});
+            let message: Message = serde_json::from_value(wire.clone())?;
+            assert_eq!(serde_json::to_value(message)?, wire);
+        }
+        let unknown = Message::tool_result(
+            "call-legacy".into(),
+            "inspect".into(),
+            "[Error] is ordinary legacy text".into(),
+        );
+        assert!(
+            serde_json::to_value(unknown)?
+                .get("tool_result_is_error")
+                .is_none()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn named_choice_is_a_request_object_not_a_stringified_object()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let named = serde_json::json!({"type":"function","function":{"name":"inspect"}});
+        let request: ChatCompletionRequest = serde_json::from_value(
+            serde_json::json!({"model":"test", "messages":[], "tool_choice":named}),
+        )?;
+        assert_eq!(
+            serde_json::to_value(request)?.get("tool_choice"),
+            Some(&named)
+        );
+        for invalid in [
+            serde_json::json!("inspect"),
+            serde_json::json!({"type":"function","name":"inspect"}),
+            serde_json::json!({"type":"function","function":{"name":""}}),
+        ] {
+            assert!(
+                serde_json::from_value::<ChatCompletionRequest>(
+                    serde_json::json!({"model":"test","messages":[],"tool_choice":invalid})
+                )
+                .is_err()
+            );
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod provider_response_observation_tests {
+    use super::*;
+
+    #[test]
+    fn message_roundtrip_keeps_stop_presence_and_nested_usage()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        for sequence in [
+            None,
+            Some(serde_json::Value::Null),
+            Some(serde_json::json!("结束🙂")),
+        ] {
+            let mut observation = serde_json::json!({
+                "protocol":"anthropic", "provider":"anthropic", "request_id":"request-1",
+                "model":"fixture", "stop_reason":"future_stop_reason", "status":null,
+                "incomplete_details":null,
+                "usage":{"output_tokens":7,"vendor":{"unknown":null,"label":"中文🙂"}}
+            });
+            if let Some(sequence) = sequence {
+                observation
+                    .as_object_mut()
+                    .ok_or("observation must be an object")?
+                    .insert("stop_sequence".into(), sequence);
+            }
+            let wire = serde_json::json!({
+                "role":"assistant", "content":"部分正文🙂", "provider_response":observation
+            });
+            let message: Message = serde_json::from_value(wire.clone())?;
+            assert_eq!(serde_json::to_value(message)?, wire);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn observation_rejects_invalid_native_field_types()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        for (field, invalid) in [
+            ("model", serde_json::json!(123)),
+            ("stop_reason", serde_json::json!(true)),
+            ("stop_sequence", serde_json::json!([])),
+            ("status", serde_json::json!({})),
+            ("incomplete_details", serde_json::json!("not an object")),
+            ("usage", serde_json::json!(false)),
+        ] {
+            let mut observation = serde_json::json!({
+                "protocol":"responses", "provider":"fixture", "request_id":"request-2"
+            });
+            observation
+                .as_object_mut()
+                .ok_or("observation must be an object")?
+                .insert(field.into(), invalid);
+            assert!(
+                serde_json::from_value::<Message>(serde_json::json!({
+                    "role":"assistant", "content":"partial", "provider_response":observation
+                }))
+                .is_err()
+            );
+        }
+        Ok(())
+    }
+}
+
+// NEW_API_ONLY：必须先有Frame声明的DeltaMessage.provider_response与其Serialize合同。
+// 不要求DeltaMessage新增Serialize，不声明第二metadata类型。
+#[cfg(test)]
+mod provider_response_delta_contract_tests {
+    use super::DeltaMessage;
+    use serde_json::json;
+
+    #[test]
+    fn delta_transports_unknown_status_and_explicit_null_without_runtime_authority()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let expected = json!({"protocol": "responses", "provider": "configured-responses",
+            "request_id": "resp-observed", "model": null, "status": "future_native_status",
+            "incomplete_details": null, "usage": {"output_tokens": 10,
+                "output_tokens_details": {"reasoning_tokens": 7}}});
+        let delta: DeltaMessage = serde_json::from_value(json!({"provider_response": expected}))?;
+        let observation = delta
+            .provider_response
+            .as_ref()
+            .ok_or("response observation missing")?;
+        assert_eq!(serde_json::to_value(observation)?, expected);
+        Ok(())
+    }
+}
+
+// POST_API：只调用immutable-r01已声明的公开类型/Message helper，不复制历史过滤逻辑。
+#[cfg(test)]
+mod response_observation_helper_contract_tests {
+    use super::{Message, MessageContent, ProviderResponseMetadata, ReasoningBlock, Role};
+    use serde_json::json;
+
+    fn observation() -> Result<ProviderResponseMetadata, serde_json::Error> {
+        serde_json::from_value(
+            json!({"protocol":"anthropic","provider":"configured-provider",
+            "request_id":"msg-observed","stop_reason":"max_tokens","stop_sequence":null,
+            "usage":{"output_tokens":10,"native_extension":{"text":"原件🙂"}}}),
+        )
+    }
+
+    #[test]
+    fn observation_helper_marks_only_the_durable_failure_observation_record()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let recorded = Message::provider_response_observation(observation()?);
+        assert!(recorded.is_provider_response_observation_only());
+        assert_eq!(recorded.role, Role::Assistant);
+        assert!(matches!(&recorded.content, MessageContent::Empty));
+        assert!(recorded.tool_calls.is_none());
+        assert!(recorded.reasoning_content.is_none());
+        assert!(recorded.reasoning_blocks.is_none());
+        assert!(recorded.assistant_blocks.is_none());
+        assert!(recorded.execution_status.is_none());
+        assert!(
+            recorded
+                .approved_assistant_blocks
+                .as_ref()
+                .is_some_and(Vec::is_empty)
+        );
+        let decoded: Message = serde_json::from_value(serde_json::to_value(&recorded)?)?;
+        assert!(decoded.is_provider_response_observation_only());
+
+        let mut with_tools = recorded.clone();
+        with_tools.tool_calls = Some(serde_json::from_value(json!([{
+            "id":"call-real","type":"function","function":{"name":"inspect","arguments":"{}"}
+        }]))?);
+        assert!(
+            !with_tools.is_provider_response_observation_only(),
+            "empty tool message must survive history filtering"
+        );
+        for reasoning in [
+            ReasoningBlock::Signed {
+                thinking: "private reasoning".into(),
+                signature: "sig-original".into(),
+            },
+            ReasoningBlock::Redacted {
+                data: "redacted-original".into(),
+            },
+            ReasoningBlock::Opaque {
+                provider: "responses".into(),
+                id: "opaque-id".into(),
+                data: "opaque-original".into(),
+                summary: vec!["摘要🙂".into()],
+            },
+        ] {
+            let mut with_reasoning = recorded.clone();
+            with_reasoning.reasoning_blocks = Some(vec![reasoning]);
+            assert!(
+                !with_reasoning.is_provider_response_observation_only(),
+                "signed/redacted/opaque reasoning must survive filtering"
+            );
+        }
+        let mut with_blocks = recorded.clone();
+        with_blocks.assistant_blocks = Some(Vec::new());
+        assert!(!with_blocks.is_provider_response_observation_only());
+        let mut with_text = recorded.clone();
+        with_text.content = MessageContent::Text(String::new());
+        assert!(
+            !with_text.is_provider_response_observation_only(),
+            "ordinary text representation is not a synthetic observation"
+        );
+        let mut without_marker = recorded.clone();
+        without_marker.approved_assistant_blocks = None;
+        assert!(!without_marker.is_provider_response_observation_only());
+        let mut user_record = recorded;
+        user_record.role = Role::User;
+        assert!(!user_record.is_provider_response_observation_only());
+        Ok(())
+    }
+
+    #[test]
+    fn native_observation_serialization_rejects_invalid_direct_field_assignments()
+    -> Result<(), Box<dyn std::error::Error>> {
+        for field in [
+            "model",
+            "stop_reason",
+            "stop_sequence",
+            "status",
+            "incomplete_details",
+            "usage",
+        ] {
+            let mut value = observation()?;
+            match field {
+                "model" => value.model = Some(json!(17)),
+                "stop_reason" => value.stop_reason = Some(json!(false)),
+                "stop_sequence" => value.stop_sequence = Some(json!([])),
+                "status" => value.status = Some(json!({"fake":"settled"})),
+                "incomplete_details" => value.incomplete_details = Some(json!(8)),
+                "usage" => value.usage = Some(json!("not-an-object")),
+                _ => return Err("unknown test field".into()),
+            }
+            assert!(
+                serde_json::to_value(&value).is_err(),
+                "invalid native field must fail on write: {field}"
+            );
+            let message = Message::provider_response_observation(value);
+            assert!(
+                serde_json::to_value(message).is_err(),
+                "Message manual serializer must propagate the same error"
+            );
+        }
+        Ok(())
     }
 }

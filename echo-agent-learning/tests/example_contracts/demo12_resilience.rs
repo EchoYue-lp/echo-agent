@@ -131,9 +131,10 @@ impl AgentCallback for SimpleLog {
             println!("  [{}] 🔄 迭代 {}", self.label, iteration + 1);
         })
     }
-    fn on_tool_start<'a>(
+    fn on_tool_start_with_id<'a>(
         &'a self,
         _agent: &'a str,
+        _call_id: &'a str,
         tool: &'a str,
         args: &'a Value,
     ) -> futures::future::BoxFuture<'a, ()> {
@@ -146,9 +147,10 @@ impl AgentCallback for SimpleLog {
             );
         })
     }
-    fn on_tool_end<'a>(
+    fn on_tool_end_with_id<'a>(
         &'a self,
         _agent: &'a str,
+        _call_id: &'a str,
         tool: &'a str,
         result: &'a str,
     ) -> futures::future::BoxFuture<'a, ()> {
@@ -161,9 +163,10 @@ impl AgentCallback for SimpleLog {
             );
         })
     }
-    fn on_tool_error<'a>(
+    fn on_tool_error_with_id<'a>(
         &'a self,
         _agent: &'a str,
+        _call_id: &'a str,
         tool: &'a str,
         err: &'a ReactError,
     ) -> futures::future::BoxFuture<'a, ()> {

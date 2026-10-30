@@ -2794,7 +2794,10 @@ mod tests {
         let acquired = store
             .ensure_projection_epoch(ensure_projection_request("import-frontier", None))
             .await?;
-        let imported_message = stored_message("import-frontier", None, "restored");
+        let imported_message = crate::memory::conversation::project_message(
+            "import-frontier",
+            &echo_core::llm::types::Message::user("restored".to_string()),
+        )?;
         let import = ManagedConversationImport::prepare_for_generation(
             "import-frontier",
             acquired.authority.epoch,

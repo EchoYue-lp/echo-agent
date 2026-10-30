@@ -9,8 +9,8 @@ use crate::error::Result;
 pub use thinking::{ThinkingConfig, ThinkingLevel, ThinkingProtocol};
 pub use types::{
     ChatCompletionChunk, ChatCompletionRequest, ChatCompletionResponse, DeltaMessage, FunctionCall,
-    FunctionSpec, JsonSchemaSpec, Message, ResponseFormat, Role, ThinkingTypeBlock, ToolCall,
-    ToolDefinition,
+    FunctionSpec, JsonSchemaSpec, Message, ProviderResponseMetadata, ResponseFormat, Role,
+    ThinkingTypeBlock, ToolCall, ToolDefinition,
 };
 
 use futures::future::BoxFuture;
@@ -608,6 +608,60 @@ impl ToolChoice {
     }
 }
 
+impl serde::Serialize for ToolChoice {
+    fn serialize<S: serde::Serializer>(
+        &self,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
+        serde::Serialize::serialize(&self.to_openai_value(), serializer)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for ToolChoice {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
+        use serde::Deserialize;
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct NamedFunction {
+            name: String,
+        }
+        #[derive(Deserialize)]
+        #[serde(rename_all = "snake_case")]
+        enum FunctionKind {
+            Function,
+        }
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct NamedChoice {
+            #[serde(rename = "type")]
+            kind: FunctionKind,
+            function: NamedFunction,
+        }
+        let value = serde_json::Value::deserialize(deserializer)?;
+        match value.as_str() {
+            Some("auto") => Ok(Self::Auto),
+            Some("none") => Ok(Self::None),
+            Some("required") => Ok(Self::Required),
+            Some(_) => Err(serde::de::Error::custom("unknown tool choice mode")),
+            None => {
+                let named: NamedChoice =
+                    serde_json::from_value(value).map_err(serde::de::Error::custom)?;
+                let FunctionKind::Function = named.kind;
+                if named.function.name.trim().is_empty() {
+                    return Err(serde::de::Error::custom(
+                        "selected function name must not be empty",
+                    ));
+                }
+                Ok(Self::Function {
+                    name: named.function.name,
+                })
+            }
+        }
+    }
+}
+
 /// Chat request parameters
 #[derive(Debug, Clone, Default)]
 pub struct ChatRequest {
@@ -619,10 +673,8 @@ pub struct ChatRequest {
     pub max_tokens: Option<u32>,
     /// Optional tool definitions exposed to the model.
     pub tools: Option<Vec<ToolDefinition>>,
-    /// Controls how the model uses tools (OpenAI wire format).
-    /// Prefer [`ToolChoice`] for type-safe construction; convert via
-    /// [`ToolChoice::to_openai_value`] when building a [`ChatCompletionRequest`].
-    pub tool_choice: Option<String>,
+    /// 通用工具选择；各协议仅在适配边界转换wire形状。
+    pub tool_choice: Option<ToolChoice>,
     /// Optional structured output format hint.
     pub response_format: Option<ResponseFormat>,
     /// Optional reasoning-depth / "thinking" control.

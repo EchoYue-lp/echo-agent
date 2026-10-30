@@ -31,23 +31,6 @@ pub struct ProjectionContext {
     pub turn_id: Option<String>,
 }
 
-/// 原恢复owner为只读模型历史声明的工具来源，不是工具执行或最终发布许可。
-/// 不序列化到Message/Checkpoint；空默认保独立框架、自定义工具与SDK旧行为。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum RecoveredToolKind {
-    /// 宿主已核旧默认工厂/归档的框架内置实现，SHA为该实现定义来源。
-    FrameworkBuiltin { definition_source_sha256: String },
-    /// 同名也保普通自定义工具历史，不按名称映射为已退役内置实现。
-    Custom,
-}
-
-/// 来源只绑定本次输入messages内的一条原call；不能用于新工具分派。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RecoveredToolOrigin {
-    pub call_id: String,
-    pub kind: RecoveredToolKind,
-}
-
 /// Produces replaceable context immediately before model input preparation.
 pub trait PreModelContextProjector: Send + Sync {
     /// 声明本投影是否为本次模型调用的必要输入。
@@ -61,17 +44,6 @@ pub trait PreModelContextProjector: Send + Sync {
         &'a self,
         context: &'a ProjectionContext,
     ) -> BoxFuture<'a, Result<Vec<ContextProjection>>>;
-
-    /// 原恢复/产品owner可从已知旧工厂和现有注册事实给来源，不要求旧记录有新签名。
-    /// 默认不推测builtin；模型参数、工具名相等或provider坐标均不构成来源。
-    /// 框架只用于发给模型的历史副本，绝不改变持久context、cursor/CAS或实际执行。
-    fn recovered_tool_origins<'a>(
-        &'a self,
-        _context: &'a ProjectionContext,
-        _messages: &'a [Message],
-    ) -> BoxFuture<'a, Result<Vec<RecoveredToolOrigin>>> {
-        Box::pin(async { Ok(Vec::new()) })
-    }
 
     /// 在最终 ChatRequest 构建后核验投影引用是否能在本次实际工具范围内读取。
     /// 默认允许，保留旧消费者；实现只能核验，不能扩展工具上界或改写请求。

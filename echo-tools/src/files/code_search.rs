@@ -169,6 +169,7 @@ impl Tool for CodeSearchTool {
                 file_system,
                 cancel,
                 &search_path,
+                &this.base_dir,
                 query,
                 symbol_type,
                 file_filter.as_ref(),
@@ -255,6 +256,7 @@ fn search_symbols(
     file_system: &dyn echo_core::tools::filesystem::FileSystem,
     cancel: Option<&echo_core::agent::CancellationToken>,
     path: &Path,
+    base_dir: &Option<PathBuf>,
     symbol_pattern: &str,
     symbol_type: &str,
     file_filter: Option<&Regex>,
@@ -279,8 +281,8 @@ fn search_symbols(
         file_system,
         cancel,
         path,
-        &symbol_regex,
-        symbol_type,
+        base_dir,
+        (&symbol_regex, symbol_type),
         file_filter,
         &mut results,
     )?;
@@ -293,12 +295,13 @@ fn search_directory(
     file_system: &dyn echo_core::tools::filesystem::FileSystem,
     cancel: Option<&echo_core::agent::CancellationToken>,
     dir: &Path,
-    symbol_regex: &Regex,
-    symbol_type: &str,
+    base_dir: &Option<PathBuf>,
+    symbol_query: (&Regex, &str),
     file_filter: Option<&Regex>,
     results: &mut Vec<SymbolResult>,
 ) -> Result<()> {
     super::check_file_cancel(cancel, "code_search")?;
+    let (symbol_regex, symbol_type) = symbol_query;
     let mut stack = vec![dir.to_path_buf()];
 
     while let Some(current_dir) = stack.pop() {
@@ -324,6 +327,9 @@ fn search_directory(
                 continue;
             }
 
+            if base_dir.is_some() {
+                super::resolve_path_buf(file_system, "code_search", &path, base_dir)?;
+            }
             if file_system.is_dir(&path)? {
                 stack.push(path);
             } else if file_system.is_file(&path)? {

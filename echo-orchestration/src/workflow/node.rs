@@ -244,7 +244,6 @@ impl Node {
                                     AgentEvent::FinalAnswer(answer) if !control.has_error() => {
                                         if let Err(error)=output.confirm_answer(&answer) {control.record_error(Some(node_name),error);}
                                     },
-                                    AgentEvent::Token(_) | AgentEvent::ThinkStart | AgentEvent::ThinkEnd { .. } => control.record_error(Some(node_name), ReactError::Other("Workflow source emitted a retired assistant projection".into())),
                                     AgentEvent::Cancelled => control.record_error(Some(node_name), ReactError::Agent(Box::new(AgentError::Cancelled(format!("Workflow Agent node '{}' cancelled", agent.name()))))),
                                     AgentEvent::Error { message,failure,.. } => control.record_error(Some(node_name),match failure.terminal_kind {
                                         echo_core::error::AgentTerminalKind::Cancelled=>AgentError::Cancelled(message).into(),

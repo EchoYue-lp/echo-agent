@@ -2,7 +2,7 @@
 
 > 具名退役：当前源码移除 A2A／LSP 的实现、feature、公开出口和专属示例；
 > ACP、MCP、channels、Task/Subagent、通用工具和存储菜单继续保留。
-> 旧插件 `lsp.yaml` 由原 prepare owner 冻结并明确诊断，不启动服务，也不删除用户文件。
+> 旧插件 `lsp.yaml` 仅保留用户原件；当前prepare不probe、读取、冻结、hash或缓存它，不纳入generation身份、不生成LSP专属诊断，也不启动服务。见[ADR0105](../adr/0105-current-config-and-plugin-inputs.md)。
 > 源码同步不代表删后构建、最终锁、SDK正式新Git来源、native或发布资格已通过。
 > 边界和恢复锚点见[ADR0090](../adr/0090-a2a-lsp-retirement-contract.md)。
 

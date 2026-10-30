@@ -312,11 +312,11 @@ impl EventIdentity {
     }
 }
 
-/// Wrap a raw event stream with stable identity, ordering, correlation, and terminal semantics.
+/// 给原生 source 附加稳定身份、次序与工具父事件关联。
 ///
-/// Tool result/progress events point to their corresponding `ToolCall` event.
-/// Raw stream errors and streams that end without a terminal payload are
-/// normalized into exactly one terminal `AgentEvent::Error` envelope.
+/// 原 runtime 状态和终态后的尾部始终运输到同一 source 的原 EOF；工具结果与进度
+/// 关联其 ToolCall。原错误保留既有 typed Error 投影，缺少 native terminal 时发布
+/// transport refusal Error。该拒绝不是原生执行终态，不能合成执行成功或物理结算。
 pub fn envelope_event_stream<'a>(
     stream: BoxStream<'a, Result<AgentEvent>>,
     identity: EventIdentity,
@@ -341,9 +341,7 @@ pub fn envelope_event_stream_after<'a>(
         let mut sequence = last_persisted_sequence;
         let mut terminal_emitted = false;
         let mut observation_only = false;
-        // 运输层只识别生产者已有的runtime事实，不再于已确认正文处截掉尾部状态。
-        // 旧custom Agent没有runtime事件时仍沿原公开terminal合同读取。
-        let mut native_execution = false;
+        // 当前source的真实状态是唯一执行终态；正文通知不选择另一种运输模式。
         let mut tool_calls = HashMap::<String, EventId>::new();
 
         while let Some(item) = stream.next().await {
@@ -375,12 +373,7 @@ pub fn envelope_event_stream_after<'a>(
                 | AgentEvent::ToolStream { call_id, .. } => tool_calls.get(call_id).cloned(),
                 _ => identity.parent_event_id.clone(),
             };
-            native_execution |= matches!(payload, AgentEvent::ExecutionStatus(_));
-            let is_terminal = if native_execution {
-                payload.is_execution_terminal()
-            } else {
-                payload.is_terminal()
-            };
+            let is_terminal = payload.is_execution_terminal();
             let envelope = match EventEnvelope::new(&identity, sequence, parent_event_id, payload) {
                 Ok(envelope) => envelope,
                 Err(error) => {
@@ -397,10 +390,8 @@ pub fn envelope_event_stream_after<'a>(
             }
 
             yield Ok(envelope);
-            if is_terminal {
-                terminal_emitted = true;
-                break;
-            }
+            if is_terminal { terminal_emitted = true; }
+            // 不提前drop：同一producer仍可能有真正尾错/资源结算。
         }
 
         if !terminal_emitted && !observation_only {
@@ -519,9 +510,6 @@ pub fn validate_event_trajectory(events: &[EventEnvelope]) -> Vec<String> {
     }
     let mut tool_calls = HashMap::<String, EventId>::new();
     let mut terminal_count = 0_usize;
-    let native_execution = events
-        .iter()
-        .any(|event| matches!(event.payload, AgentEvent::ExecutionStatus(_)));
 
     for (index, event) in events.iter().enumerate() {
         match &event.payload {
@@ -551,11 +539,7 @@ pub fn validate_event_trajectory(events: &[EventEnvelope]) -> Vec<String> {
             }
             _ => {}
         }
-        if if native_execution {
-            event.payload.is_execution_terminal()
-        } else {
-            event.payload.is_terminal()
-        } {
+        if event.payload.is_execution_terminal() {
             terminal_count = terminal_count.saturating_add(1);
             if index.saturating_add(1) != events.len() {
                 violations.push(format!(
@@ -583,6 +567,27 @@ pub fn validate_event_trajectory(events: &[EventEnvelope]) -> Vec<String> {
 mod tests {
     use super::*;
     use futures::stream;
+
+    fn assert_same_payload(
+        actual: Option<&AgentEvent>,
+        expected: Option<&AgentEvent>,
+    ) -> Result<()> {
+        // AgentEvent 不要求整体 PartialEq；传输测试逐值比较完整 wire payload，
+        // 再比较含 serde 跳过字段的完整状态，避免漏掉 adapter_generated。
+        let actual_value = serde_json::to_value(actual)
+            .map_err(|error| crate::error::ReactError::Other(error.to_string()))?;
+        let expected_value = serde_json::to_value(expected)
+            .map_err(|error| crate::error::ReactError::Other(error.to_string()))?;
+        assert_eq!(actual_value, expected_value);
+        if let (
+            Some(AgentEvent::ExecutionStatus(actual)),
+            Some(AgentEvent::ExecutionStatus(expected)),
+        ) = (actual, expected)
+        {
+            assert_eq!(actual, expected);
+        }
+        Ok(())
+    }
 
     #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
     struct TestPayload {
@@ -636,6 +641,7 @@ mod tests {
     #[tokio::test]
     async fn sequences_events_and_correlates_tool_lifecycle() -> Result<()> {
         let raw = stream::iter(vec![
+            Ok(native_status(super::super::ExecutionStatusKind::Started, 0)),
             Ok(AgentEvent::ToolCall {
                 call_id: "call-1".to_string(),
                 invocation: ToolInvocation {
@@ -652,21 +658,55 @@ mod tests {
                 result: crate::tools::ToolResult::success("done"),
             }),
             Ok(AgentEvent::FinalAnswer("ok".to_string())),
+            Ok(native_status(super::super::ExecutionStatusKind::Settled, 1)),
         ]);
         let events = envelope_event_stream(Box::pin(raw), identity())
             .collect::<Vec<_>>()
             .await;
         let events = events.into_iter().collect::<Result<Vec<_>>>()?;
 
-        assert_eq!(events.len(), 3);
-        assert_eq!(events.first().map(|event| event.sequence), Some(1));
-        assert_eq!(events.get(1).map(|event| event.sequence), Some(2));
-        assert_eq!(events.get(2).map(|event| event.sequence), Some(3));
+        assert_eq!(events.len(), 5);
         assert_eq!(
             events
-                .get(1)
+                .iter()
+                .map(|event| event.sequence)
+                .collect::<Vec<_>>(),
+            vec![1, 2, 3, 4, 5]
+        );
+        let kinds: Vec<_> = events
+            .iter()
+            .map(|event| match &event.payload {
+                AgentEvent::ExecutionStatus(status)
+                    if status.status == super::super::ExecutionStatusKind::Started =>
+                {
+                    "started"
+                }
+                AgentEvent::ToolCall { .. } => "tool_call",
+                AgentEvent::ToolResult { .. } => "tool_result",
+                AgentEvent::FinalAnswer(_) => "final_answer",
+                AgentEvent::ExecutionStatus(status)
+                    if status.status == super::super::ExecutionStatusKind::Settled =>
+                {
+                    "settled"
+                }
+                _ => "unexpected",
+            })
+            .collect();
+        assert_eq!(
+            kinds,
+            vec![
+                "started",
+                "tool_call",
+                "tool_result",
+                "final_answer",
+                "settled"
+            ]
+        );
+        assert_eq!(
+            events
+                .get(2)
                 .and_then(|event| event.parent_event_id.as_ref()),
-            events.first().map(|event| &event.event_id)
+            events.get(1).map(|event| &event.event_id)
         );
         assert!(
             events
@@ -674,6 +714,17 @@ mod tests {
                 .is_some_and(|event| event.payload.is_terminal())
         );
         assert!(events.iter().all(|event| event.run_id.is_none()));
+        assert!(validate_event_trajectory(&events).is_empty());
+        for event in &events {
+            let rebuilt = EventEnvelope::new(
+                &identity(),
+                event.sequence,
+                event.parent_event_id.clone(),
+                event.payload.clone(),
+            )?;
+            assert_eq!(event.event_id, rebuilt.event_id);
+            assert_eq!(event.content_hash, rebuilt.content_hash);
+        }
         Ok(())
     }
 
@@ -715,9 +766,15 @@ mod tests {
 
     #[test]
     fn serialized_trajectory_recomputes_canonical_nested_metadata_hashes() -> Result<()> {
-        let tool_call = EventEnvelope::new(
+        let started = EventEnvelope::new(
             &identity(),
             1,
+            None,
+            native_status(super::super::ExecutionStatusKind::Started, 0),
+        )?;
+        let tool_call = EventEnvelope::new(
+            &identity(),
+            2,
             None,
             AgentEvent::ToolCall {
                 call_id: "call-1".to_string(),
@@ -735,7 +792,7 @@ mod tests {
         result.metadata.insert("alpha".to_string(), "1".to_string());
         let tool_result = EventEnvelope::new(
             &identity(),
-            2,
+            3,
             Some(tool_call.event_id.clone()),
             AgentEvent::ToolResult {
                 call_id: "call-1".to_string(),
@@ -744,71 +801,207 @@ mod tests {
             },
         )?;
         let expected_result_hash = tool_result.content_hash.clone();
-        let terminal = EventEnvelope::new(
+        let confirmation = EventEnvelope::new(
             &identity(),
-            3,
+            4,
             None,
             AgentEvent::FinalAnswer("done".to_string()),
         )?;
-        let encoded = serde_json::to_vec(&vec![tool_call, tool_result, terminal])
-            .map_err(|error| crate::error::ReactError::Other(error.to_string()))?;
+        let terminal = EventEnvelope::new(
+            &identity(),
+            5,
+            None,
+            native_status(super::super::ExecutionStatusKind::Settled, 1),
+        )?;
+        let encoded = serde_json::to_vec(&vec![
+            started,
+            tool_call,
+            tool_result,
+            confirmation,
+            terminal,
+        ])
+        .map_err(|error| crate::error::ReactError::Other(error.to_string()))?;
         let decoded: Vec<EventEnvelope> = serde_json::from_slice(&encoded)
             .map_err(|error| crate::error::ReactError::Other(error.to_string()))?;
 
+        // 正文确认不授执行终态；同一序列化轨迹必须保留原 native Settled。
+        let confirmation_only = decoded.iter().take(4).cloned().collect::<Vec<_>>();
+        assert!(
+            validate_event_trajectory(&confirmation_only)
+                .iter()
+                .any(|violation| violation.contains("exactly one terminal event, got 0"))
+        );
         assert!(validate_event_trajectory(&decoded).is_empty());
         assert_eq!(
-            decoded.get(1).map(|event| event.content_hash.as_str()),
+            decoded.get(2).map(|event| event.content_hash.as_str()),
             Some(expected_result_hash.as_str())
         );
+        assert!(matches!(decoded.last().map(|event| &event.payload),
+            Some(AgentEvent::ExecutionStatus(status))
+                if !status.adapter_generated
+                    && status.execution_id == "execution-1"
+                    && status.status == super::super::ExecutionStatusKind::Settled));
         Ok(())
     }
 
     #[tokio::test]
-    async fn normalizes_missing_and_duplicate_terminals() -> Result<()> {
-        let missing = stream::iter(vec![Ok(AgentEvent::Token("partial".to_string()))]);
+    async fn native_transport_keeps_missing_refusal_and_original_cancellation_and_failure()
+    -> Result<()> {
+        use super::super::{AgentOutputProjection, ExecutionStatusKind};
+        let missing = stream::iter(vec![
+            Ok(native_status(ExecutionStatusKind::Started, 0)),
+            Ok(AgentEvent::AssistantMessage {
+                block: super::super::AssistantMessageBlock {
+                    provider_source: None,
+                    block_id: "partial".into(),
+                    request_id: "response-1".into(),
+                    sequence: 0,
+                    phase: super::super::AssistantPhase::Commentary,
+                    delta: "partial".into(),
+                    complete: false,
+                    provider: None,
+                    reasoning: None,
+                },
+            }),
+        ]);
         let missing_events = envelope_event_stream(Box::pin(missing), identity())
             .collect::<Vec<_>>()
             .await
             .into_iter()
             .collect::<Result<Vec<_>>>()?;
-        assert_eq!(missing_events.len(), 2);
+        assert_eq!(missing_events.len(), 3);
+        assert!(validate_envelope_trajectory(&missing_events).is_empty());
+        assert!(missing_events.last().is_some_and(|event| matches!(&event.payload,
+            AgentEvent::Error { source, message, .. } if source == "agent_stream" && message == "agent stream ended without a terminal event")));
         assert!(
             missing_events
-                .last()
-                .is_some_and(|event| matches!(event.payload, AgentEvent::Error { .. }))
+                .iter()
+                .all(|event| !event.payload.is_execution_terminal())
+        );
+        let mut incomplete = AgentOutputProjection::default();
+        for event in &missing_events {
+            if let AgentEvent::ExecutionStatus(status) = &event.payload {
+                incomplete.observe_status(status)?;
+            }
+            if let AgentEvent::AssistantMessage { block } = &event.payload {
+                incomplete.observe_block(block)?;
+            }
+        }
+        assert!(incomplete.finish().is_err());
+
+        // 旧 FinalAnswer 吞掉后续取消的义务已退役；真实 native Cancelled 原样可见。
+        let cancelled = stream::iter(vec![
+            Ok(native_status(ExecutionStatusKind::Started, 0)),
+            Ok(AgentEvent::FinalAnswer("first".to_string())),
+            Ok(native_status(ExecutionStatusKind::Cancelled, 1)),
+        ]);
+        let cancelled_events = envelope_event_stream(Box::pin(cancelled), identity())
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>>>()?;
+        assert_eq!(cancelled_events.len(), 3);
+        assert!(validate_event_trajectory(&cancelled_events).is_empty());
+        assert!(
+            matches!(cancelled_events.get(1).map(|event| &event.payload), Some(AgentEvent::FinalAnswer(answer)) if answer == "first")
+        );
+        assert!(
+            matches!(cancelled_events.last().map(|event| &event.payload),
+            Some(AgentEvent::ExecutionStatus(status)) if !status.adapter_generated && status.execution_id == "execution-1" && status.status == ExecutionStatusKind::Cancelled)
         );
 
-        let duplicate = stream::iter(vec![
-            Ok(AgentEvent::FinalAnswer("first".to_string())),
-            Ok(AgentEvent::Cancelled),
-        ]);
-        let duplicate_events = envelope_event_stream(Box::pin(duplicate), identity())
-            .collect::<Vec<_>>()
-            .await
-            .into_iter()
-            .collect::<Result<Vec<_>>>()?;
-        assert_eq!(duplicate_events.len(), 1);
-        assert!(matches!(
-            duplicate_events.first().map(|event| &event.payload),
-            Some(AgentEvent::FinalAnswer(answer)) if answer == "first"
-        ));
+        let original = crate::error::ReactError::Other("provider disconnected".into());
+        let expected_error = AgentEvent::from_error("agent_stream", &original)?;
+        let mut failed = native_status(ExecutionStatusKind::Failed, 1);
+        if let AgentEvent::ExecutionStatus(status) = &mut failed {
+            status.reason = Some("provider disconnected".into());
+        }
+        let failed_events = envelope_event_stream(
+            Box::pin(stream::iter(vec![
+                Ok(native_status(ExecutionStatusKind::Started, 0)),
+                Err(original),
+                Ok(failed.clone()),
+            ])),
+            identity(),
+        )
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>>>()?;
+        assert_eq!(failed_events.len(), 3);
+        assert_same_payload(
+            failed_events.get(1).map(|event| &event.payload),
+            Some(&expected_error),
+        )?;
+        assert_same_payload(
+            failed_events.last().map(|event| &event.payload),
+            Some(&failed),
+        )?;
+        assert!(validate_event_trajectory(&failed_events).is_empty());
+        Ok(())
+    }
 
-        let failed = stream::iter(vec![Err(crate::error::ReactError::Other(
-            "provider disconnected".to_string(),
-        ))]);
-        let failed_events = envelope_event_stream(Box::pin(failed), identity())
+    #[tokio::test]
+    async fn native_transport_preserves_duplicate_foreign_and_conflicting_status_for_one_projection()
+    -> Result<()> {
+        use super::super::{AgentOutputProjection, ExecutionStatusKind};
+        for foreign in [true, false] {
+            let started = native_status(ExecutionStatusKind::Started, 0);
+            let settled = native_status(ExecutionStatusKind::Settled, 1);
+            let mut rejected = settled.clone();
+            if let AgentEvent::ExecutionStatus(status) = &mut rejected {
+                if foreign {
+                    status.execution_id = "foreign-execution".into();
+                } else {
+                    status.reason = Some("conflicting replay".into());
+                }
+            }
+            let payloads = [
+                started,
+                AgentEvent::FinalAnswer("confirmed body".into()),
+                settled.clone(),
+                settled,
+                rejected,
+            ];
+            let events = envelope_event_stream_after(
+                Box::pin(stream::iter(payloads.iter().cloned().map(Ok))),
+                identity(),
+                41,
+            )
             .collect::<Vec<_>>()
             .await
             .into_iter()
             .collect::<Result<Vec<_>>>()?;
-        assert_eq!(failed_events.len(), 1);
-        assert!(matches!(
-            failed_events.first().map(|event| &event.payload),
-            Some(AgentEvent::Error {
-                source, message, ..
-            })
-                if source == "agent_stream" && message.contains("provider disconnected")
-        ));
+            assert_eq!(events.len(), payloads.len());
+            assert!(validate_envelope_trajectory(&events).is_empty());
+            assert!(!validate_event_trajectory(&events).is_empty());
+            let mut projection = AgentOutputProjection::default();
+            for (index, event) in events.iter().enumerate() {
+                assert_same_payload(Some(&event.payload), payloads.get(index))?;
+                let sequence = u64::try_from(index)
+                    .ok()
+                    .and_then(|offset| offset.checked_add(42));
+                assert_eq!(Some(event.sequence), sequence);
+                let rebuilt =
+                    EventEnvelope::new(&identity(), event.sequence, None, event.payload.clone())?;
+                assert_eq!(event.event_id, rebuilt.event_id);
+                assert_eq!(event.content_hash, rebuilt.content_hash);
+                match &event.payload {
+                    AgentEvent::ExecutionStatus(status) => {
+                        let checked = projection.observe_status(status);
+                        if index == 4 {
+                            assert!(checked.is_err());
+                        } else if index == 3 {
+                            assert!(!checked?);
+                        } else {
+                            assert!(checked?);
+                        }
+                    }
+                    AgentEvent::FinalAnswer(answer) => projection.confirm_answer(answer)?,
+                    _ => {}
+                }
+            }
+        }
         Ok(())
     }
 
@@ -829,9 +1022,11 @@ mod tests {
         assert_eq!(first.event_id, repeated.event_id);
 
         let resumed = envelope_event_stream_after(
-            Box::pin(stream::iter(vec![Ok(AgentEvent::FinalAnswer(
-                "resumed".to_string(),
-            ))])),
+            Box::pin(stream::iter(vec![
+                Ok(native_status(super::super::ExecutionStatusKind::Started, 0)),
+                Ok(AgentEvent::FinalAnswer("resumed".to_string())),
+                Ok(native_status(super::super::ExecutionStatusKind::Settled, 1)),
+            ])),
             identity(),
             8,
         )
@@ -839,7 +1034,28 @@ mod tests {
         .await
         .into_iter()
         .collect::<Result<Vec<_>>>()?;
-        assert_eq!(resumed.first().map(|event| event.sequence), Some(9));
+        assert_eq!(
+            resumed
+                .iter()
+                .map(|event| event.sequence)
+                .collect::<Vec<_>>(),
+            vec![9, 10, 11]
+        );
+        assert!(validate_event_trajectory(&resumed).is_empty());
+        let rebuilt = EventEnvelope::new(
+            &identity(),
+            9,
+            None,
+            native_status(super::super::ExecutionStatusKind::Started, 0),
+        )?;
+        assert_eq!(
+            resumed.first().map(|event| &event.event_id),
+            Some(&rebuilt.event_id)
+        );
+        assert_eq!(
+            resumed.first().map(|event| &event.content_hash),
+            Some(&rebuilt.content_hash)
+        );
         Ok(())
     }
 
@@ -890,34 +1106,87 @@ mod tests {
 
     #[tokio::test]
     async fn validates_canonical_success_cancel_error_and_hitl_budget_prefixes() -> Result<()> {
-        for raw in [
-            vec![
-                Ok(AgentEvent::BudgetDecision {
-                    decision: super::super::BudgetDecision::FinalOnly,
-                    reason: "token_budget".to_string(),
-                    iteration: 2,
-                    reported_model_tokens: 100,
-                    usage_complete: true,
-                }),
-                Ok(AgentEvent::FinalAnswer("完成 🧪".to_string())),
-            ],
-            vec![
-                Ok(AgentEvent::SafetyNotice {
-                    action: "write file".to_string(),
-                    reason: "requested".to_string(),
-                    risk: "local mutation".to_string(),
-                    permission: "confirm".to_string(),
-                }),
-                Ok(AgentEvent::Cancelled),
-            ],
-            vec![Ok(AgentEvent::error_message("model", "stream interrupted"))],
+        use super::super::{AgentOutputProjection, ExecutionStatusKind};
+        for (prefix, kind) in [
+            (
+                vec![
+                    AgentEvent::BudgetDecision {
+                        decision: super::super::BudgetDecision::FinalOnly,
+                        reason: "token_budget".into(),
+                        iteration: 2,
+                        reported_model_tokens: 100,
+                        usage_complete: true,
+                    },
+                    AgentEvent::FinalAnswer("完成 🧪".into()),
+                ],
+                ExecutionStatusKind::Settled,
+            ),
+            (
+                vec![
+                    AgentEvent::SafetyNotice {
+                        action: "write file".into(),
+                        reason: "requested".into(),
+                        risk: "local mutation".into(),
+                        permission: "confirm".into(),
+                    },
+                    AgentEvent::Cancelled,
+                ],
+                ExecutionStatusKind::Cancelled,
+            ),
+            (
+                vec![AgentEvent::error_message("model", "stream interrupted")],
+                ExecutionStatusKind::Failed,
+            ),
         ] {
-            let events = envelope_event_stream(Box::pin(stream::iter(raw)), identity())
-                .collect::<Vec<_>>()
-                .await
-                .into_iter()
-                .collect::<Result<Vec<_>>>()?;
+            let mut payloads = vec![native_status(ExecutionStatusKind::Started, 0)];
+            payloads.extend(prefix);
+            let mut terminal = native_status(kind.clone(), 1);
+            if let AgentEvent::ExecutionStatus(status) = &mut terminal
+                && kind == ExecutionStatusKind::Failed
+            {
+                status.reason = Some("stream interrupted".into());
+            }
+            payloads.push(terminal);
+            let events = envelope_event_stream(
+                Box::pin(stream::iter(payloads.iter().cloned().map(Ok))),
+                identity(),
+            )
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>>>()?;
+            assert_eq!(events.len(), payloads.len());
             assert!(validate_event_trajectory(&events).is_empty());
+            let mut projection = AgentOutputProjection::default();
+            for (index, event) in events.iter().enumerate() {
+                assert_same_payload(Some(&event.payload), payloads.get(index))?;
+                assert_eq!(
+                    Some(event.sequence),
+                    u64::try_from(index)
+                        .ok()
+                        .and_then(|offset| offset.checked_add(1))
+                );
+                let rebuilt =
+                    EventEnvelope::new(&identity(), event.sequence, None, event.payload.clone())?;
+                assert_eq!(event.event_id, rebuilt.event_id);
+                assert_eq!(event.content_hash, rebuilt.content_hash);
+                match &event.payload {
+                    AgentEvent::ExecutionStatus(status) => {
+                        projection.observe_status(status)?;
+                    }
+                    AgentEvent::FinalAnswer(answer) => projection.confirm_answer(answer)?,
+                    _ => {}
+                }
+            }
+            match kind {
+                ExecutionStatusKind::Settled => assert_eq!(projection.finish()?, "完成 🧪"),
+                ExecutionStatusKind::Cancelled => assert!(
+                    matches!(projection.finish(), Err(crate::error::ReactError::Agent(error)) if matches!(error.as_ref(), crate::error::AgentError::Cancelled(_)))
+                ),
+                _ => assert!(
+                    matches!(projection.finish(), Err(crate::error::ReactError::Other(message)) if message == "stream interrupted")
+                ),
+            }
         }
         Ok(())
     }
@@ -928,10 +1197,15 @@ mod tests {
             &identity(),
             1,
             Some(EventId("missing-parent".to_string())),
-            AgentEvent::FinalAnswer("early".to_string()),
+            native_status(super::super::ExecutionStatusKind::Settled, 1),
         )?;
         first.schema_version = AGENT_EVENT_SCHEMA_VERSION.saturating_add(1);
-        let mut second = EventEnvelope::new(&identity(), 3, None, AgentEvent::Cancelled)?;
+        let mut second = EventEnvelope::new(
+            &identity(),
+            3,
+            None,
+            native_status(super::super::ExecutionStatusKind::Cancelled, 2),
+        )?;
         second.turn_id = TurnId("different-turn".to_string());
         second.event_id = first.event_id.clone();
         let violations = validate_event_trajectory(&[first, second]);
@@ -1030,7 +1304,10 @@ mod tests {
     #[tokio::test]
     async fn rejects_exhausted_resume_sequence() {
         let events = envelope_event_stream_after(
-            Box::pin(stream::iter(vec![Ok(AgentEvent::Cancelled)])),
+            Box::pin(stream::iter(vec![Ok(native_status(
+                super::super::ExecutionStatusKind::Started,
+                0,
+            ))])),
             identity(),
             u64::MAX,
         )
@@ -1038,5 +1315,63 @@ mod tests {
         .await;
         assert_eq!(events.len(), 1);
         assert!(events.first().is_some_and(Result::is_err));
+    }
+}
+
+#[cfg(test)]
+mod canonical_transport_contract_tests {
+    use super::*;
+    use crate::agent::{AgentPhase, ExecutionStatus, ExecutionStatusKind};
+    fn native_status(kind: ExecutionStatusKind, sequence: u64) -> AgentEvent {
+        AgentEvent::ExecutionStatus(ExecutionStatus {
+            adapter_generated: false,
+            execution_id: "original-execution".into(),
+            request_id: Some("request".into()),
+            sequence,
+            phase: AgentPhase::Terminal,
+            status: kind,
+            reason: None,
+        })
+    }
+    #[tokio::test]
+    async fn canonical_transport_does_not_end_at_confirmed_body_or_rewrite_original_status()
+    -> Result<()> {
+        let identity = EventIdentity::for_run("run")?.with_execution_id("original-execution")?;
+        let input = futures::stream::iter(vec![
+            Ok(native_status(ExecutionStatusKind::Started, 0)),
+            Ok(AgentEvent::FinalAnswer("中文🙂".into())),
+            Ok(native_status(ExecutionStatusKind::Settled, 8)),
+        ])
+        .boxed();
+        let events = envelope_event_stream(input, identity)
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>>>()?;
+        assert_eq!(events.len(), 3);
+        assert!(
+            matches!(events.last().map(|event|&event.payload),Some(AgentEvent::ExecutionStatus(status)) if status.sequence==8&&status.execution_id=="original-execution"&&!status.adapter_generated)
+        );
+        Ok(())
+    }
+    #[tokio::test]
+    async fn canonical_transport_final_answer_without_source_terminal_is_not_a_successful_trajectory()
+    -> Result<()> {
+        let identity = EventIdentity::for_run("run")?;
+        let input =
+            futures::stream::iter(vec![Ok(AgentEvent::FinalAnswer("body only".into()))]).boxed();
+        let events = envelope_event_stream(input, identity)
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>>>()?;
+        assert!(events.iter().all(|event|!matches!(&event.payload,AgentEvent::ExecutionStatus(status) if status.status==ExecutionStatusKind::Settled)));
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event.payload, AgentEvent::Error { .. })),
+            "plain body/EOF requires a transport refusal; never Completed"
+        );
+        Ok(())
     }
 }

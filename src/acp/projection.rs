@@ -7,12 +7,13 @@ use agent_client_protocol::schema::v1::{
 };
 use agent_client_protocol::{Client, ConnectionTo};
 use async_trait::async_trait;
+use echo_core::agent::{AgentOutputProjection, AssistantPhase, ExecutionStatusKind};
 use std::sync::Mutex;
 
 #[derive(Default)]
 struct ProjectionState {
-    thinking: bool,
-    emitted_agent_text: bool,
+    output: AgentOutputProjection,
+    projection_failed: bool,
     updates_sent: usize,
     total_update_chars: usize,
 }
@@ -74,42 +75,89 @@ impl AcpEventProjector {
     }
 
     fn updates(&self, payload: &AgentEvent) -> Result<Vec<SessionUpdate>> {
-        let mut state = self
-            .state
+        self.state
             .lock()
-            .map_err(|_| ReactError::Other("ACP projector state lock poisoned".to_string()))?;
+            .map_err(|_| ReactError::Other("ACP projector state lock poisoned".to_string()))?
+            .updates(payload, self.max_update_chars)
+    }
+
+    fn reserve(&self, notification: &SessionNotification) -> Result<()> {
+        self.state
+            .lock()
+            .map_err(|_| ReactError::Other("ACP projector state lock poisoned".to_string()))?
+            .reserve_notification(
+                notification,
+                self.max_update_chars,
+                self.max_updates_per_turn,
+                self.max_total_update_chars,
+            )
+    }
+}
+
+impl ProjectionState {
+    fn updates(
+        &mut self,
+        payload: &AgentEvent,
+        max_update_chars: usize,
+    ) -> Result<Vec<SessionUpdate>> {
+        if self.projection_failed {
+            return Err(ReactError::Other(
+                "ACP projection already failed".to_string(),
+            ));
+        }
+        let result = self.project_payload(payload, max_update_chars);
+        // 无效原生事实不能被后续看似成功的状态抹去；这只是投递失败，不是执行终态。
+        self.projection_failed |= result.is_err();
+        result
+    }
+
+    fn project_payload(
+        &mut self,
+        payload: &AgentEvent,
+        max_update_chars: usize,
+    ) -> Result<Vec<SessionUpdate>> {
         let updates = match payload {
-            AgentEvent::ThinkStart => {
-                state.thinking = true;
-                Vec::new()
-            }
-            AgentEvent::ThinkEnd { .. } => {
-                state.thinking = false;
-                Vec::new()
-            }
-            AgentEvent::Token(text) => {
-                validate_update_size(text, self.max_update_chars)?;
-                let chunk = ContentChunk::new(ContentBlock::Text(TextContent::new(text.clone())));
-                if state.thinking {
-                    vec![SessionUpdate::AgentThoughtChunk(chunk)]
-                } else {
-                    state.emitted_agent_text = true;
-                    vec![SessionUpdate::AgentMessageChunk(chunk)]
+            AgentEvent::AssistantMessage { block } => match self.output.observe_block(block)? {
+                Some(delta) if !delta.text.is_empty() => {
+                    validate_update_size(&delta.text, max_update_chars)?;
+                    let chunk = ContentChunk::new(ContentBlock::Text(TextContent::new(delta.text)));
+                    if delta.block.phase == AssistantPhase::Reasoning {
+                        vec![SessionUpdate::AgentThoughtChunk(chunk)]
+                    } else {
+                        vec![SessionUpdate::AgentMessageChunk(chunk)]
+                    }
                 }
+                _ => Vec::new(),
+            },
+            AgentEvent::FinalAnswer(answer) => {
+                // 只确认 runtime 经 Final Guard 批准的正文，不以“已见进度”屏蔽最终答复。
+                self.output.confirm_answer(answer)?;
+                Vec::new()
             }
-            AgentEvent::FinalAnswer(answer) if !state.emitted_agent_text => {
-                validate_update_size(answer, self.max_update_chars)?;
-                state.emitted_agent_text = true;
-                vec![SessionUpdate::AgentMessageChunk(ContentChunk::new(
-                    ContentBlock::Text(TextContent::new(answer.clone())),
-                ))]
+            AgentEvent::ExecutionStatus(status) => {
+                let changed = self.output.observe_status(status)?;
+                if changed && status.status == ExecutionStatusKind::Settled {
+                    // 原生 Settled 只允许补显示；原 driver 仍须读物理 EOF 后才能产生 receipt。
+                    // 这里绝不调用 finish，也不创造执行身份、序号或结算 owner。
+                    match self.output.take_final_presentation()? {
+                        Some(missing) => {
+                            validate_update_size(&missing, max_update_chars)?;
+                            vec![SessionUpdate::AgentMessageChunk(ContentChunk::new(
+                                ContentBlock::Text(TextContent::new(missing)),
+                            ))]
+                        }
+                        None => Vec::new(),
+                    }
+                } else {
+                    Vec::new()
+                }
             }
             AgentEvent::ToolCall {
                 call_id,
                 invocation,
             } => {
-                validate_update_size(&invocation.name, self.max_update_chars)?;
-                let raw_input = encode_bounded(&invocation.args, self.max_update_chars)?;
+                validate_update_size(&invocation.name, max_update_chars)?;
+                let raw_input = encode_bounded(&invocation.args, max_update_chars)?;
                 vec![SessionUpdate::ToolCall(
                     ToolCall::new(call_id.clone(), invocation.name.clone())
                         .status(ToolCallStatus::Pending)
@@ -117,7 +165,7 @@ impl AcpEventProjector {
                 )]
             }
             AgentEvent::ToolStream { call_id, event, .. } => {
-                let output = encode_bounded(event, self.max_update_chars)?;
+                let output = encode_bounded(event, max_update_chars)?;
                 vec![SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
                     call_id.clone(),
                     ToolCallUpdateFields::new()
@@ -129,7 +177,7 @@ impl AcpEventProjector {
                 call_id, result, ..
             } => {
                 let failed = !result.success;
-                let output = encode_bounded(result, self.max_update_chars)?;
+                let output = encode_bounded(result, max_update_chars)?;
                 vec![SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
                     call_id.clone(),
                     ToolCallUpdateFields::new()
@@ -146,38 +194,33 @@ impl AcpEventProjector {
         Ok(updates)
     }
 
-    fn reserve(&self, notification: &SessionNotification) -> Result<()> {
+    fn reserve_notification(
+        &mut self,
+        notification: &SessionNotification,
+        max_update_chars: usize,
+        max_updates_per_turn: usize,
+        max_total_update_chars: usize,
+    ) -> Result<()> {
         let serialized = serde_json::to_string(notification).map_err(|error| {
             ReactError::Other(format!("failed to encode ACP session/update: {error}"))
         })?;
         let update_chars = serialized.chars().count();
-        if update_chars > self.max_update_chars {
-            return Err(ReactError::Other(format!(
-                "ACP update exceeds the configured {} character limit",
-                self.max_update_chars
-            )));
-        }
-        let mut state = self
-            .state
-            .lock()
-            .map_err(|_| ReactError::Other("ACP projector state lock poisoned".to_string()))?;
-        let updates_sent = state
+        validate_update_size(&serialized, max_update_chars)?;
+        let updates_sent = self
             .updates_sent
             .checked_add(1)
             .ok_or_else(|| ReactError::Other("ACP update count overflow".to_string()))?;
-        let total_update_chars = state
+        let total_update_chars = self
             .total_update_chars
             .checked_add(update_chars)
             .ok_or_else(|| ReactError::Other("ACP update size overflow".to_string()))?;
-        if updates_sent > self.max_updates_per_turn
-            || total_update_chars > self.max_total_update_chars
-        {
+        if updates_sent > max_updates_per_turn || total_update_chars > max_total_update_chars {
             return Err(ReactError::Other(
                 "ACP Turn exceeded its cumulative update budget".to_string(),
             ));
         }
-        state.updates_sent = updates_sent;
-        state.total_update_chars = total_update_chars;
+        self.updates_sent = updates_sent;
+        self.total_update_chars = total_update_chars;
         Ok(())
     }
 }
@@ -207,3 +250,7 @@ fn encode_bounded<T: serde::Serialize>(value: &T, max_chars: usize) -> Result<se
         ReactError::Other(format!("failed to materialize ACP tool update: {error}"))
     })
 }
+
+#[cfg(test)]
+#[path = "projection/native_tests.rs"]
+mod native_tests;

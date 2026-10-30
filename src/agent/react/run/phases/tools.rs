@@ -190,12 +190,10 @@ async fn publish_completed_call(
             .await;
             result.model_content.clear();
             let mut context_guard = context.lock().await;
-            context_guard.push(tool_result_with_artifact(
-                call_id,
-                &name,
-                output.clone(),
-                result.artifact.as_ref(),
-            ));
+            context_guard.push(
+                tool_result_with_artifact(call_id, &name, output.clone(), result.artifact.as_ref())
+                    .with_tool_result_is_error(!result.success),
+            );
             if let Some(message) = model_message {
                 context_guard.push(message);
             }
@@ -222,12 +220,15 @@ async fn publish_completed_call(
                 None => return Err(error),
             };
             let message = result.error.clone().unwrap_or_else(|| error.to_string());
-            context.lock().await.push(tool_result_with_artifact(
-                call_id,
-                &name,
-                format!("[Error] {message}"),
-                result.artifact.as_ref(),
-            ));
+            context.lock().await.push(
+                tool_result_with_artifact(
+                    call_id,
+                    &name,
+                    format!("[Error] {message}"),
+                    result.artifact.as_ref(),
+                )
+                .with_tool_result_is_error(true),
+            );
             let _ = tx
                 .send(Ok(AgentEvent::ToolResult {
                     call_id: call_id.to_string(),
@@ -347,11 +348,14 @@ async fn settle_interrupted_calls(
                     .any(|(admitted_id, _, _)| admitted_id == call_id),
             )
             .await;
-        context.lock().await.push(Message::tool_result(
-            call_id.clone(),
-            name.clone(),
-            format!("[Error] {}", settlement.message),
-        ));
+        context.lock().await.push(
+            Message::tool_result(
+                call_id.clone(),
+                name.clone(),
+                format!("[Error] {}", settlement.message),
+            )
+            .with_tool_result_is_error(true),
+        );
         let _ = tx
             .send(Ok(AgentEvent::ToolResult {
                 call_id: call_id.clone(),
@@ -436,16 +440,24 @@ pub(crate) async fn run_tools(
     // to the transcript or tool pipeline. A correction accepted during that
     // model call can therefore discard the proposal without inventing any
     // tool result. Keep any ordinary assistant draft as context only.
-    let assistant_draft = (!think.content_buffer.is_empty()).then(|| {
-        let mut message = with_reasoning_content(
-            Message::assistant(think.content_buffer.clone()),
-            think.reasoning_buffer.clone(),
-            think.reasoning_blocks.clone(),
-        );
-        message.assistant_blocks = Some(think.assistant_blocks.clone());
-        message.approved_assistant_blocks = Some(think.approved_assistant_blocks.clone());
-        message
-    });
+    let assistant_draft = (!think.content_buffer.is_empty())
+        .then(|| {
+            let mut message = with_reasoning_content(
+                Message::assistant(think.content_buffer.clone()),
+                think.reasoning_buffer.clone(),
+                think.reasoning_blocks.clone(),
+            );
+            message.assistant_blocks = Some(think.assistant_blocks.clone());
+            message.approved_assistant_blocks = Some(think.approved_assistant_blocks.clone());
+            message.provider_response = think.provider_response.clone();
+            message
+        })
+        .or_else(|| {
+            think
+                .provider_response
+                .clone()
+                .map(Message::provider_response_observation)
+        });
     if !super::cancellation_requested(snap)
         && snap
             .drain_steer_into_context(context, assistant_draft)
@@ -494,6 +506,7 @@ pub(crate) async fn run_tools(
     };
     assistant_message.assistant_blocks = Some(think.assistant_blocks.clone());
     assistant_message.approved_assistant_blocks = Some(think.approved_assistant_blocks.clone());
+    assistant_message.provider_response = think.provider_response;
     context.lock().await.push(with_reasoning_content(
         assistant_message,
         think.reasoning_buffer,
@@ -1114,7 +1127,7 @@ mod tests {
     #[tokio::test]
     async fn published_tool_result_keeps_actual_artifact_in_same_canonical_message()
     -> crate::error::Result<()> {
-        for failure in [false, true] {
+        for (failure, outer_failure) in [(false, false), (true, false), (true, true)] {
             let root = tempfile::tempdir().map_err(|error| ReactError::Other(error.to_string()))?;
             let agent = crate::agent::ReactAgent::new(
                 crate::agent::AgentConfig::new("test-model", "agent", "system")
@@ -1142,7 +1155,12 @@ mod tests {
             } else {
                 ToolResult::success(processed.output.clone()).with_artifact(reference.clone())
             };
-            let outcome = if failure {
+            let expected_output = if outer_failure {
+                "[Error] guarded diagnostic".to_string()
+            } else {
+                result.output.clone()
+            };
+            let outcome = if outer_failure {
                 Err(crate::agent::snapshot::ToolCallFailure {
                     name: "shell".into(),
                     error: ReactError::Other("guarded diagnostic".into()),
@@ -1170,6 +1188,16 @@ mod tests {
                 return Err(ReactError::Other("actual result event missing".into()));
             };
             assert_eq!(result.success, !failure);
+            let published_messages = agent.memory.context.lock().await.messages().to_vec();
+            let published_message = published_messages
+                .iter()
+                .find(|message| message.tool_call_id.as_deref() == Some("publisher-real"))
+                .ok_or_else(|| ReactError::Other("canonical tool result missing".into()))?;
+            assert_eq!(
+                serde_json::to_value(published_message)?.get("tool_result_is_error"),
+                Some(&serde_json::json!(failure))
+            );
+
             assert_eq!(
                 serde_json::to_value(result.artifact)?,
                 serde_json::to_value(Some(reference.clone()))?
@@ -1202,11 +1230,7 @@ mod tests {
                 binding.get("call_id").and_then(Value::as_str),
                 Some("publisher-real")
             );
-            let expected = if failure {
-                "[Error] guarded diagnostic"
-            } else {
-                processed.output.as_str()
-            };
+            let expected = expected_output.as_str();
             assert!(matches!(parts.first(), Some(ContentPart::Text { text }) if text == expected));
             let stored = crate::memory::project_message("branch", tool_message)?;
             assert_eq!(
@@ -1394,12 +1418,19 @@ mod tests {
             .with_run_store(store.clone())
             .callback(callback.clone())
             .build()?;
-        let legacy = agent.capture_legacy_external_context();
+
         let run_id = agent
-            .start_legacy_trace_run("interrupted batch", &legacy)
+            .start_scoped_trace_run(
+                "interrupted batch",
+                None,
+                agent.config().conversation_id.as_deref(),
+                None,
+                None,
+            )
             .await
             .ok_or_else(|| crate::error::ReactError::Other("trace did not start".to_string()))?;
-        let snapshot = crate::agent::snapshot::AgentRunSnapshot::from_agent(&agent);
+        let mut snapshot = crate::agent::snapshot::AgentRunSnapshot::from_agent(&agent);
+        snapshot.trace_run_id = Some(run_id.clone());
         snapshot
             .record_event(RunEvent::new_tool_call(
                 "pending-a".to_string(),
@@ -1509,6 +1540,29 @@ mod tests {
                 ("pending-b".to_string(), false),
             ]
         );
+        let messages = agent.memory.context.lock().await.messages().to_vec();
+        for (id, is_error) in [
+            ("completed", false),
+            ("pending-a", true),
+            ("pending-b", true),
+        ] {
+            let matching = messages
+                .iter()
+                .filter(|message| message.tool_call_id.as_deref() == Some(id))
+                .collect::<Vec<_>>();
+            assert_eq!(
+                matching.len(),
+                1,
+                "each original call must have one canonical result"
+            );
+            let message = matching
+                .first()
+                .ok_or_else(|| ReactError::Other("canonical interrupted result missing".into()))?;
+            assert_eq!(
+                serde_json::to_value(message)?.get("tool_result_is_error"),
+                Some(&serde_json::json!(is_error))
+            );
+        }
         let run = store
             .load(&run_id)
             .await?

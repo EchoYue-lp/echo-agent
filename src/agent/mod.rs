@@ -11,7 +11,7 @@
 //! | Capability | Mechanism |
 //! |------------|-----------|
 //! | ReAct reasoning | [`react`] — the default loop |
-//! | Task planning | Tools (plan, create_task, update_task) |
+//! | Task planning | task_create/task_update/task_list 的单一 TaskRun graph |
 //! | Self-reflection | [`critic`] — evaluation and feedback tools |
 //! | Subagent coordination | `subagent` — multi-agent orchestration |
 //!
@@ -36,12 +36,13 @@
 pub use echo_core::agent::builder::AgentBuilder as AgentBuilderTrait;
 pub use echo_core::agent::{
     AGENT_EVENT_SCHEMA_VERSION, Agent, AgentCallback, AgentEvent, AgentInputLifecycle,
-    AgentInvocationContext, AgentSteerError, AgentSteerPhase, AgentSteerReceipt, AgentSteerState,
-    AgentSteerTurnOutcome, AssistantMessageBlock, AssistantPhase, BudgetDecision,
-    CancellationToken, EventEnvelope, EventId, EventIdentity, ExecutionStatus, ExecutionStatusKind,
-    ExecutionUsage, InterventionCallback, InterventionResult, StepType, StreamId, ToolInvocation,
-    ToolInvocationRewrite, ToolVisibilityPolicy, envelope_event_stream,
-    envelope_event_stream_after, validate_envelope_trajectory, validate_event_trajectory,
+    AgentInvocationContext, AgentOutputProjection, AgentPhase, AgentSteerError, AgentSteerPhase,
+    AgentSteerReceipt, AgentSteerState, AgentSteerTurnOutcome, AssistantMessageBlock,
+    AssistantPhase, AssistantTextDelta, BudgetDecision, CancellationToken, EventEnvelope, EventId,
+    EventIdentity, ExecutionStatus, ExecutionStatusKind, ExecutionUsage, InterventionCallback,
+    InterventionResult, StepType, StreamId, ToolInvocation, ToolInvocationRewrite,
+    ToolVisibilityPolicy, envelope_event_stream, envelope_event_stream_after,
+    validate_envelope_trajectory, validate_event_trajectory,
 };
 
 #[cfg(feature = "eval")]

@@ -39,12 +39,10 @@ use echo_core::tools::filesystem::FileSystem;
 /// override). When neither is set, behavior is unchanged from before
 /// (raw path + best-effort canonicalize).
 ///
-/// - Absolute path: normalize then (if base_dir set) verify it stays within base_dir
-/// - Relative path: expand relative to the chosen base then verify
-///
-/// After textual normalization, the selected provider canonicalizes symlinks
-/// and verify the real path stays within the allowed directory. For write operations
-/// where the target file doesn't exist yet, the parent directory is canonicalized instead.
+/// 相对路径先按所选 base 展开一次；绝对路径保原路径交 provider。
+/// selected provider 在词法归一化前解析 symlink/..，再核真实目录上界。
+/// 写目标尚不存在时，解析同 provider 的已有祖先后重建缺失后缀；
+/// 已展开的递归目录项直接验证，不重复拼接 base。
 #[cfg(feature = "files")]
 fn resolve_path(
     file_system: &dyn FileSystem,
@@ -54,100 +52,57 @@ fn resolve_path(
     working_dir: Option<&Path>,
 ) -> Result<PathBuf> {
     let requested = Path::new(path_str);
+    let base = base_dir.as_deref().or(working_dir);
+    let expanded = if requested.is_relative() {
+        base.map(|base| base.join(requested))
+            .unwrap_or_else(|| requested.to_path_buf())
+    } else {
+        requested.to_path_buf()
+    };
+    resolve_path_buf(file_system, tool, &expanded, base_dir)
+}
 
-    // Effective base: construction-time base_dir takes priority (confinement);
-    // otherwise fall back to the runtime working_dir (CWD override, no confinement).
-    let effective_base: Option<PathBuf> = base_dir
-        .clone()
-        .or_else(|| working_dir.map(|p| p.to_path_buf()));
-
-    let resolved = if let Some(ref base) = effective_base {
-        let normalized_base = normalize_path(base);
-
-        // Relative path: expand with base_dir as root; absolute path: normalize directly
-        let normalized = if requested.is_absolute() {
-            normalize_path(requested)
-        } else {
-            normalize_path(&normalized_base.join(requested))
-        };
-
-        if !normalized.starts_with(&normalized_base) {
+/// 校验已展开的实际 I/O 路径，目录项不再拼接 base、不经有损 UTF-8 转换。
+/// 先让 provider 解析 symlink/..；提前词法折叠会改变实际读取对象。
+#[cfg(feature = "files")]
+fn resolve_path_buf(
+    file_system: &dyn FileSystem,
+    tool: &str,
+    expanded: &Path,
+    base_dir: &Option<PathBuf>,
+) -> Result<PathBuf> {
+    let resolved = match file_system.canonicalize(expanded) {
+        Ok(path) => path,
+        Err(ReactError::Io(_)) if base_dir.is_some() => {
+            best_effort_canonicalize(file_system, expanded)?
+                .unwrap_or_else(|| normalize_path(expanded))
+        }
+        Err(ReactError::Io(_)) => {
+            // 无显式根时保原 raw + best-effort 行为，不新增祖先范围推断。
+            let normalized = normalize_path(expanded);
+            if normalized.as_os_str().is_empty() {
+                file_system.current_dir()?
+            } else {
+                normalized
+            }
+        }
+        Err(error) => return Err(error),
+    };
+    if let Some(base) = base_dir {
+        let canonical_base =
+            best_effort_canonicalize(file_system, base)?.unwrap_or_else(|| normalize_path(base));
+        if !resolved.starts_with(&canonical_base) {
             return Err(ToolError::ExecutionFailed {
                 tool: tool.to_string(),
                 message: format!(
-                    "Path '{}' is outside the allowed working directory '{}'. \
-                     Use a relative path, or an absolute path under the working directory.",
-                    path_str,
-                    normalized_base.display()
+                    "Path '{}' resolves outside allowed directory scope '{}'",
+                    expanded.display(),
+                    canonical_base.display()
                 ),
             }
             .into());
         }
-
-        // Defense against symlink bypass: canonicalize to resolve symlinks and
-        // verify the real (resolved) path stays within the base directory.
-        match file_system.canonicalize(&normalized) {
-            Ok(canonical) => {
-                let canonical_base = file_system.canonicalize(&normalized_base).map_err(|e| {
-                    file_error(e, |e| ToolError::ExecutionFailed {
-                        tool: tool.to_string(),
-                        message: format!("Cannot resolve base directory: {}", e),
-                    })
-                })?;
-                if !canonical.starts_with(&canonical_base) {
-                    return Err(ToolError::ExecutionFailed {
-                        tool: tool.to_string(),
-                        message: format!(
-                            "Path '{}' resolves via symlink to location outside allowed scope",
-                            path_str
-                        ),
-                    }
-                    .into());
-                }
-                canonical
-            }
-            Err(ReactError::Io(_)) => {
-                // File doesn't exist yet (write operation) — canonicalize parent directory
-                if let Some(parent) = normalized.parent()
-                    && parent != Path::new("")
-                    && let Some(canonical_parent) = best_effort_canonicalize(file_system, parent)?
-                {
-                    let canonical_base = best_effort_canonicalize(file_system, &normalized_base)?
-                        .unwrap_or_else(|| normalized_base.clone());
-                    if !canonical_parent.starts_with(&canonical_base) {
-                        return Err(ToolError::ExecutionFailed {
-                            tool: tool.to_string(),
-                            message: format!(
-                                "Parent directory of '{}' resolves outside allowed scope",
-                                path_str
-                            ),
-                        }
-                        .into());
-                    }
-                    let filename = normalized.file_name().unwrap_or_default();
-                    return Ok(canonical_parent.join(filename));
-                }
-                // Fallback: return textually normalized path if parent doesn't exist
-                normalized
-            }
-            Err(error) => return Err(error),
-        }
-    } else {
-        let normalized = normalize_path(requested);
-        // normalize_path strips "." to an empty path — use CWD as fallback
-        let normalized = if normalized.as_os_str().is_empty() {
-            file_system.current_dir()?
-        } else {
-            normalized
-        };
-        // Best-effort canonicalization when no base_dir constraint
-        match file_system.canonicalize(&normalized) {
-            Ok(path) => path,
-            Err(ReactError::Io(_)) => normalized,
-            Err(error) => return Err(error),
-        }
-    };
-
+    }
     Ok(resolved)
 }
 
@@ -210,10 +165,38 @@ fn file_error(error: ReactError, local: impl FnOnce(&std::io::Error) -> ToolErro
 
 #[cfg(feature = "files")]
 fn best_effort_canonicalize(file_system: &dyn FileSystem, path: &Path) -> Result<Option<PathBuf>> {
-    match file_system.canonicalize(path) {
-        Ok(path) => Ok(Some(path)),
-        Err(ReactError::Io(_)) => Ok(None),
-        Err(error) => Err(error),
+    let mut ancestor = path;
+    let mut missing = Vec::new();
+    loop {
+        let candidate = if ancestor.as_os_str().is_empty() {
+            file_system.current_dir()?
+        } else {
+            ancestor.to_path_buf()
+        };
+        match file_system.canonicalize(&candidate) {
+            Ok(mut canonical) => {
+                // 写目标尚不存在时，沿同 provider 找到真实已有祖先，再接回缺失后缀。
+                // 不先折叠 symlink/..，也不把 typed provider 错误伪装成本机缺失。
+                for component in missing.iter().rev() {
+                    canonical.push(component);
+                }
+                return Ok(Some(normalize_path(&canonical)));
+            }
+            Err(ReactError::Io(_)) => {
+                let Some(component) = ancestor.components().next_back() else {
+                    return Ok(None);
+                };
+                if matches!(component, Component::RootDir | Component::Prefix(_)) {
+                    return Ok(None);
+                }
+                let Some(parent) = ancestor.parent() else {
+                    return Ok(None);
+                };
+                missing.push(component.as_os_str().to_os_string());
+                ancestor = parent;
+            }
+            Err(error) => return Err(error),
+        }
     }
 }
 

@@ -50,7 +50,7 @@ fn native_delta(blocks: Vec<AssistantMessageBlock>, calls: Value) -> Result<Stre
         "role":"assistant", "content":text, "assistant_blocks":blocks,
         "reasoning_blocks":reasoning, "tool_calls":calls
     }))?;
-    Ok(StreamChunk::Delta(delta))
+    Ok(StreamChunk::Delta(Box::new(delta)))
 }
 
 fn terminal(reason: &str) -> StreamChunk {
@@ -101,12 +101,17 @@ async fn collect(agent: &ReactAgent) -> Result<Vec<AgentEvent>> {
     Ok(events)
 }
 fn assert_no_legacy_assistant_events(events: &[AgentEvent]) {
+    // 校验对外事件形状，旧Rust变体退役后仍防止重新发布旧wire副本。
     assert!(
-        !events.iter().any(|event| matches!(
-            event,
-            AgentEvent::Token(_) | AgentEvent::ThinkStart | AgentEvent::ThinkEnd { .. }
-        )),
-        "新执行不得同时发布旧Token/Think兼容副本"
+        events.iter().all(|event| {
+            serde_json::to_value(event).is_ok_and(|value| {
+                value
+                    .get("type")
+                    .and_then(Value::as_str)
+                    .is_some_and(|kind| !matches!(kind, "token" | "think_start" | "think_end"))
+            })
+        }),
+        "当前执行不得发布旧Token/Think wire副本"
     );
 }
 
@@ -134,7 +139,7 @@ fn visible_text(events: &[AgentEvent]) -> String {
     events
         .iter()
         .filter_map(|e| match e {
-            AgentEvent::Token(t) | AgentEvent::FinalAnswer(t) => Some(t.as_str()),
+            AgentEvent::FinalAnswer(t) => Some(t.as_str()),
             AgentEvent::AssistantMessage { block } if block.phase != AssistantPhase::Reasoning => {
                 Some(block.delta.as_str())
             }
@@ -271,12 +276,13 @@ async fn native_message_explicit_model_transport_preserves_return_form_and_conte
                 let request = native_transport_http_request(&mut socket).await?;
                 let answer = format!("HTTP-ANSWER-{ordinal}");
                 let (content_type, body) = if request.get("stream").and_then(Value::as_bool) == Some(true) {
-                    let delta = serde_json::json!({"choices":[{"index":0,"delta":{"role":"assistant","content":answer},"finish_reason":null}]});
-                    let stop = serde_json::json!({"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]});
+                    let delta = serde_json::json!({"id":format!("http-{ordinal}"),"choices":[{"index":0,"delta":{"role":"assistant","content":answer},"finish_reason":null}]});
+                    let stop = serde_json::json!({"id":format!("http-{ordinal}"),"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]});
                     ("text/event-stream", format!("data: {delta}\n\ndata: {stop}\n\ndata: [DONE]\n\n"))
                 } else {
                     ("application/json", serde_json::json!({"id":format!("http-{ordinal}"),"choices":[{"index":0,"message":{"role":"assistant","content":answer},"finish_reason":"stop"}]}).to_string())
                 };
+                eprintln!("NATIVE_TRANSPORT_FIXTURE ordinal={ordinal} request={request} response={body:?}");
                 // HTTP Content-Length 按字节计算；这里没有按字节截断文本。
                 let response = format!("HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
                 socket.write_all(response.as_bytes()).await?;
@@ -875,6 +881,18 @@ impl Guard for InputUnknownGuard {
     }
 }
 
+// 只接收当前 Driver 的有限结果；不建立第二执行器或补造 source 终态。
+struct NativeContractFiniteSink;
+#[async_trait::async_trait]
+impl crate::runtime::EventSink for NativeContractFiniteSink {
+    async fn on_event(
+        &self,
+        _event: echo_core::agent::EventEnvelope,
+    ) -> Result<crate::runtime::SinkControl> {
+        Ok(crate::runtime::SinkControl::Continue)
+    }
+}
+
 #[tokio::test]
 async fn native_message_input_guard_unknown_retains_original_invocation_owner() -> Result<()> {
     for streaming_return in [false, true] {
@@ -910,13 +928,28 @@ async fn native_message_input_guard_unknown_retains_original_invocation_owner() 
                     ReactError::Other("guard unknown unexpectedly returned a stream".into())
                 })?
         } else {
-            agent.set_external_context(&runtime);
-            drop(runtime);
-            let result = agent.execute("guard input").await;
-            agent.clear_external_context();
-            result
+            let identity = echo_core::agent::EventIdentity::for_run("guard-original-run")?
+                .with_execution_id("guard-original-execution")?;
+            let invocation = echo_core::agent::AgentInvocationContext {
+                runtime: Some(runtime),
+                ..Default::default()
+            };
+            crate::runtime::AgentTurnDriver
+                .drive(
+                    &agent,
+                    crate::runtime::TurnRequest::from_message(
+                        identity,
+                        Message::user("guard input".into()),
+                    )
+                    .mode(crate::runtime::TurnMode::Execute)
+                    .invocation(invocation),
+                    &NativeContractFiniteSink,
+                )
+                .await
                 .err()
-                .ok_or_else(|| ReactError::Other("guard unknown unexpectedly succeeded".into()))?
+                .ok_or_else(|| {
+                    ReactError::Other("guard unknown unexpectedly returned a finite receipt".into())
+                })?
         };
         assert!(
             matches!(error, ReactError::ExecutionNotSettled { ref run_id, execution_id: Some(ref execution) } if run_id == "guard-original-run" && execution == "guard-original-execution")
@@ -2158,8 +2191,8 @@ async fn native_message_legacy_provider_reasoning_content_uses_typed_blocks_with
     let text: DeltaMessage = serde_json::from_value(json!({"content":"协议无阶段的正文"}))?;
     let thoughts = Arc::new(std::sync::Mutex::new(Vec::new()));
     let llm = MockLlmClient::new().with_stream_script(vec![
-        StreamChunk::Delta(reasoning),
-        StreamChunk::Delta(text),
+        StreamChunk::Delta(Box::new(reasoning)),
+        StreamChunk::Delta(Box::new(text)),
         terminal("stop"),
     ]);
     let agent = ReactAgentBuilder::new()
@@ -2557,7 +2590,7 @@ async fn native_message_stop_block_reason_continues_same_owner_before_one_succes
 }
 
 #[tokio::test]
-async fn native_message_nonstream_unknown_retains_original_owner_and_guards() -> Result<()> {
+async fn native_message_guarded_driver_unknown_retains_original_owner_and_guards() -> Result<()> {
     let drops = Arc::new(AtomicUsize::new(0));
     let model = Arc::new(
         MockLlmClient::new().with_error(ReactError::ExecutionNotSettled {
@@ -2574,23 +2607,99 @@ async fn native_message_nonstream_unknown_retains_original_owner_and_guards() ->
         )],
         ..Default::default()
     };
-    agent.set_external_context(&runtime);
-    drop(runtime);
-    let result = agent.execute("等待原provider物理结算").await;
+    let invocation = echo_core::agent::AgentInvocationContext {
+        runtime: Some(runtime),
+        ..Default::default()
+    };
+    let identity = echo_core::agent::EventIdentity::for_run("nonstream-original-run")?
+        .with_execution_id("nonstream-original-execution")?;
+    let result = crate::runtime::AgentTurnDriver
+        .drive(
+            &agent,
+            crate::runtime::TurnRequest::from_message(
+                identity,
+                Message::user("等待原provider物理结算".into()),
+            )
+            .mode(crate::runtime::TurnMode::Execute)
+            .invocation(invocation),
+            &NativeContractFiniteSink,
+        )
+        .await;
     assert!(
         matches!(result,Err(ReactError::ExecutionNotSettled { ref run_id, execution_id:Some(ref execution_id) }) if run_id=="nonstream-original-run" && execution_id=="nonstream-original-execution")
     );
-    agent.clear_external_context();
     assert_eq!(
         drops.load(Ordering::SeqCst),
         0,
-        "原执行未结算时非流式API不能释放guard"
+        "原执行未结算时有限Driver结果不能释放guard"
     );
     let close = agent.close().await;
     assert!(
         matches!(close, Err(ReactError::ExecutionNotSettled { .. })),
         "不能把未知原执行写成Failed并提前关闭"
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn native_message_string_guard_unknown_preserves_original_error_and_close() -> Result<()> {
+    for chat in [false, true] {
+        let guard_calls = Arc::new(AtomicUsize::new(0));
+        let model = Arc::new(MockLlmClient::new().with_response("must not call model"));
+        let agent = ReactAgentBuilder::new()
+            .llm_client(model.clone())
+            .guard(Arc::new(InputUnknownGuard(guard_calls.clone())))
+            .build()?;
+        // 普通 String API 无 invocation guard 参数；这里直接验它自己的返回/close，
+        // guarded invocation 的资源义务由相邻 typed/Driver 测试独立保留。
+        let result = if chat {
+            agent.chat("guard input").await
+        } else {
+            agent.execute("guard input").await
+        };
+        assert!(
+            matches!(result, Err(ReactError::ExecutionNotSettled { run_id, execution_id: Some(execution) })
+            if run_id == "guard-original-run" && execution == "guard-original-execution")
+        );
+        assert!(matches!(
+            agent.close().await,
+            Err(ReactError::ExecutionNotSettled { .. })
+        ));
+        assert!(matches!(
+            agent.execute("new admission").await,
+            Err(ReactError::ExecutionNotSettled { .. })
+        ));
+        assert_eq!(guard_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(model.call_count(), 0);
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn native_message_string_unknown_preserves_original_error_and_close() -> Result<()> {
+    for chat in [false, true] {
+        let model = Arc::new(
+            MockLlmClient::new().with_error(ReactError::ExecutionNotSettled {
+                run_id: "nonstream-original-run".into(),
+                execution_id: Some("nonstream-original-execution".into()),
+            }),
+        );
+        let agent = ReactAgentBuilder::new().llm_client(model.clone()).build()?;
+        let result = if chat {
+            agent.chat("等待原provider物理结算").await
+        } else {
+            agent.execute("等待原provider物理结算").await
+        };
+        assert!(
+            matches!(result, Err(ReactError::ExecutionNotSettled { run_id, execution_id: Some(execution) })
+            if run_id == "nonstream-original-run" && execution == "nonstream-original-execution")
+        );
+        assert!(matches!(
+            agent.close().await,
+            Err(ReactError::ExecutionNotSettled { .. })
+        ));
+        assert_eq!(model.call_count(), 1);
+    }
     Ok(())
 }
 
@@ -3635,4 +3744,1162 @@ async fn eko_default_critic_original_continue_is_nonterminal_with_or_without_cri
         assert_one_settled_execution(&events)?;
     }
     Ok(())
+}
+// 追加到现有native合同测试模块；仅替换LlmClient外边界，执行/历史/终态仍走原ReAct。
+mod metadata_runtime_r01 {
+    use super::*;
+    use crate::error::LlmError;
+    use crate::llm::types::{ProviderResponseMetadata, Role, Usage};
+    use crate::llm::{ChatChunk, ChatRequest, ChatResponse, LlmApiProtocol, LlmClient};
+    use echo_core::memory::{
+        EnsureConversationProjectionRequest, ManagedConversationImport, NewConversation,
+        TranscriptProjectionApplyStatus,
+    };
+    use echo_state::memory::conversation::{
+        managed_import_projection_digests, project_messages, restore_messages,
+        set_transcript_projection_meta,
+    };
+    use std::collections::VecDeque;
+    use std::sync::Mutex;
+
+    const SOURCE_USER: &str = "R01_ORIGINAL_FAILED_USER_INPUT";
+    const PARTIAL_BODY: &str = "R01_UNAPPROVED_PARTIAL_BODY🙂";
+    const PARTIAL_REASONING: &str = "R01_UNAPPROVED_REASONING";
+    const PARTIAL_CALL: &str = "r01-unfinished-call";
+
+    // 这是预设响应队列，不拥有运行状态，也不定义第二份metadata记录。
+    enum Reply {
+        Complete(Message),
+        Incomplete(Message),
+        // M2只在D2错误partial中出现，不能用一次成功Delta替代此控制。
+        IncompleteTransition(Message, Box<Message>),
+        RepeatedSnapshot(Message),
+        ForeignSnapshot(Message, Box<ProviderResponseMetadata>),
+    }
+
+    struct Client {
+        replies: Mutex<VecDeque<Reply>>,
+        requests: Mutex<Vec<Vec<Message>>>,
+        chat_calls: AtomicUsize,
+        stream_calls: AtomicUsize,
+    }
+
+    impl Client {
+        fn new(replies: Vec<Reply>) -> Self {
+            Self {
+                replies: Mutex::new(replies.into()),
+                requests: Mutex::new(Vec::new()),
+                chat_calls: AtomicUsize::new(0),
+                stream_calls: AtomicUsize::new(0),
+            }
+        }
+
+        fn take(&self, request: &ChatRequest) -> Result<Reply> {
+            self.requests
+                .lock()
+                .map_err(|error| ReactError::Other(error.to_string()))?
+                .push(request.messages.clone());
+            self.replies
+                .lock()
+                .map_err(|error| ReactError::Other(error.to_string()))?
+                .pop_front()
+                .ok_or_else(|| ReactError::Other("unexpected extra metadata model call".into()))
+        }
+
+        fn requests(&self) -> Result<Vec<Vec<Message>>> {
+            Ok(self
+                .requests
+                .lock()
+                .map_err(|error| ReactError::Other(error.to_string()))?
+                .clone())
+        }
+
+        fn call_count(&self) -> usize {
+            self.chat_calls
+                .load(Ordering::SeqCst)
+                .saturating_add(self.stream_calls.load(Ordering::SeqCst))
+        }
+    }
+
+    fn usage() -> Usage {
+        Usage {
+            prompt_tokens: Some(7),
+            completion_tokens: Some(3),
+            total_tokens: Some(10),
+            ..Default::default()
+        }
+    }
+
+    fn observation(request: &str, stop: &str) -> ProviderResponseMetadata {
+        ProviderResponseMetadata {
+            protocol: LlmApiProtocol::ChatCompletions,
+            provider: "r01-fixture-provider".into(),
+            request_id: Some(request.into()),
+            model: Some(json!("r01-fixture-model")),
+            stop_reason: Some(json!(stop)),
+            stop_sequence: Some(Value::Null),
+            status: None,
+            incomplete_details: Some(Value::Null),
+            usage: Some(json!({
+                "prompt_tokens":7,"completion_tokens":3,"total_tokens":10,
+                "completion_tokens_details":{"reasoning_tokens":1},
+                "vendor_extension":{"cache":{"warm":false},"billable_units":2}
+            })),
+        }
+    }
+
+    fn message(text: &str, metadata: ProviderResponseMetadata) -> Message {
+        let mut message = Message::assistant(text.to_string());
+        message.provider_response = Some(metadata);
+        message
+    }
+
+    fn tool_message(metadata: ProviderResponseMetadata) -> Result<Message> {
+        let mut message = message("", metadata);
+        message.tool_calls = Some(serde_json::from_value(json!([{
+            "id":"r01-effect-call","type":"function",
+            "function":{"name":"effect","arguments":"{}"}
+        }]))?);
+        Ok(message)
+    }
+
+    fn partial_message(metadata: ProviderResponseMetadata) -> Result<Message> {
+        let mut message = message(PARTIAL_BODY, metadata);
+        message.tool_calls = Some(serde_json::from_value(json!([{
+            "id":PARTIAL_CALL,"type":"function",
+            "function":{"name":"effect","arguments":"{"}
+        }]))?);
+        message.reasoning_blocks = Some(vec![ReasoningBlock::Signed {
+            thinking: PARTIAL_REASONING.into(),
+            signature: "r01-partial-signature".into(),
+        }]);
+        Ok(message)
+    }
+
+    fn delta(message: &Message) -> Result<DeltaMessage> {
+        let calls = message
+            .tool_calls
+            .iter()
+            .flatten()
+            .enumerate()
+            .map(|(index, call)| {
+                Ok(json!({
+                    "index":u32::try_from(index)
+                        .map_err(|error| ReactError::Other(error.to_string()))?,
+                    "id":call.id,"type":call.call_type,
+                    "function":call.function,"provider_source":call.provider_source
+                }))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        Ok(serde_json::from_value(json!({
+            "role":"assistant","content":message.text_content(),
+            "tool_calls":if calls.is_empty(){Value::Null}else{json!(calls)},
+            "reasoning_blocks":message.reasoning_blocks,
+            "assistant_blocks":message.assistant_blocks,
+            "provider_response":message.provider_response
+        }))?)
+    }
+
+    fn metadata_delta(metadata: ProviderResponseMetadata) -> DeltaMessage {
+        DeltaMessage {
+            provider_response: Some(metadata),
+            ..Default::default()
+        }
+    }
+
+    impl LlmClient for Client {
+        fn chat(&self, request: ChatRequest) -> BoxFuture<'_, Result<ChatResponse>> {
+            Box::pin(async move {
+                self.chat_calls.fetch_add(1, Ordering::SeqCst);
+                let message = match self.take(&request)? {
+                    Reply::Complete(message) | Reply::RepeatedSnapshot(message) => message,
+                    Reply::Incomplete(partial) => {
+                        return Err(LlmError::IncompleteResponse {
+                            partial: Box::new(partial),
+                        }
+                        .into());
+                    }
+                    Reply::IncompleteTransition(_, partial) => {
+                        return Err(LlmError::IncompleteResponse { partial }.into());
+                    }
+                    Reply::ForeignSnapshot(_, _) => {
+                        return Err(ReactError::Other(
+                            "foreign snapshot fixture is stream-only".into(),
+                        ));
+                    }
+                };
+                let inner = MockLlmClient::new()
+                    .with_response_usage(message.text_content().unwrap_or_default(), usage());
+                let mut response = inner.chat(request).await?;
+                response.finish_reason = Some(
+                    if message
+                        .tool_calls
+                        .as_ref()
+                        .is_some_and(|calls| !calls.is_empty())
+                    {
+                        "tool_calls"
+                    } else {
+                        "stop"
+                    }
+                    .into(),
+                );
+                // raw只作同一fixture响应的调试原件，不能与主Message的request/model冲突。
+                if let Some(metadata) = message.provider_response.as_ref() {
+                    if let Some(id) = metadata.request_id.as_ref() {
+                        response.raw.id = id.clone();
+                    }
+                    response.raw.model = metadata
+                        .model
+                        .as_ref()
+                        .and_then(Value::as_str)
+                        .map(str::to_owned);
+                }
+                let mut native = message.clone();
+                native.provider_response = None;
+                native.execution_status = None;
+                native.approved_assistant_blocks = None;
+                response.raw.choices = vec![crate::llm::types::Choice {
+                    message: native,
+                    finish_reason: response.finish_reason.clone(),
+                    index: Some(0),
+                }];
+                response.message = message;
+                Ok(response)
+            })
+        }
+
+        fn chat_stream(
+            &self,
+            request: ChatRequest,
+        ) -> BoxFuture<'_, Result<futures::stream::BoxStream<'static, Result<ChatChunk>>>> {
+            Box::pin(async move {
+                self.stream_calls.fetch_add(1, Ordering::SeqCst);
+                let reply = self.take(&request)?;
+                let repeated = matches!(&reply, Reply::RepeatedSnapshot(_));
+                let mut chunks = Vec::new();
+                match reply {
+                    Reply::Incomplete(partial) => {
+                        chunks.push(Ok(ChatChunk {
+                            delta: delta(&partial)?,
+                            finish_reason: None,
+                            usage: None,
+                        }));
+                        chunks.push(Err(LlmError::IncompleteResponse {
+                            partial: Box::new(partial),
+                        }
+                        .into()));
+                    }
+                    Reply::IncompleteTransition(first, partial) => {
+                        chunks.push(Ok(ChatChunk {
+                            delta: delta(&first)?,
+                            finish_reason: None,
+                            usage: None,
+                        }));
+                        chunks.push(Err(LlmError::IncompleteResponse { partial }.into()));
+                    }
+                    Reply::ForeignSnapshot(original, foreign) => {
+                        chunks.push(Ok(ChatChunk {
+                            delta: delta(&original)?,
+                            finish_reason: None,
+                            usage: None,
+                        }));
+                        chunks.push(Ok(ChatChunk {
+                            delta: metadata_delta(*foreign),
+                            finish_reason: None,
+                            usage: None,
+                        }));
+                        chunks.push(Ok(ChatChunk {
+                            delta: DeltaMessage::default(),
+                            finish_reason: Some("stop".into()),
+                            usage: Some(usage()),
+                        }));
+                    }
+                    Reply::Complete(message) | Reply::RepeatedSnapshot(message) => {
+                        let full = message.provider_response.clone().ok_or_else(|| {
+                            ReactError::Other(
+                                "metadata response fixture omitted observation".into(),
+                            )
+                        })?;
+                        let mut first = message.clone();
+                        if let Some(metadata) = first.provider_response.as_mut() {
+                            metadata.usage = None;
+                        }
+                        chunks.push(Ok(ChatChunk {
+                            delta: delta(&first)?,
+                            finish_reason: None,
+                            usage: None,
+                        }));
+                        if repeated {
+                            // 同一请求usage-only快照和最终完整快照都含相同归一用量。
+                            chunks.push(Ok(ChatChunk {
+                                delta: metadata_delta(full.clone()),
+                                finish_reason: None,
+                                usage: Some(usage()),
+                            }));
+                        }
+                        chunks.push(Ok(ChatChunk {
+                            delta: metadata_delta(full),
+                            finish_reason: Some(
+                                if message
+                                    .tool_calls
+                                    .as_ref()
+                                    .is_some_and(|calls| !calls.is_empty())
+                                {
+                                    "tool_calls"
+                                } else {
+                                    "stop"
+                                }
+                                .into(),
+                            ),
+                            usage: Some(usage()),
+                        }));
+                    }
+                }
+                Ok(Box::pin(futures::stream::iter(chunks))
+                    as futures::stream::BoxStream<'static, Result<ChatChunk>>)
+            })
+        }
+
+        fn model_name(&self) -> &str {
+            "r01-fixture-model"
+        }
+
+        fn provider_name(&self) -> Option<&str> {
+            Some("r01-fixture-provider")
+        }
+    }
+
+    async fn collect_invocation(
+        agent: &ReactAgent,
+        text: &str,
+        invocation: Option<crate::agent::AgentInvocationContext>,
+    ) -> Result<Vec<Result<AgentEvent>>> {
+        let stream = agent
+            .run_stream_channel(
+                StreamInit {
+                    text: text.to_string(),
+                    message: Some(Message::user(text.to_string())),
+                    label: String::new(),
+                    invocation,
+                },
+                StreamMode::Chat,
+            )
+            .await?;
+        // 先收原source到真实EOF，再在调用方检查错误/终态；不拿Err当EOF。
+        tokio::time::timeout(Duration::from_secs(5), stream.collect())
+            .await
+            .map_err(|_| ReactError::Other("metadata source did not reach EOF".into()))
+    }
+
+    async fn context(agent: &ReactAgent) -> Vec<Message> {
+        agent.context().lock().await.messages().to_vec()
+    }
+
+    fn assert_observation(messages: &[Message], expected: &ProviderResponseMetadata) {
+        let matching = messages
+            .iter()
+            .filter_map(|message| message.provider_response.as_ref())
+            .filter(|metadata| metadata.request_id == expected.request_id)
+            .collect::<Vec<_>>();
+        assert!(
+            !matching.is_empty(),
+            "original assistant lost provider response observation"
+        );
+        assert!(matching.into_iter().all(|metadata| metadata == expected));
+    }
+
+    fn assert_original_success_bindings(
+        messages: &[Message],
+        expected: &[ProviderResponseMetadata],
+    ) -> Result<()> {
+        let tool_metadata = expected
+            .first()
+            .ok_or_else(|| ReactError::Other("tool observation missing".into()))?;
+        let stop_metadata = expected
+            .get(1)
+            .ok_or_else(|| ReactError::Other("stop observation missing".into()))?;
+        let final_metadata = expected
+            .get(2)
+            .ok_or_else(|| ReactError::Other("final observation missing".into()))?;
+        let tool = messages
+            .iter()
+            .find(|message| {
+                message.role == Role::Assistant
+                    && message
+                        .tool_calls
+                        .iter()
+                        .flatten()
+                        .any(|call| call.id == "r01-effect-call")
+            })
+            .ok_or_else(|| ReactError::Other("original tool assistant Message missing".into()))?;
+        assert_eq!(tool.provider_response.as_ref(), Some(tool_metadata));
+        let stop = messages
+            .iter()
+            .find(|message| {
+                message.role == Role::Assistant
+                    && matches!(
+                        message.text_content().as_deref(),
+                        Some("SECRET-DRAFT" | "已校验的安全正文")
+                    )
+            })
+            .ok_or_else(|| ReactError::Other("Guard/Stop assistant body Message missing".into()))?;
+        assert_eq!(stop.provider_response.as_ref(), Some(stop_metadata));
+        assert!(!stop.is_provider_response_observation_only());
+        let final_message = messages
+            .iter()
+            .find(|message| {
+                message.role == Role::Assistant
+                    && message.text_content().as_deref() == Some("metadata最终完成🙂")
+            })
+            .ok_or_else(|| {
+                ReactError::Other("original final assistant body Message missing".into())
+            })?;
+        assert_eq!(
+            final_message.provider_response.as_ref(),
+            Some(final_metadata)
+        );
+        assert!(!final_message.is_provider_response_observation_only());
+        assert!(
+            !messages
+                .iter()
+                .any(|message| message.is_provider_response_observation_only()
+                    && message
+                        .provider_response
+                        .as_ref()
+                        .is_some_and(|metadata| expected
+                            .iter()
+                            .any(|wanted| wanted.request_id == metadata.request_id))),
+            "successful responses cannot substitute extra observation-only rows for their body Messages"
+        );
+        Ok(())
+    }
+
+    fn assert_no_partial_history(messages: &[Message]) {
+        for message in messages {
+            assert!(
+                !message
+                    .text_content()
+                    .unwrap_or_default()
+                    .contains(PARTIAL_BODY)
+            );
+            assert!(
+                !message
+                    .reasoning_content
+                    .as_deref()
+                    .unwrap_or_default()
+                    .contains(PARTIAL_REASONING)
+            );
+            assert!(message.tool_calls.as_ref().is_none_or(Vec::is_empty));
+            for block in message
+                .assistant_blocks
+                .iter()
+                .flatten()
+                .chain(message.approved_assistant_blocks.iter().flatten())
+            {
+                assert!(!block.delta.contains(PARTIAL_BODY));
+                assert!(
+                    !matches!(&block.reasoning, Some(ReasoningBlock::Signed { thinking, .. }) if thinking.contains(PARTIAL_REASONING))
+                );
+            }
+            assert!(!message.reasoning_blocks.iter().flatten().any(|block| {
+                matches!(block, ReasoningBlock::Signed { thinking, .. } if thinking.contains(PARTIAL_REASONING))
+            }));
+        }
+    }
+
+    fn assert_failed_without_success(raw: &[Result<AgentEvent>]) -> Result<()> {
+        let events = raw
+            .iter()
+            .filter_map(|item| item.as_ref().ok().cloned())
+            .collect::<Vec<_>>();
+        assert!(answers(&events).is_empty());
+        let statuses = status_values(&events)?;
+        assert_eq!(
+            statuses
+                .iter()
+                .filter(|status| status
+                    .get("data")
+                    .and_then(|data| data.get("status"))
+                    .and_then(Value::as_str)
+                    == Some("failed"))
+                .count(),
+            1
+        );
+        assert!(!statuses.iter().any(|status| {
+            status
+                .get("data")
+                .and_then(|data| data.get("status"))
+                .and_then(Value::as_str)
+                == Some("settled")
+        }));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn complete_response_metadata_survives_real_tool_guard_stop_stream_and_nonstream()
+    -> Result<()> {
+        for streaming in [true, false] {
+            let root = fixture_dir()?;
+            let conversation = if streaming {
+                "r01-complete-stream"
+            } else {
+                "r01-complete-chat"
+            };
+            let expected = [
+                observation("r01-tool", "tool_calls"),
+                observation("r01-stop-continue", "stop"),
+                observation("r01-final", "stop"),
+            ];
+            let client = Arc::new(Client::new(vec![
+                Reply::Complete(tool_message(
+                    expected
+                        .first()
+                        .ok_or_else(|| ReactError::Other("tool metadata missing".into()))?
+                        .clone(),
+                )?),
+                Reply::Complete(message(
+                    "SECRET-DRAFT",
+                    expected
+                        .get(1)
+                        .ok_or_else(|| ReactError::Other("stop metadata missing".into()))?
+                        .clone(),
+                )),
+                Reply::Complete(message(
+                    "metadata最终完成🙂",
+                    expected
+                        .get(2)
+                        .ok_or_else(|| ReactError::Other("final metadata missing".into()))?
+                        .clone(),
+                )),
+            ]));
+            let effects = Arc::new(AtomicUsize::new(0));
+            let guard_calls = Arc::new(AtomicUsize::new(0));
+            let stops = Arc::new(AtomicUsize::new(0));
+            let conversations = Arc::new(crate::memory::FileConversationStore::new(root.path())?);
+            let runtime = Arc::new(crate::state::FileRuntimeStateStore::new(root.path())?);
+            let agent = ReactAgentBuilder::new()
+                .llm_client(client.clone())
+                .model_streaming(streaming)
+                .conversation_id(conversation)
+                .conversation_store(conversations.clone())
+                .state_store(runtime.clone())
+                .guard(Arc::new(TransformUnknownGuard(guard_calls.clone())))
+                .tool(Box::new(EffectTool {
+                    name: "effect",
+                    effects: effects.clone(),
+                    delay: Duration::ZERO,
+                }))
+                .max_iterations(6)
+                .build()?;
+            let stop_calls = stops.clone();
+            agent.hook_registry().write().await.set_programmatic_hook(
+                "r01-continue-once",
+                &[crate::skills::hooks::HookEvent::Stop],
+                Arc::new(move |_context| {
+                    let first = stop_calls.fetch_add(1, Ordering::SeqCst) == 0;
+                    Box::pin(async move {
+                        let mut result = crate::skills::hooks::HookResult::allow();
+                        if first {
+                            result.continue_reason = Some("保留原响应观察后继续同一执行".into());
+                        }
+                        result
+                    })
+                }),
+            );
+            let events = collect(&agent).await?;
+            assert_eq!(effects.load(Ordering::SeqCst), 1);
+            assert_eq!(guard_calls.load(Ordering::SeqCst), 1);
+            assert_eq!(stops.load(Ordering::SeqCst), 2);
+            assert_eq!(client.call_count(), 3);
+            assert_eq!(
+                client.chat_calls.load(Ordering::SeqCst),
+                if streaming { 0 } else { 3 }
+            );
+            assert_eq!(
+                client.stream_calls.load(Ordering::SeqCst),
+                if streaming { 3 } else { 0 }
+            );
+            assert_eq!(answers(&events), vec!["metadata最终完成🙂"]);
+            assert_one_settled_execution(&events)?;
+            let messages = context(&agent).await;
+            for metadata in &expected {
+                assert_observation(&messages, metadata);
+            }
+            assert_original_success_bindings(&messages, &expected)?;
+            assert!(messages.iter().any(|message| {
+                message
+                    .tool_calls
+                    .iter()
+                    .flatten()
+                    .any(|call| call.id == "r01-effect-call")
+                    && message.provider_response.as_ref() == expected.first()
+            }));
+            agent.close().await?;
+            drop(agent);
+            drop(runtime);
+            drop(conversations);
+            let cold = crate::memory::FileConversationStore::new(root.path())?;
+            let restored = restore_messages(&cold.get_messages(conversation).await?)?;
+            for metadata in &expected {
+                assert_observation(&restored, metadata);
+            }
+            assert_original_success_bindings(&restored, &expected)?;
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn incomplete_partial_is_nonreplayable_and_only_observation_survives_closed_file_import_and_fork()
+    -> Result<()> {
+        for streaming in [true, false] {
+            let root = fixture_dir()?;
+            let conversation = if streaming {
+                "r01-incomplete-stream"
+            } else {
+                "r01-incomplete-chat"
+            };
+            let expected = observation("r01-incomplete", "length");
+            let partial = partial_message(expected.clone())?;
+            let client = Arc::new(Client::new(vec![
+                Reply::Incomplete(partial.clone()),
+                Reply::Complete(message(
+                    "MUST_NOT_RETRY",
+                    observation("r01-forbidden-retry", "stop"),
+                )),
+            ]));
+            let effects = Arc::new(AtomicUsize::new(0));
+            let conversations = Arc::new(crate::memory::FileConversationStore::new(root.path())?);
+            let runtime = Arc::new(crate::state::FileRuntimeStateStore::new(root.path())?);
+            let mut agent = ReactAgentBuilder::new()
+                .llm_client(client.clone())
+                .model_streaming(streaming)
+                .conversation_id(conversation)
+                .conversation_store(conversations.clone())
+                .state_store(runtime.clone())
+                .tool(Box::new(EffectTool {
+                    name: "effect",
+                    effects: effects.clone(),
+                    delay: Duration::ZERO,
+                }))
+                .build()?;
+            // 保留可用重试额度；不能靠关闭重试来掩盖IncompleteResponse分类错误。
+            agent.config_mut().llm_max_retries = 2;
+            agent.config_mut().llm_retry_delay_ms = 0;
+            let raw = collect_invocation(&agent, SOURCE_USER, None).await?;
+            assert_failed_without_success(&raw)?;
+            assert!(
+                raw.iter().any(|item| match item {
+                    Err(error) => error.to_string().contains("Incomplete response"),
+                    Ok(AgentEvent::Error { message, .. }) =>
+                        message.contains("Incomplete response"),
+                    _ => false,
+                }),
+                "runtime must retain the original bounded incomplete-response cause"
+            );
+            assert_eq!(
+                client.call_count(),
+                1,
+                "incomplete response must not replay the request"
+            );
+            assert_eq!(
+                client.stream_calls.load(Ordering::SeqCst),
+                if streaming { 1 } else { 0 }
+            );
+            assert_eq!(
+                client.chat_calls.load(Ordering::SeqCst),
+                if streaming { 0 } else { 1 }
+            );
+            assert_eq!(effects.load(Ordering::SeqCst), 0);
+            for item in &raw {
+                match item {
+                    Err(error) => assert!(!error.to_string().contains(PARTIAL_BODY)),
+                    Ok(AgentEvent::Error { message, .. }) => {
+                        assert!(!message.contains(PARTIAL_BODY))
+                    }
+                    Ok(AgentEvent::ToolCall { .. }) => {
+                        return Err(ReactError::Other(
+                            "incomplete tool fragment reached actual execution".into(),
+                        ));
+                    }
+                    _ => {}
+                }
+            }
+            let messages = context(&agent).await;
+            assert_no_partial_history(&messages);
+            let observed = messages
+                .iter()
+                .filter(|message| message.provider_response.as_ref() == Some(&expected))
+                .collect::<Vec<_>>();
+            assert_eq!(observed.len(), 1);
+            assert!(
+                observed
+                    .iter()
+                    .all(|message| message.is_provider_response_observation_only())
+            );
+            assert_eq!(
+                observed
+                    .first()
+                    .map(|message| serde_json::to_value(*message))
+                    .transpose()?,
+                Some(serde_json::to_value(
+                    Message::provider_response_observation(expected.clone())
+                )?)
+            );
+            agent.close().await?;
+            drop(agent);
+            drop(runtime);
+            drop(conversations);
+
+            // 原Agent、RuntimeStore与ConversationStore均已关闭；只从真实File重开。
+            let cold = crate::memory::FileConversationStore::new(root.path())?;
+            let restored = restore_messages(&cold.get_messages(conversation).await?)?;
+            assert_no_partial_history(&restored);
+            assert!(
+                restored
+                    .iter()
+                    .any(|message| message.is_provider_response_observation_only()
+                        && message.provider_response.as_ref() == Some(&expected))
+            );
+            drop(cold);
+
+            let fork_messages = {
+                #[cfg(feature = "subagent")]
+                {
+                    // 原Fork继承入口及默认窗口，不扩history上界；GUI Fork仍独立验收。
+                    let fork = crate::agent::subagent::SubagentContext::from_parent(
+                        &[],
+                        &restored,
+                        None,
+                        &crate::agent::subagent::ContextInheritance::fork_default(),
+                    );
+                    assert_no_partial_history(&fork.messages);
+                    assert!(
+                        fork.messages
+                            .iter()
+                            .any(|message| message.is_provider_response_observation_only()
+                                && message.provider_response.as_ref() == Some(&expected))
+                    );
+                    fork.messages
+                }
+                #[cfg(not(feature = "subagent"))]
+                {
+                    restored.clone()
+                }
+            };
+            for (target, branch_messages) in [
+                ("r01-managed-import", &restored),
+                ("r01-fork-import", &fork_messages),
+            ] {
+                let generation = target;
+                let mut rows = project_messages(target, branch_messages)?;
+                for (index, row) in rows.iter_mut().enumerate() {
+                    let ordinal = u64::try_from(index)
+                        .map_err(|error| ReactError::Other(error.to_string()))?;
+                    set_transcript_projection_meta(row, generation, ordinal)?;
+                }
+                let expected_digests = managed_import_projection_digests(target, &rows)?;
+                {
+                    let store = crate::memory::FileConversationStore::new(root.path())?;
+                    let authority = store
+                        .ensure_projection_epoch(EnsureConversationProjectionRequest {
+                            conversation: NewConversation {
+                                conversation_id: target.into(),
+                                user_id: "r01-test".into(),
+                                agent_type: None,
+                                title: None,
+                            },
+                            expected_tombstone_epoch: None,
+                        })
+                        .await?
+                        .authority;
+                    use crate::state::RuntimeStateStore;
+                    let runtime = crate::state::FileRuntimeStateStore::new(root.path())?;
+                    // 原managed-import CAS合同：先绑定导入前epoch的空runtime，不插入假历史。
+                    let mut initial_checkpoint = crate::state::AgentCheckpoint::new(target);
+                    initial_checkpoint.messages_json =
+                        crate::state::AgentCheckpoint::serialize_payload(
+                            Vec::new(),
+                            Some(crate::state::TranscriptProjectionCheckpoint {
+                                context_only: None,
+                                generation_id: generation.to_string(),
+                                next_ordinal: 0,
+                                projected: Vec::new(),
+                            }),
+                        )?;
+                    let initial = runtime
+                        .compare_and_save_checkpoint(crate::state::RuntimeCheckpointCasRequest {
+                            managed_import: None,
+                            scope_id: target.to_string(),
+                            runtime_state_id: target.to_string(),
+                            conversation_epoch: Some(authority.epoch),
+                            expected_scope_revision: 0,
+                            expected_state_version:
+                                crate::state::RuntimeStateExpectedVersion::Absent,
+                            checkpoint: initial_checkpoint,
+                        })
+                        .await?;
+                    assert_eq!(
+                        initial.status,
+                        crate::state::RuntimeCheckpointCasStatus::Applied
+                    );
+                    let expected_runtime_version = match initial.version {
+                        crate::state::RuntimeStateVersion::Managed { revision } => {
+                            crate::state::RuntimeStateExpectedVersion::Managed { revision }
+                        }
+                        _ => {
+                            return Err(ReactError::Other(
+                                "managed import initial runtime was not managed".into(),
+                            ));
+                        }
+                    };
+                    let import = ManagedConversationImport::prepare_for_generation(
+                        target,
+                        authority.epoch,
+                        authority.revision,
+                        generation,
+                        rows,
+                    )?;
+                    let receipt = store.import_managed_messages(import.clone()).await?;
+                    assert_eq!(receipt.status, TranscriptProjectionApplyStatus::Applied);
+                    let digests = managed_import_projection_digests(target, &import.messages)?;
+                    let cursor = crate::state::TranscriptProjectionCheckpoint {
+                        context_only: None,
+                        generation_id: generation.to_string(),
+                        next_ordinal: u64::try_from(digests.len())
+                            .map_err(|error| ReactError::Other(error.to_string()))?,
+                        projected: digests
+                            .into_iter()
+                            .enumerate()
+                            .map(|(ordinal, digest)| {
+                                Ok(crate::state::TranscriptProjectionMessage {
+                                    ordinal: u64::try_from(ordinal)
+                                        .map_err(|error| ReactError::Other(error.to_string()))?,
+                                    digest,
+                                })
+                            })
+                            .collect::<Result<Vec<_>>>()?,
+                    };
+                    let mut checkpoint = crate::state::AgentCheckpoint::new(target);
+                    checkpoint.messages_json = crate::state::AgentCheckpoint::serialize_payload(
+                        restore_messages(&import.messages)?,
+                        Some(cursor),
+                    )?;
+                    let bound = runtime
+                        .compare_and_save_checkpoint(crate::state::RuntimeCheckpointCasRequest {
+                            managed_import: Some(crate::state::ManagedImportEpochTransition {
+                                request: import,
+                                receipt: receipt.clone(),
+                            }),
+                            scope_id: target.to_string(),
+                            runtime_state_id: target.to_string(),
+                            conversation_epoch: Some(receipt.authority.epoch),
+                            expected_scope_revision: initial.scope.revision,
+                            expected_state_version: expected_runtime_version,
+                            checkpoint,
+                        })
+                        .await?;
+                    assert_eq!(
+                        bound.status,
+                        crate::state::RuntimeCheckpointCasStatus::Applied
+                    );
+                }
+                {
+                    let store = crate::memory::FileConversationStore::new(root.path())?;
+                    let cold_rows = store.get_messages(target).await?;
+                    assert_eq!(
+                        managed_import_projection_digests(target, &cold_rows)?,
+                        expected_digests
+                    );
+                    let cold_messages = restore_messages(&cold_rows)?;
+                    assert_no_partial_history(&cold_messages);
+                    assert!(
+                        cold_messages
+                            .iter()
+                            .any(|message| message.is_provider_response_observation_only()
+                                && message.provider_response.as_ref() == Some(&expected))
+                    );
+                }
+                // 新generation的真实Agent再次生成请求，不能重放partial工具或正文。
+                let next_client = Arc::new(Client::new(vec![Reply::Complete(message(
+                    "导入后安全完成",
+                    observation("r01-after-import", "stop"),
+                ))]));
+                let store = Arc::new(crate::memory::FileConversationStore::new(root.path())?);
+                let state = Arc::new(crate::state::FileRuntimeStateStore::new(root.path())?);
+                let next = ReactAgentBuilder::new()
+                    .llm_client(next_client.clone())
+                    .model_streaming(streaming)
+                    .conversation_id(target)
+                    .conversation_store(store.clone())
+                    .state_store(state.clone())
+                    .tool(Box::new(EffectTool {
+                        name: "effect",
+                        effects: effects.clone(),
+                        delay: Duration::ZERO,
+                    }))
+                    .build()?;
+                let original_user_retained = branch_messages.iter().any(|message| {
+                    message.role == Role::User
+                        && message.text_content().as_deref() == Some(SOURCE_USER)
+                });
+                let invocation = crate::agent::AgentInvocationContext {
+                    runtime_state_id: Some(target.to_string()),
+                    transcript_generation_id: Some(target.to_string()),
+                    // 完整导入历史已由同一CAS绑定并从checkpoint冷hydrate，不能再次追加。
+                    history: None,
+                    runtime: Some(crate::tools::ExternalRunContext {
+                        conversation_id: Some(target.to_string()),
+                        run_id: Some(format!("r01-new-run:{target}")),
+                        turn_id: Some(format!("r01-new-turn:{target}")),
+                        execution_id: Some(format!("r01-new-execution:{target}")),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                };
+                let events = collect_invocation(&next, "R01_IMPORTED_FOLLOWUP", Some(invocation))
+                    .await?
+                    .into_iter()
+                    .collect::<Result<Vec<_>>>()?;
+                assert_eq!(
+                    answers(&events),
+                    vec!["导入后安全完成"],
+                    "managed followup target={target} streaming={streaming} calls={} events={events:#?}",
+                    next_client.call_count()
+                );
+                assert_one_settled_execution(&events)?;
+                assert_eq!(effects.load(Ordering::SeqCst), 0);
+                let requests = next_client.requests()?;
+                assert_eq!(requests.len(), 1);
+                for request in &requests {
+                    assert_no_partial_history(request);
+                    if original_user_retained {
+                        assert!(
+                            request.iter().any(|message| message.role == Role::User
+                                && message.text_content().as_deref() == Some(SOURCE_USER)),
+                            "empty import history must not make partial exclusion vacuously pass"
+                        );
+                    }
+                }
+                assert_observation(&context(&next).await, &expected);
+                next.close().await?;
+                drop(next);
+                drop(store);
+                drop(state);
+            }
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn usage_only_and_full_observation_snapshots_do_not_double_normalized_usage() -> Result<()>
+    {
+        let expected = observation("r01-usage", "stop");
+        let client = Arc::new(Client::new(vec![Reply::RepeatedSnapshot(message(
+            "用量仅记一次",
+            expected.clone(),
+        ))]));
+        let agent = ReactAgentBuilder::new()
+            .llm_client(client.clone())
+            .model_streaming(true)
+            .build()?;
+        let events = collect(&agent).await?;
+        assert_eq!(answers(&events), vec!["用量仅记一次"]);
+        assert_one_settled_execution(&events)?;
+        let usage = events
+            .iter()
+            .filter_map(|event| match event {
+                AgentEvent::LlmUsage {
+                    prompt_tokens,
+                    completion_tokens,
+                    total_tokens,
+                    usage_reported: true,
+                    ..
+                } => Some((*prompt_tokens, *completion_tokens, *total_tokens)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(usage, vec![(7, 3, 10)]);
+        assert_eq!(client.stream_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(client.chat_calls.load(Ordering::SeqCst), 0);
+        let messages = context(&agent).await;
+        assert_observation(&messages, &expected);
+        let original = messages
+            .iter()
+            .find(|message| {
+                message.role == Role::Assistant
+                    && message.text_content().as_deref() == Some("用量仅记一次")
+            })
+            .ok_or_else(|| ReactError::Other("usage response body Message missing".into()))?;
+        assert_eq!(original.provider_response.as_ref(), Some(&expected));
+        assert!(!original.is_provider_response_observation_only());
+        agent.close().await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn foreign_request_observation_is_rejected_without_overwriting_the_bound_snapshot()
+    -> Result<()> {
+        let expected = observation("r01-bound", "stop");
+        let foreign = observation("r01-foreign", "stop");
+        let client = Arc::new(Client::new(vec![Reply::ForeignSnapshot(
+            message("未确认草稿", expected.clone()),
+            Box::new(foreign.clone()),
+        )]));
+        let mut agent = ReactAgentBuilder::new()
+            .llm_client(client.clone())
+            .model_streaming(true)
+            .build()?;
+        agent.config_mut().llm_max_retries = 2;
+        agent.config_mut().llm_retry_delay_ms = 0;
+        let raw = collect_raw(&agent, StreamMode::Chat).await?;
+        assert_failed_without_success(&raw)?;
+        assert_eq!(client.call_count(), 1);
+        assert_eq!(client.stream_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(client.chat_calls.load(Ordering::SeqCst), 0);
+        let messages = context(&agent).await;
+        assert_observation(&messages, &expected);
+        assert!(!messages.iter().any(|message| {
+            message
+                .provider_response
+                .as_ref()
+                .is_some_and(|metadata| metadata.request_id == foreign.request_id)
+        }));
+        assert!(
+            messages
+                .iter()
+                .filter(|message| message.provider_response.as_ref() == Some(&expected))
+                .all(|message| message.is_provider_response_observation_only())
+        );
+        agent.close().await?;
+        Ok(())
+    }
+    #[tokio::test]
+    async fn latest_partial_metadata_is_retained_for_same_request_and_foreign_partial_keeps_bound_metadata()
+    -> Result<()> {
+        for foreign in [false, true] {
+            let root = fixture_dir()?;
+            let scope = if foreign {
+                "r04-metadata-foreign-partial"
+            } else {
+                "r04-metadata-latest-partial"
+            };
+            let mut first = observation("r04-bound-response", "length");
+            first.incomplete_details = None;
+            first.usage = Some(json!({"snapshot":"M1","tokens":1}));
+            let mut latest = first.clone();
+            latest.incomplete_details = Some(json!({"reason":"max_tokens","snapshot":"M2"}));
+            latest.usage = Some(json!({"snapshot":"M2","tokens":7,"nested":{"billable":3}}));
+            if foreign {
+                latest.request_id = Some("r04-foreign-response".into());
+            }
+            let expected = if foreign {
+                first.clone()
+            } else {
+                latest.clone()
+            };
+            let client = Arc::new(Client::new(vec![
+                Reply::IncompleteTransition(
+                    partial_message(first.clone())?,
+                    Box::new(partial_message(latest.clone())?),
+                ),
+                Reply::Complete(message(
+                    "MUST_NOT_RETRY_R04",
+                    observation("r04-retry-must-not-run", "stop"),
+                )),
+            ]));
+            let effects = Arc::new(AtomicUsize::new(0));
+            let conversations = Arc::new(crate::memory::FileConversationStore::new(root.path())?);
+            let state = Arc::new(crate::state::FileRuntimeStateStore::new(root.path())?);
+            let mut agent = ReactAgentBuilder::new()
+                .llm_client(client.clone())
+                .model_streaming(true)
+                .conversation_id(scope)
+                .conversation_store(conversations.clone())
+                .state_store(state.clone())
+                .tool(Box::new(EffectTool {
+                    name: "effect",
+                    effects: effects.clone(),
+                    delay: Duration::ZERO,
+                }))
+                .build()?;
+            agent.config_mut().llm_max_retries = 2;
+            agent.config_mut().llm_retry_delay_ms = 0;
+            let raw = collect_invocation(&agent, "R04_PARTIAL_METADATA_INPUT", None).await?;
+            let messages = context(&agent).await;
+            // 先结束原失败owner/关闭所有File handle，再作会故意RED的比较。
+            let closed = agent.close().await;
+            drop(agent);
+            drop(state);
+            drop(conversations);
+            assert_failed_without_success(&raw)?;
+            assert!(
+                raw.iter().any(|item| match item {
+                    Err(error) => error.to_string().contains("Incomplete response"),
+                    Ok(AgentEvent::Error { message, .. }) =>
+                        message.contains("Incomplete response"),
+                    _ => false,
+                }),
+                "foreign metadata rejection must not replace the original bounded incomplete cause"
+            );
+            for item in &raw {
+                match item {
+                    Err(error) => assert!(!error.to_string().contains(PARTIAL_BODY)),
+                    Ok(AgentEvent::Error { message, .. }) => {
+                        assert!(!message.contains(PARTIAL_BODY))
+                    }
+                    _ => {}
+                }
+            }
+            closed?;
+            assert_eq!(client.call_count(), 1);
+            assert_eq!(client.stream_calls.load(Ordering::SeqCst), 1);
+            assert_eq!(client.chat_calls.load(Ordering::SeqCst), 0);
+            assert_eq!(effects.load(Ordering::SeqCst), 0);
+            assert_no_partial_history(&messages);
+            let observed = messages
+                .iter()
+                .filter(|message| message.provider_response.is_some())
+                .collect::<Vec<_>>();
+            assert_eq!(observed.len(), 1);
+            assert!(
+                observed
+                    .iter()
+                    .all(|message| message.is_provider_response_observation_only())
+            );
+            assert_eq!(
+                observed
+                    .first()
+                    .and_then(|message| message.provider_response.as_ref()),
+                Some(&expected)
+            );
+            if foreign {
+                assert_ne!(
+                    Some(&latest),
+                    observed
+                        .first()
+                        .and_then(|message| message.provider_response.as_ref())
+                );
+            }
+            let cold = crate::memory::FileConversationStore::new(root.path())?;
+            let restored = restore_messages(&cold.get_messages(scope).await?)?;
+            assert_no_partial_history(&restored);
+            let cold_observed = restored
+                .iter()
+                .filter(|message| message.provider_response.is_some())
+                .collect::<Vec<_>>();
+            assert_eq!(cold_observed.len(), 1);
+            assert!(
+                cold_observed
+                    .iter()
+                    .all(|message| message.is_provider_response_observation_only())
+            );
+            assert_eq!(
+                cold_observed
+                    .first()
+                    .and_then(|message| message.provider_response.as_ref()),
+                Some(&expected)
+            );
+        }
+        Ok(())
+    }
 }

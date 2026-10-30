@@ -308,82 +308,6 @@ async fn agent_close_reports_shared_sandbox_owner_and_retries_after_settlement()
     Ok(())
 }
 
-async fn assert_legacy_plan_is_not_republished(
-    store: Arc<dyn crate::state::RuntimeStateStore>,
-    reopen: impl FnOnce() -> crate::error::Result<Arc<dyn crate::state::RuntimeStateStore>>,
-) -> crate::error::Result<()> {
-    use crate::state::AgentCheckpoint;
-
-    let mut legacy = AgentCheckpoint::new("legacy-plan");
-    legacy.messages_json = serde_json::to_string(&vec![Message::system("system".to_string())])?;
-    legacy.current_plan = Some("stale task plan".to_string());
-    store.save_checkpoint(&legacy).await?;
-    drop(store);
-    let reopened = reopen()?;
-
-    assert_eq!(
-        reopened
-            .get_checkpoint("legacy-plan")
-            .await?
-            .and_then(|checkpoint| checkpoint.current_plan)
-            .as_deref(),
-        Some("stale task plan")
-    );
-
-    let mut agent = ReactAgent::new(
-        // This fixture tests legacy plan metadata, not root identity across
-        // independently sourced ambient project-rule System messages.
-        AgentConfig::new("test-model", "legacy-plan-agent", "system")
-            .auto_project_rules(false)
-            .conversation_id("legacy-plan"),
-    );
-    agent.set_state_store(reopened.clone());
-    let restored = agent.resume_from_state_store().await?.ok_or_else(|| {
-        crate::error::ReactError::Other("legacy checkpoint was not restored".to_string())
-    })?;
-    assert_eq!(restored.current_plan.as_deref(), Some("stale task plan"));
-
-    agent.force_checkpoint().await?;
-    let saved = reopened
-        .get_checkpoint("legacy-plan")
-        .await?
-        .ok_or_else(|| crate::error::ReactError::Other("checkpoint was not saved".to_string()))?;
-    assert!(
-        saved.current_plan.is_none(),
-        "ReAct republished a stale plan"
-    );
-    assert_eq!(saved.restore_messages()?.len(), 1);
-    Ok(())
-}
-
-#[tokio::test]
-async fn file_checkpoint_legacy_plan_is_readable_but_not_republished() -> crate::error::Result<()> {
-    let root = tempfile::tempdir()?;
-    let store = Arc::new(crate::state::FileRuntimeStateStore::new(root.path())?);
-    assert_legacy_plan_is_not_republished(store, || {
-        Ok(Arc::new(crate::state::FileRuntimeStateStore::new(
-            root.path(),
-        )?))
-    })
-    .await
-}
-
-#[cfg(feature = "sqlite")]
-#[tokio::test]
-async fn sqlite_checkpoint_legacy_plan_is_readable_but_not_republished() -> crate::error::Result<()>
-{
-    let root = tempfile::tempdir()?;
-    let store = Arc::new(crate::state::SqliteRuntimeStateStore::new(
-        root.path().join("checkpoint.sqlite"),
-    )?);
-    assert_legacy_plan_is_not_republished(store, || {
-        Ok(Arc::new(crate::state::SqliteRuntimeStateStore::new(
-            root.path().join("checkpoint.sqlite"),
-        )?))
-    })
-    .await
-}
-
 fn external_context_with_guards(
     resource_guards: Vec<echo_core::tools::InvocationResourceGuard>,
 ) -> echo_core::tools::ExternalRunContext {
@@ -411,14 +335,9 @@ struct ReentrantGuardProbe {
 impl Drop for ReentrantGuardProbe {
     fn drop(&mut self) {
         let observed = self.agent.upgrade().is_some_and(|agent| {
-            agent
-                .external_resource_guards
-                .try_lock()
-                .map(|guard| {
-                    drop(guard);
-                    true
-                })
-                .unwrap_or(false)
+            // 当前snapshot析构不保有Agent的执行锁或ActiveTurn观察锁。
+            let _ = agent.current_run_id();
+            agent.execution_mutex.try_lock().is_ok()
         });
         self.observed_unlocked.store(observed, Ordering::SeqCst);
     }
@@ -493,9 +412,10 @@ async fn model_publication_http_server(
         let request = model_publication_http_request(&mut socket).await?;
         // Exercise the concrete adapter's real streaming request, including
         // its required semantic terminal, without a substitute LlmClient.
-        let delta = json!({"choices":[{"index":0,"delta":{"role":"assistant","content":"ok"},"finish_reason":null}]});
-        let stop = json!({"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]});
+        let delta = json!({"id":format!("model-publication-native-{}", requests.len()),"choices":[{"index":0,"delta":{"role":"assistant","content":"ok"},"finish_reason":null}]});
+        let stop = json!({"id":format!("model-publication-native-{}", requests.len()),"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]});
         let body = format!("data: {delta}\n\ndata: {stop}\n\ndata: [DONE]\n\n");
+        eprintln!("MODEL_PUBLICATION_FIXTURE request={request} response_sse={body:?}");
         let response = format!(
             "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
             body.len(),
@@ -3822,6 +3742,255 @@ fn replace_tool_when_not_exists() {
     );
 }
 
+struct InvocationWorkingDirProbe {
+    observed: Arc<std::sync::Mutex<Vec<Option<std::path::PathBuf>>>>,
+}
+
+impl crate::tools::Tool for InvocationWorkingDirProbe {
+    fn name(&self) -> &str {
+        "invocation_working_dir_probe"
+    }
+
+    fn description(&self) -> &str {
+        "记录实际工具调用收到的工作目录"
+    }
+
+    fn parameters(&self) -> serde_json::Value {
+        json!({"type": "object", "properties": {}})
+    }
+
+    fn risk_level(&self) -> crate::tools::ToolRiskLevel {
+        crate::tools::ToolRiskLevel::ReadOnly
+    }
+
+    fn execute(
+        &self,
+        _parameters: crate::tools::ToolParameters,
+    ) -> futures::future::BoxFuture<'_, crate::error::Result<crate::tools::ToolResult>> {
+        Box::pin(async {
+            Err(crate::error::ReactError::Other(
+                "cwd probe requires the actual invocation ToolContext".into(),
+            ))
+        })
+    }
+
+    fn execute_with_context<'a>(
+        &'a self,
+        _parameters: crate::tools::ToolParameters,
+        context: &'a crate::tools::ToolContext,
+    ) -> futures::future::BoxFuture<'a, crate::error::Result<crate::tools::ToolResult>> {
+        Box::pin(async move {
+            self.observed
+                .lock()
+                .map_err(|error| crate::error::ReactError::Other(error.to_string()))?
+                .push(context.working_dir.clone());
+            Ok(crate::tools::ToolResult::success("cwd observed"))
+        })
+    }
+}
+
+fn workspace_roots_received_by_model(messages: &[Message]) -> Vec<String> {
+    messages
+        .iter()
+        .filter_map(|message| message.content.as_text_ref())
+        .flat_map(str::lines)
+        .filter_map(|line| line.strip_prefix("- root: "))
+        .map(str::to_string)
+        .collect()
+}
+
+async fn collect_current_cwd_turn(
+    agent: &ReactAgent,
+    message_entry: bool,
+    mode: crate::agent::react::run::types::StreamMode,
+    invocation: echo_core::agent::AgentInvocationContext,
+) -> crate::error::Result<Vec<crate::agent::AgentEvent>> {
+    use crate::agent::react::run::types::StreamMode;
+    use futures::StreamExt;
+
+    // 直接调用现有两条prepare入口与同一producer；不另建执行器或模拟ToolContext。
+    let stream = if message_entry {
+        let message = Message::user("observe current working directory".into());
+        let cancel = crate::agent::CancellationToken::new();
+        match mode {
+            StreamMode::Chat => {
+                agent
+                    .chat_stream_message_with_invocation_context(message, cancel, invocation)
+                    .await?
+            }
+            StreamMode::Execute => {
+                agent
+                    .execute_stream_message_with_invocation_context(message, cancel, invocation)
+                    .await?
+            }
+        }
+    } else {
+        agent
+            .run_stream_entry("observe current working directory", mode, Some(invocation))
+            .await?
+    };
+    stream
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<crate::error::Result<Vec<_>>>()
+}
+
+#[tokio::test]
+async fn invocation_cwd_matches_model_workspace_and_tool_without_mutating_config()
+-> crate::error::Result<()> {
+    use crate::agent::react::run::types::StreamMode;
+    use crate::testing::MockLlmClient;
+
+    for message_entry in [false, true] {
+        let root = tempfile::tempdir()
+            .map_err(|error| crate::error::ReactError::Other(error.to_string()))?;
+        let configured_a = root.path().join("configured-a");
+        let invocation_b = root.path().join("invocation-b");
+        let observed = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let client = Arc::new(
+            MockLlmClient::new()
+                .then_tool_call("cwd-b", "invocation_working_dir_probe", "{}")
+                .with_response("invocation B complete")
+                .then_tool_call("cwd-a", "invocation_working_dir_probe", "{}")
+                .with_response("plain A complete"),
+        );
+        let agent = ReactAgentBuilder::new()
+            .llm_client(client.clone())
+            .system_prompt("system")
+            .auto_project_rules(false)
+            .working_dir(configured_a.clone())
+            .tool(Box::new(InvocationWorkingDirProbe {
+                observed: observed.clone(),
+            }))
+            .build()?;
+        let invocation = echo_core::agent::AgentInvocationContext {
+            working_dir: Some(invocation_b.clone()),
+            ..Default::default()
+        };
+        let events =
+            collect_current_cwd_turn(&agent, message_entry, StreamMode::Chat, invocation).await?;
+        assert!(events.iter().any(|event| matches!(event,
+            crate::agent::AgentEvent::FinalAnswer(answer) if answer == "invocation B complete"
+        )));
+        assert_eq!(agent.working_dir(), Some(configured_a.clone()));
+        assert_eq!(
+            agent
+                .chat("observe plain configured working directory")
+                .await?,
+            "plain A complete"
+        );
+        assert_eq!(agent.working_dir(), Some(configured_a.clone()));
+        assert_eq!(
+            observed
+                .lock()
+                .map_err(|error| crate::error::ReactError::Other(error.to_string()))?
+                .as_slice(),
+            &[Some(invocation_b.clone()), Some(configured_a.clone())],
+        );
+        let requests = client.all_calls();
+        assert_eq!(requests.len(), 4);
+        for (index, request) in requests.iter().enumerate() {
+            let expected = if index < 2 {
+                &invocation_b
+            } else {
+                &configured_a
+            };
+            assert_eq!(
+                workspace_roots_received_by_model(request),
+                vec![expected.display().to_string()]
+            );
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn absent_invocation_cwd_uses_restored_checkpoint_for_model_and_tool()
+-> crate::error::Result<()> {
+    use crate::agent::react::run::types::StreamMode;
+    use crate::testing::MockLlmClient;
+
+    for message_entry in [false, true] {
+        for mode in [StreamMode::Chat, StreamMode::Execute] {
+            let root = tempfile::tempdir()
+                .map_err(|error| crate::error::ReactError::Other(error.to_string()))?;
+            let configured_a = root.path().join("configured-a");
+            let restored_c = root.path().join("restored-c");
+            let state = Arc::new(crate::state::FileRuntimeStateStore::new(
+                root.path().join("runtime"),
+            )?);
+            let mut checkpoint = crate::state::AgentCheckpoint::new("cwd-restore-state");
+            checkpoint.working_dir = Some(restored_c.clone());
+            checkpoint.messages_json = crate::state::AgentCheckpoint::serialize_payload(
+                vec![
+                    Message::system("system".into()),
+                    Message::user("historical input".into()),
+                ],
+                None,
+            )
+            .map_err(|error| crate::error::ReactError::Other(error.to_string()))?;
+            crate::state::RuntimeStateStore::save_checkpoint(state.as_ref(), &checkpoint).await?;
+            let traces = Arc::new(crate::trace::InMemoryRunStore::new());
+            let observed = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let client = Arc::new(
+                MockLlmClient::new()
+                    .then_tool_call("cwd-c", "invocation_working_dir_probe", "{}")
+                    .with_response("restored C complete"),
+            );
+            let agent = ReactAgentBuilder::new()
+                .llm_client(client.clone())
+                .system_prompt("system")
+                .auto_project_rules(false)
+                .conversation_id("cwd-restore-state")
+                .working_dir(configured_a.clone())
+                .state_store(state)
+                .with_run_store(traces.clone())
+                .tool(Box::new(InvocationWorkingDirProbe {
+                    observed: observed.clone(),
+                }))
+                .build()?;
+            assert_eq!(agent.working_dir(), Some(configured_a));
+            let events =
+                collect_current_cwd_turn(&agent, message_entry, mode, Default::default()).await?;
+            assert!(events.iter().any(|event| matches!(event,
+                crate::agent::AgentEvent::FinalAnswer(answer) if answer == "restored C complete"
+            )));
+            assert_eq!(agent.working_dir(), Some(restored_c.clone()));
+            assert_eq!(
+                observed
+                    .lock()
+                    .map_err(|error| crate::error::ReactError::Other(error.to_string()))?
+                    .as_slice(),
+                &[Some(restored_c.clone())]
+            );
+            let requests = client.all_calls();
+            assert_eq!(requests.len(), 2);
+            for request in requests {
+                assert_eq!(
+                    workspace_roots_received_by_model(&request),
+                    vec![restored_c.display().to_string()]
+                );
+            }
+            let runs = crate::trace::RunStore::list_all(traces.as_ref(), 10).await?;
+            assert_eq!(runs.len(), 1);
+            let summary = runs
+                .first()
+                .ok_or_else(|| crate::error::ReactError::Other("cold cwd trace missing".into()))?;
+            let run = crate::trace::RunStore::load(traces.as_ref(), &summary.run_id)
+                .await?
+                .ok_or_else(|| {
+                    crate::error::ReactError::Other("cold cwd trace body missing".into())
+                })?;
+            assert_eq!(run.events.iter().filter(|event| matches!(event,
+                crate::trace::RunEvent::CheckpointResumed { conversation_id, .. } if conversation_id == "cwd-restore-state"
+            )).count(), 1);
+            assert_eq!(run.status, crate::trace::RunStatus::Completed);
+        }
+    }
+    Ok(())
+}
+
 #[tokio::test]
 async fn invocation_history_is_inserted_before_current_input() -> Result<(), String> {
     use crate::agent::react::run::types::StreamMode;
@@ -3837,8 +4006,19 @@ async fn invocation_history_is_inserted_before_current_input() -> Result<(), Str
         Message::assistant("inherited assistant".to_string()),
     ];
 
+    let invocation = echo_core::agent::AgentInvocationContext {
+        history: Some(history),
+        ..Default::default()
+    };
     agent
-        .prepare_stream_context(StreamMode::Chat, "current input", &history, None, None)
+        .prepare_stream_context(
+            StreamMode::Chat,
+            "current input",
+            &invocation,
+            None,
+            None,
+            None,
+        )
         .await
         .map_err(|error| error.to_string())?;
 
@@ -3920,10 +4100,13 @@ async fn cold_chat_restores_persisted_checkpoint() -> Result<(), String> {
         crate::state::FileRuntimeStateStore::new(temp.path()).map_err(|error| error.to_string())?,
     );
     let mut checkpoint = crate::state::AgentCheckpoint::new("cold-chat");
-    checkpoint.messages_json = serde_json::to_string(&vec![
-        Message::system("system prompt".to_string()),
-        Message::user("persisted turn".to_string()),
-    ])
+    checkpoint.messages_json = crate::state::AgentCheckpoint::serialize_payload(
+        vec![
+            Message::system("system prompt".to_string()),
+            Message::user("persisted turn".to_string()),
+        ],
+        None,
+    )
     .map_err(|error| error.to_string())?;
     store
         .save_checkpoint(&checkpoint)
@@ -3972,9 +4155,11 @@ async fn checkpoint_skill_activation_restores_resource_tool_authority() -> Resul
             .map_err(|error| error.to_string())?,
     );
     let mut checkpoint = crate::state::AgentCheckpoint::new("skill-roundtrip");
-    checkpoint.messages_json =
-        serde_json::to_string(&vec![Message::system("system prompt".to_string())])
-            .map_err(|error| error.to_string())?;
+    checkpoint.messages_json = crate::state::AgentCheckpoint::serialize_payload(
+        vec![Message::system("system prompt".to_string())],
+        None,
+    )
+    .map_err(|error| error.to_string())?;
     checkpoint.active_skills = vec!["resume-skill".to_string()];
     store
         .save_checkpoint(&checkpoint)
@@ -4058,10 +4243,13 @@ async fn warm_chat_history_is_not_replaced_by_checkpoint() -> Result<(), String>
         crate::state::FileRuntimeStateStore::new(temp.path()).map_err(|error| error.to_string())?,
     );
     let mut checkpoint = crate::state::AgentCheckpoint::new("warm-chat");
-    checkpoint.messages_json = serde_json::to_string(&vec![
-        Message::system("system prompt".to_string()),
-        Message::user("stale persisted turn".to_string()),
-    ])
+    checkpoint.messages_json = crate::state::AgentCheckpoint::serialize_payload(
+        vec![
+            Message::system("system prompt".to_string()),
+            Message::user("stale persisted turn".to_string()),
+        ],
+        None,
+    )
     .map_err(|error| error.to_string())?;
     store
         .save_checkpoint(&checkpoint)
@@ -4149,7 +4337,14 @@ async fn recall_injects_memories_into_current_user_message() -> Result<(), Strin
 
     // Drive prepare_stream_context with a query that should hit the seeded fact.
     let recalled = agent
-        .prepare_stream_context(StreamMode::Chat, "Rust", &[], None, None)
+        .prepare_stream_context(
+            StreamMode::Chat,
+            "Rust",
+            &Default::default(),
+            None,
+            None,
+            None,
+        )
         .await
         .map_err(|error| error.to_string())?;
     assert!(
@@ -4225,7 +4420,14 @@ async fn recall_injects_memories_into_current_user_message() -> Result<(), Strin
 
     drop(ctx);
     agent
-        .prepare_stream_context(StreamMode::Chat, "unrelated-query", &[], None, None)
+        .prepare_stream_context(
+            StreamMode::Chat,
+            "unrelated-query",
+            &Default::default(),
+            None,
+            None,
+            None,
+        )
         .await
         .map_err(|error| error.to_string())?;
     let ctx = agent.memory.context.lock().await;
@@ -5221,17 +5423,12 @@ async fn managed_force_checkpoint_settles_transcript_before_returning() -> crate
     agent.set_conversation_store(conversations.clone());
     agent.set_state_store(runtime.clone());
     let mut legacy = crate::state::AgentCheckpoint::new("managed-force-checkpoint");
-    legacy.current_plan = Some("stale plan".to_string());
-    legacy.messages_json = serde_json::to_string(&vec![Message::system("system".to_string())])?;
+    legacy.messages_json = crate::state::AgentCheckpoint::serialize_payload(
+        vec![Message::system("system".to_string())],
+        None,
+    )?;
     crate::state::RuntimeStateStore::save_checkpoint(runtime.as_ref(), &legacy).await?;
-    assert_eq!(
-        agent
-            .resume_from_state_store()
-            .await?
-            .and_then(|checkpoint| checkpoint.current_plan)
-            .as_deref(),
-        Some("stale plan")
-    );
+    assert!(agent.resume_from_state_store().await?.is_some());
     agent
         .memory
         .context
@@ -5265,12 +5462,6 @@ async fn managed_force_checkpoint_settles_transcript_before_returning() -> crate
         .as_ref()
         .ok_or_else(|| crate::error::ReactError::Other("checkpoint payload missing".to_string()))?
         .restore_managed_runtime_payload()?;
-    assert!(
-        state
-            .checkpoint
-            .as_ref()
-            .is_some_and(|checkpoint| checkpoint.current_plan.is_none())
-    );
     assert!(payload.pending_transcript_projection.is_none());
     assert!(
         payload
@@ -5427,117 +5618,126 @@ async fn legacy_conversation_store_defaults_to_unsupported_projection() {
     );
 }
 
-#[cfg(feature = "subagent")]
 #[test]
-fn legacy_runtime_context_preserves_anonymous_resource_guards() -> Result<(), String> {
+fn anonymous_invocation_guards_survive_source_value_and_release_with_last_snapshot() {
     let agent = ReactAgent::new(AgentConfig::new("test-model", "agent", "system"));
-    let context =
-        external_context_with_guards(vec![echo_core::tools::InvocationResourceGuard::new(
-            "anonymous-lease".to_string(),
-        )]);
-    agent.set_external_context(&context);
-    drop(context);
-
-    let runtime = agent
-        .build_runtime_context()
-        .ok_or_else(|| "legacy builder dropped a guard-only context".to_string())?;
-    assert!(runtime.run_id.is_none());
-    assert!(runtime.turn_id.is_none());
-    assert_eq!(runtime.resource_guards.len(), 1);
-    Ok(())
+    let resource = Arc::new("anonymous-lease".to_string());
+    let weak = Arc::downgrade(&resource);
+    let invocation = echo_core::agent::AgentInvocationContext {
+        runtime: Some(external_context_with_guards(vec![
+            echo_core::tools::InvocationResourceGuard::new(resource),
+        ])),
+        ..Default::default()
+    };
+    let snapshot = crate::agent::AgentRunSnapshot::from_agent_with_invocation(&agent, &invocation);
+    drop(invocation);
+    assert!(snapshot.current_run_id.is_none());
+    assert!(snapshot.current_turn_id.is_none());
+    assert_eq!(snapshot.resource_guards.len(), 1);
+    assert!(weak.upgrade().is_some());
+    let second = snapshot.clone();
+    drop(snapshot);
+    assert!(weak.upgrade().is_some());
+    drop(second);
+    assert!(weak.upgrade().is_none());
 }
 
-#[cfg(feature = "subagent")]
 #[test]
-fn legacy_runtime_context_preserves_conversation_only() -> Result<(), String> {
-    let agent = ReactAgent::new(AgentConfig::new("test-model", "agent", "system"));
-    let mut context = external_context_with_guards(Vec::new());
-    context.conversation_id = Some("conversation-only".to_string());
-    agent.set_external_context(&context);
-
-    let runtime = agent
-        .build_runtime_context()
-        .ok_or_else(|| "conversation-only context was dropped".to_string())?;
-    assert_eq!(
-        runtime.conversation_id.as_deref(),
-        Some("conversation-only")
-    );
-    agent.clear_external_context();
-    Ok(())
-}
-
-#[cfg(feature = "subagent")]
-#[test]
-fn direct_delegate_runtime_preserves_configured_conversation_only() -> Result<(), String> {
+fn invocation_conversation_override_and_plain_config_fallback_do_not_publish_run_ids() {
     let agent = ReactAgent::new(
-        AgentConfig::new("test-model", "agent", "system")
-            .conversation_id("configured-conversation"),
+        AgentConfig::new("test-model", "agent", "system").conversation_id("configured"),
     );
-
-    let runtime = agent
-        .build_runtime_context()
-        .ok_or_else(|| "configured conversation-only delegate context was dropped".to_string())?;
-    assert_eq!(
-        runtime.conversation_id.as_deref(),
-        Some("configured-conversation")
-    );
-    Ok(())
+    for conversation in [None, Some("explicit".to_string())] {
+        let invocation = echo_core::agent::AgentInvocationContext {
+            runtime: Some(echo_core::tools::ExternalRunContext {
+                conversation_id: conversation.clone(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let snapshot =
+            crate::agent::AgentRunSnapshot::from_agent_with_invocation(&agent, &invocation);
+        assert_eq!(
+            snapshot.config.conversation_id.as_deref(),
+            conversation.as_deref().or(Some("configured"))
+        );
+        assert!(snapshot.current_run_id.is_none());
+        assert!(snapshot.trace_run_id.is_none());
+    }
+    let plain = crate::agent::AgentRunSnapshot::from_agent(&agent);
+    assert_eq!(plain.config.conversation_id.as_deref(), Some("configured"));
+    assert!(plain.current_run_id.is_none());
+    assert!(agent.current_run_id().is_none());
 }
 
-#[cfg(feature = "subagent")]
 #[test]
-fn legacy_runtime_context_preserves_cancel_and_trace_only() -> Result<(), String> {
+fn invocation_preserves_cancel_and_trace_only_without_shared_context() {
     let agent = ReactAgent::new(AgentConfig::new("test-model", "agent", "system"));
     let cancel = Arc::new(crate::agent::CancellationToken::new());
     let trace: echo_core::tools::TraceSinkFn = Arc::new(|_| {});
-    let mut context = external_context_with_guards(Vec::new());
-    context.cancel = Some(Arc::clone(&cancel));
-    context.trace_sink = Some(Arc::clone(&trace));
-    agent.set_external_context(&context);
-
-    let runtime = agent
-        .build_runtime_context()
-        .ok_or_else(|| "cancel/trace-only context was dropped".to_string())?;
+    let invocation = echo_core::agent::AgentInvocationContext {
+        runtime: Some(echo_core::tools::ExternalRunContext {
+            cancel: Some(Arc::clone(&cancel)),
+            trace_sink: Some(Arc::clone(&trace)),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let snapshot = crate::agent::AgentRunSnapshot::from_agent_with_invocation(&agent, &invocation);
     assert!(
-        runtime
-            .cancel
+        snapshot
+            .external_cancel
             .as_ref()
             .is_some_and(|value| Arc::ptr_eq(value, &cancel))
     );
     assert!(
-        runtime
-            .trace_sink
+        snapshot
+            .external_trace_sink
             .as_ref()
             .is_some_and(|value| Arc::ptr_eq(value, &trace))
     );
-    agent.clear_external_context();
-    Ok(())
+    assert!(snapshot.current_run_id.is_none());
+    cancel.cancel();
+    assert!(
+        snapshot
+            .cancel_token
+            .as_ref()
+            .is_some_and(|value| value.is_cancelled())
+    );
+    assert!(
+        crate::agent::AgentRunSnapshot::from_agent(&agent)
+            .external_trace_sink
+            .is_none()
+    );
 }
 
 #[test]
-fn replacing_external_guards_drops_reentrant_resources_outside_mutex() {
+fn invocation_guard_drop_can_reenter_current_agent_observation() {
     let agent = Arc::new(ReactAgent::new(AgentConfig::new(
         "test-model",
         "agent",
         "system",
     )));
     let observed_unlocked = Arc::new(AtomicBool::new(false));
-    let context =
-        external_context_with_guards(vec![echo_core::tools::InvocationResourceGuard::new(
+    let invocation = echo_core::agent::AgentInvocationContext {
+        resource_guards: vec![echo_core::tools::InvocationResourceGuard::new(
             ReentrantGuardProbe {
                 agent: Arc::downgrade(&agent),
-                observed_unlocked: Arc::clone(&observed_unlocked),
+                observed_unlocked: observed_unlocked.clone(),
             },
-        )]);
-    agent.set_external_context(&context);
-    drop(context);
-
-    agent.set_external_context(&external_context_with_guards(Vec::new()));
+        )],
+        ..Default::default()
+    };
+    let snapshot = crate::agent::AgentRunSnapshot::from_agent_with_invocation(&agent, &invocation);
+    drop(invocation);
+    assert!(!observed_unlocked.load(Ordering::SeqCst));
+    drop(snapshot);
     assert!(observed_unlocked.load(Ordering::SeqCst));
 }
 
 #[tokio::test]
-async fn slow_external_guard_drop_does_not_block_guard_mutex() -> Result<(), String> {
+async fn slow_invocation_guard_drop_does_not_block_other_snapshot_or_run_observation()
+-> Result<(), String> {
     let agent = Arc::new(ReactAgent::new(AgentConfig::new(
         "test-model",
         "agent",
@@ -5545,169 +5745,39 @@ async fn slow_external_guard_drop_does_not_block_guard_mutex() -> Result<(), Str
     )));
     let (entered_tx, entered_rx) = std::sync::mpsc::channel();
     let (release_tx, release_rx) = std::sync::mpsc::channel();
-    let context =
-        external_context_with_guards(vec![echo_core::tools::InvocationResourceGuard::new(
+    let invocation = echo_core::agent::AgentInvocationContext {
+        resource_guards: vec![echo_core::tools::InvocationResourceGuard::new(
             SlowGuardDrop {
                 entered: entered_tx,
                 release: std::sync::Mutex::new(release_rx),
             },
-        )]);
-    agent.set_external_context(&context);
-    drop(context);
-
-    let replacing = {
-        let agent = Arc::clone(&agent);
-        tokio::task::spawn_blocking(move || {
-            agent.set_external_context(&external_context_with_guards(Vec::new()));
-        })
-    };
-    tokio::task::spawn_blocking(move || {
-        entered_rx
-            .recv_timeout(std::time::Duration::from_secs(2))
-            .map_err(|error| error.to_string())
-    })
-    .await
-    .map_err(|error| format!("slow-drop start waiter failed: {error}"))??;
-
-    let concurrent = {
-        let agent = Arc::clone(&agent);
-        tokio::task::spawn_blocking(move || {
-            agent.set_external_context(&external_context_with_guards(Vec::new()));
-        })
-    };
-    tokio::time::timeout(std::time::Duration::from_secs(1), concurrent)
-        .await
-        .map_err(|_| "guard mutex remained locked during application Drop".to_string())?
-        .map_err(|error| format!("concurrent setter failed: {error}"))?;
-
-    release_tx
-        .send(())
-        .map_err(|_| "slow guard release channel closed".to_string())?;
-    replacing
-        .await
-        .map_err(|error| format!("slow guard replacement failed: {error}"))?;
-    Ok(())
-}
-
-#[tokio::test]
-async fn external_context_epoch_never_exposes_mixed_fields() -> Result<(), String> {
-    let agent = Arc::new(ReactAgent::new(AgentConfig::new(
-        "test-model",
-        "agent",
-        "system",
-    )));
-    let (entered_tx, entered_rx) = std::sync::mpsc::channel();
-    let (release_tx, release_rx) = std::sync::mpsc::channel();
-    let a_trace: echo_core::tools::TraceSinkFn = Arc::new({
-        let slow_drop = SlowGuardDrop {
-            entered: entered_tx,
-            release: std::sync::Mutex::new(release_rx),
-        };
-        move |_| {
-            let _ = &slow_drop;
-        }
-    });
-    let a_context = echo_core::tools::ExternalRunContext {
-        conversation_id: Some("conversation-a".to_string()),
-        run_id: Some("run-a".to_string()),
-        turn_id: Some("turn-a".to_string()),
-        execution_id: Some("execution-a".to_string()),
-        isolation_id: Some("isolation-a".to_string()),
-        message_id: Some("message-a".to_string()),
-        cancel: Some(Arc::new(crate::agent::CancellationToken::new())),
-        trace_sink: Some(a_trace),
-        delegation_policy: Some(echo_core::tools::NestedDelegationPolicy {
-            can_spawn_subagents: true,
-            delegate_depth: 1,
-            max_delegate_depth: 3,
-        }),
-        subagent_lineage: None,
-        uplink: None,
-        resource_guards: vec![echo_core::tools::InvocationResourceGuard::new(1_u64)],
-    };
-    agent.set_external_context(&a_context);
-    drop(a_context);
-
-    let b_cancel = Arc::new(crate::agent::CancellationToken::new());
-    let b_trace: echo_core::tools::TraceSinkFn = Arc::new(|_| {});
-    let b_context = echo_core::tools::ExternalRunContext {
-        conversation_id: Some("conversation-b".to_string()),
-        run_id: Some("run-b".to_string()),
-        turn_id: Some("turn-b".to_string()),
-        execution_id: Some("execution-b".to_string()),
-        isolation_id: Some("isolation-b".to_string()),
-        message_id: Some("message-b".to_string()),
-        cancel: Some(Arc::clone(&b_cancel)),
-        trace_sink: Some(Arc::clone(&b_trace)),
-        delegation_policy: Some(echo_core::tools::NestedDelegationPolicy {
-            can_spawn_subagents: true,
-            delegate_depth: 2,
-            max_delegate_depth: 4,
-        }),
-        resource_guards: vec![echo_core::tools::InvocationResourceGuard::new(
-            "guard-b".to_string(),
         )],
-        subagent_lineage: None,
-        uplink: None,
+        ..Default::default()
     };
-    let setting = {
-        let agent = Arc::clone(&agent);
-        tokio::task::spawn_blocking(move || agent.set_external_context(&b_context))
-    };
+    let snapshot = crate::agent::AgentRunSnapshot::from_agent_with_invocation(&agent, &invocation);
+    drop(invocation);
+    let dropping = tokio::task::spawn_blocking(move || drop(snapshot));
     tokio::task::spawn_blocking(move || {
         entered_rx
             .recv_timeout(std::time::Duration::from_secs(2))
             .map_err(|error| error.to_string())
     })
     .await
-    .map_err(|error| format!("epoch test drop waiter failed: {error}"))??;
-
-    let capture = {
-        let agent = Arc::clone(&agent);
-        tokio::task::spawn_blocking(move || agent.capture_legacy_external_context())
-    };
-    let captured = tokio::time::timeout(std::time::Duration::from_secs(1), capture).await;
-    let _ = release_tx.send(());
-    let captured = captured
-        .map_err(|_| "context capture waited on an application destructor".to_string())?
-        .map_err(|error| format!("context capture task failed: {error}"))?;
-    setting
-        .await
-        .map_err(|error| format!("epoch setter failed: {error}"))?;
-
-    assert_eq!(captured.conversation_id.as_deref(), Some("conversation-b"));
-    assert_eq!(captured.current_run_id.as_deref(), Some("run-b"));
-    assert_eq!(captured.turn_id.as_deref(), Some("turn-b"));
-    assert_eq!(captured.execution_id.as_deref(), Some("execution-b"));
-    assert_eq!(captured.isolation_id.as_deref(), Some("isolation-b"));
-    assert_eq!(captured.message_id.as_deref(), Some("message-b"));
-    assert!(
-        captured
-            .cancel
-            .as_ref()
-            .is_some_and(|cancel| Arc::ptr_eq(cancel, &b_cancel))
-    );
-    assert!(
-        captured
-            .trace_sink
-            .as_ref()
-            .is_some_and(|sink| Arc::ptr_eq(sink, &b_trace))
-    );
-    assert_eq!(
-        captured.delegation_policy,
-        Some(echo_core::tools::NestedDelegationPolicy {
-            can_spawn_subagents: true,
-            delegate_depth: 2,
-            max_delegate_depth: 4,
+    .map_err(|error| error.to_string())??;
+    let concurrent = {
+        let agent = agent.clone();
+        tokio::task::spawn_blocking(move || {
+            let fresh = crate::agent::AgentRunSnapshot::from_agent(&agent);
+            assert!(fresh.resource_guards.is_empty());
+            assert!(agent.current_run_id().is_none());
         })
-    );
-    assert!(
-        captured
-            .resource_guards
-            .first()
-            .is_some_and(echo_core::tools::InvocationResourceGuard::retains::<String>)
-    );
-    agent.clear_external_context();
+    };
+    let result = tokio::time::timeout(std::time::Duration::from_secs(1), concurrent).await;
+    let _ = release_tx.send(());
+    dropping.await.map_err(|error| error.to_string())?;
+    result
+        .map_err(|_| "current snapshot waited on another invocation destructor".to_string())?
+        .map_err(|error| error.to_string())?;
     Ok(())
 }
 
@@ -6021,7 +6091,7 @@ async fn delegate_helpers_keep_bound_target_policy_in_fork() -> crate::error::Re
 
 #[cfg(feature = "subagent")]
 #[tokio::test]
-async fn delegate_helpers_keep_legacy_default_without_runtime_policy() -> crate::error::Result<()> {
+async fn delegate_helpers_keep_plain_default_without_runtime_policy() -> crate::error::Result<()> {
     for entry in [
         DelegatePolicyEntry::Text,
         DelegatePolicyEntry::TextAttempt,

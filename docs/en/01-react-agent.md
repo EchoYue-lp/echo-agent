@@ -47,7 +47,7 @@ execute(task)
           ├─ Execute all tool calls in parallel:
           │     ├─ Human approval check (if tool is marked)
           │     ├─ ToolManager.execute_tool()
-          │     └─ Fire on_tool_start / on_tool_end callbacks
+          │     └─ Fire on_tool_start_with_id / on_tool_end_with_id callbacks
           │
           ├─ 原生最终候选 → 校验/Stop/持久化/结算
           │
@@ -147,16 +147,16 @@ impl AgentCallback for MyCallback {
         })
     }
 
-    fn on_tool_start<'a>(&'a self, agent: &'a str, tool: &'a str, args: &'a Value) -> BoxFuture<'a, ()> {
+    fn on_tool_start_with_id<'a>(&'a self, agent: &'a str, call_id: &'a str, tool: &'a str, args: &'a Value) -> BoxFuture<'a, ()> {
         Box::pin(async move {
-            println!("[{}] Calling tool: {} {:?}", agent, tool, args);
+            println!("[{}] 调用工具: {} call_id={call_id} {:?}", agent, tool, args);
         })
     }
 
-    fn on_tool_end<'a>(&'a self, agent: &'a str, tool: &'a str, result: &'a str) -> BoxFuture<'a, ()> {
+    fn on_tool_end_with_id<'a>(&'a self, agent: &'a str, call_id: &'a str, tool: &'a str, result: &'a str) -> BoxFuture<'a, ()> {
         Box::pin(async move {
             let preview: String = result.chars().take(80).collect();
-            println!("[{}] Tool result: {} -> {}", agent, tool, preview);
+            println!("[{}] 工具结果: {} call_id={call_id} -> {}", agent, tool, preview);
         })
     }
 
@@ -196,10 +196,10 @@ use std::sync::Arc;
 
 struct LogCallback;
 
-#[async_trait::async_trait]
-impl AgentCallback for LogCallback {
-    async fn on_tool_start(&self, agent: &str, tool: &str, args: &serde_json::Value) {
-        println!("  [{}] Calling {} args={}", agent, tool, args);
+#[echo_agent::callback]
+impl LogCallback {
+    async fn on_tool_start_with_id(&self, agent: &str, call_id: &str, tool: &str, args: &serde_json::Value) {
+        println!("  [{}] 调用工具 {} call_id={call_id} args={}", agent, tool, args);
     }
     async fn on_final_answer(&self, _agent: &str, answer: &str) {
         println!("Final answer: {}", answer);

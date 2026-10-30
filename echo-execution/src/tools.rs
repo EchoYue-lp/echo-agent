@@ -348,6 +348,8 @@ pub struct ToolManager {
     started_resources: Arc<echo_core::agent::admission::KeyedExecutionAdmission>,
     tools: DashMap<String, Arc<dyn Tool>>,
     registration_lock: parking_lot::Mutex<()>,
+    #[cfg(test)]
+    registration_observer: Option<Arc<dyn Fn(RegistrationObservation) + Send + Sync>>,
     config: ToolExecutionConfig,
     /// Write/execute semaphore (limits concurrent write/execute tools).
     semaphore: Option<Arc<Semaphore>>,
@@ -366,6 +368,13 @@ pub struct ToolManager {
     /// its result only if this epoch is unchanged since its cache lookup.
     result_cache_epoch: AtomicU64,
     budget_metrics: ToolBudgetMetrics,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug)]
+enum RegistrationObservation {
+    Published,
+    Selection { contended: bool },
 }
 
 struct ResultCacheInvalidationGuard<'a> {
@@ -826,6 +835,8 @@ impl ToolManager {
             ),
             tools: DashMap::new(),
             registration_lock: parking_lot::Mutex::new(()),
+            #[cfg(test)]
+            registration_observer: None,
             semaphore: None,
             read_semaphore: None,
             config: ToolExecutionConfig::default(),
@@ -850,6 +861,8 @@ impl ToolManager {
             ),
             tools: DashMap::new(),
             registration_lock: parking_lot::Mutex::new(()),
+            #[cfg(test)]
+            registration_observer: None,
             semaphore,
             read_semaphore,
             config,
@@ -930,6 +943,8 @@ impl ToolManager {
     pub fn replace(&self, tool: Box<dyn Tool>) -> Option<Arc<dyn Tool>> {
         let _registration = self.registration_lock.lock();
         let old = self.tools.insert(tool.name().to_string(), Arc::from(tool));
+        #[cfg(test)]
+        self.observe_registration(RegistrationObservation::Published);
         self.invalidate_cache();
         old
     }
@@ -983,6 +998,28 @@ impl ToolManager {
         self.tools
             .get(tool_name)
             .map(|entry| Arc::clone(entry.value()))
+    }
+
+    #[cfg(test)]
+    fn observe_registration(&self, observation: RegistrationObservation) {
+        if let Some(observer) = &self.registration_observer {
+            observer(observation);
+        }
+    }
+
+    // 与所有registry mutation共用原锁，避免工具已发布但cache epoch尚未更新。
+    // owned Arc和epoch只在此同步配对；返回前释放锁，任何validator/permit/执行均在锁外。
+    fn get_tool_with_cache_epoch(&self, tool_name: &str) -> Result<(Arc<dyn Tool>, u64)> {
+        #[cfg(test)]
+        if self.registration_lock.is_locked() {
+            self.observe_registration(RegistrationObservation::Selection { contended: true });
+        }
+        let _registration = self.registration_lock.lock();
+        let epoch = self.result_cache_epoch.load(Ordering::Acquire);
+        let tool = self
+            .get_tool(tool_name)
+            .ok_or_else(|| ToolError::NotFound(tool_name.to_string()))?;
+        Ok((tool, epoch))
     }
 
     pub fn get_tool_definitions(&self) -> Vec<ToolDefinition> {
@@ -1080,10 +1117,17 @@ impl ToolManager {
         tool_name: &str,
         parameters: ToolParameters,
         ctx: &ToolContext,
+        expected_tool: &Arc<dyn Tool>,
         admission: &ToolAdmissionFn<'_>,
     ) -> Result<ToolResult> {
-        self.execute_tool_inner(tool_name, parameters, ctx, true, Some(admission))
-            .await
+        self.execute_tool_inner(
+            tool_name,
+            parameters,
+            ctx,
+            true,
+            Some((admission, expected_tool)),
+        )
+        .await
     }
 
     /// Shared body of [`Self::execute_tool`] / [`Self::execute_tool_with_context`]:
@@ -1095,14 +1139,22 @@ impl ToolManager {
         parameters: ToolParameters,
         ctx: &ToolContext,
         drain_started: bool,
-        admission: Option<&ToolAdmissionFn<'_>>,
+        checked: Option<(&ToolAdmissionFn<'_>, &Arc<dyn Tool>)>,
     ) -> Result<ToolResult> {
-        // Observe before obtaining the tool guard so a future registry storage
-        // change cannot let an old implementation publish into a new generation.
-        let observed_result_cache_epoch = self.result_cache_epoch.load(Ordering::Acquire);
-        let tool = self
-            .get_tool(tool_name)
-            .ok_or_else(|| ToolError::NotFound(tool_name.to_string()))?;
+        let admission = checked.map(|(admission, _)| admission);
+        let expected_tool = checked.map(|(_, tool)| tool);
+        let (tool, observed_result_cache_epoch) = self.get_tool_with_cache_epoch(tool_name)?;
+        #[cfg(test)]
+        self.observe_registration(RegistrationObservation::Selection { contended: false });
+        // 本地热替换也不能把A的许可用于B；在validator/cache/效果前绑定原owned实例。
+        if expected_tool.is_some_and(|expected| !Arc::ptr_eq(expected, &tool)) {
+            return Err(ToolError::AccessDenied {
+                path: tool_name.to_string(),
+                reason: "Tool implementation changed after permission; submit a new invocation"
+                    .into(),
+            }
+            .into());
+        }
         validate_tool_input(tool.as_ref(), &parameters).await?;
         reject_cancelled(ctx, tool_name)?;
 
@@ -1121,7 +1173,7 @@ impl ToolManager {
             (None, None, Some(self.begin_result_cache_invalidation()))
         };
         if let Some(cache_key) = cache_key.as_ref()
-            && let Some(result) = self.cached_result(cache_key)
+            && let Some(result) = self.cached_result(cache_key, observed_result_cache_epoch)
         {
             tracing::debug!("Tool result cache hit: {tool_name}");
             return Ok(result);
@@ -1310,6 +1362,7 @@ impl ToolManager {
         parameters: ToolParameters,
         ctx: &ToolContext,
         event_tx: Option<tokio::sync::mpsc::Sender<ToolStreamEvent>>,
+        expected_tool: &Arc<dyn Tool>,
         admission: &ToolAdmissionFn<'_>,
     ) -> Result<ToolResult> {
         self.execute_tool_stream_with_context_inner(
@@ -1318,7 +1371,7 @@ impl ToolManager {
             ctx,
             event_tx,
             true,
-            Some(admission),
+            Some((admission, expected_tool)),
         )
         .await
     }
@@ -1330,14 +1383,22 @@ impl ToolManager {
         ctx: &ToolContext,
         event_tx: Option<tokio::sync::mpsc::Sender<ToolStreamEvent>>,
         drain_started: bool,
-        admission: Option<&ToolAdmissionFn<'_>>,
+        checked: Option<(&ToolAdmissionFn<'_>, &Arc<dyn Tool>)>,
     ) -> Result<ToolResult> {
-        // Keep the registry generation and result-cache generation ordered:
-        // an old tool implementation must never publish into a replacement's cache.
-        let observed_result_cache_epoch = self.result_cache_epoch.load(Ordering::Acquire);
-        let tool = self
-            .get_tool(tool_name)
-            .ok_or_else(|| ToolError::NotFound(tool_name.to_string()))?;
+        let admission = checked.map(|(admission, _)| admission);
+        let expected_tool = checked.map(|(_, tool)| tool);
+        let (tool, observed_result_cache_epoch) = self.get_tool_with_cache_epoch(tool_name)?;
+        #[cfg(test)]
+        self.observe_registration(RegistrationObservation::Selection { contended: false });
+        // 本地热替换也不能把A的许可用于B；在validator/cache/效果前绑定原owned实例。
+        if expected_tool.is_some_and(|expected| !Arc::ptr_eq(expected, &tool)) {
+            return Err(ToolError::AccessDenied {
+                path: tool_name.to_string(),
+                reason: "Tool implementation changed after permission; submit a new invocation"
+                    .into(),
+            }
+            .into());
+        }
         validate_tool_input(tool.as_ref(), &parameters).await?;
         reject_cancelled(ctx, tool_name)?;
 
@@ -1353,7 +1414,7 @@ impl ToolManager {
             (None, None, Some(self.begin_result_cache_invalidation()))
         };
         if let Some(cache_key) = cache_key.as_ref()
-            && let Some(result) = self.cached_result(cache_key)
+            && let Some(result) = self.cached_result(cache_key, observed_result_cache_epoch)
         {
             tracing::debug!("Tool result cache hit: {tool_name}");
             return Ok(result);
@@ -1573,8 +1634,12 @@ impl ToolManager {
         cache.clear();
     }
 
-    fn cached_result(&self, key: &ToolResultCacheKey) -> Option<ToolResult> {
+    fn cached_result(&self, key: &ToolResultCacheKey, expected_epoch: u64) -> Option<ToolResult> {
         let mut cache = self.result_cache.write();
+        // 与invalidate/store共用原临界区；已选中A不能读到后来B代的完整effects。
+        if self.result_cache_epoch.load(Ordering::Acquire) != expected_epoch {
+            return None;
+        }
         cache.retain(|_, (_, created)| created.elapsed() < TOOL_RESULT_CACHE_TTL);
         cache.get(key).map(|(result, _)| result.clone())
     }
@@ -3958,6 +4023,9 @@ mod execute_with_context_tests {
 
         let admission_manager = Arc::clone(&manager);
         let admission_finished = Arc::clone(&holder_finished);
+        let admission_tool = admission_manager
+            .get_tool("admission_target")
+            .ok_or_else(|| ToolError::NotFound("admission_target".into()))?;
         let target = tokio::spawn(async move {
             let admission = move |_tool: &dyn Tool| -> Result<()> {
                 if !admission_finished.load(AtomicOrdering::SeqCst) {
@@ -3978,6 +4046,7 @@ mod execute_with_context_tests {
                     "admission_target",
                     ToolParameters::new(),
                     &ToolContext::default(),
+                    &admission_tool,
                     &admission,
                 )
                 .await
@@ -4344,6 +4413,229 @@ mod execute_with_context_tests {
             Some(Path::new("/wt/a")),
             "session A must still see /wt/a after session B used the same ToolManager"
         );
+    }
+    // 插入echo_execution原execute_with_context_tests；只观察当前Manager，无全局hook。
+    struct PublicationReadTool {
+        path: PathBuf,
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl Tool for PublicationReadTool {
+        fn name(&self) -> &str {
+            "publication_read"
+        }
+        fn description(&self) -> &str {
+            "read bytes from the selected source"
+        }
+        fn parameters(&self) -> serde_json::Value {
+            serde_json::json!({"type":"object"})
+        }
+        fn risk_level(&self) -> ToolRiskLevel {
+            ToolRiskLevel::ReadOnly
+        }
+        fn execute<'a>(
+            &'a self,
+            _: ToolParameters,
+        ) -> futures::future::BoxFuture<'a, Result<ToolResult>> {
+            Box::pin(async move {
+                self.calls.fetch_add(1, AtomicOrdering::SeqCst);
+                let bytes = std::fs::read_to_string(&self.path)?;
+                Ok(
+                    ToolResult::success(bytes).with_effect(
+                        echo_core::tools::ToolEffect::FileRead {
+                            path: "same-source-path/x".into(),
+                        },
+                    ),
+                )
+            })
+        }
+    }
+
+    struct PublicationTestFiles(PathBuf);
+    impl Drop for PublicationTestFiles {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn publication_test_error(error: impl std::fmt::Display) -> ReactError {
+        ToolError::ExecutionFailed {
+            tool: "publication_read".into(),
+            message: error.to_string(),
+        }
+        .into()
+    }
+
+    async fn cache_publication_keeps_result_source(streaming: bool) -> Result<()> {
+        let fixture_root = std::env::var_os("EKO_CONSUMER_TEST_ROOT")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(".echo-semantic/local/fixtures")
+            });
+        let files = PublicationTestFiles(fixture_root.join(uuid::Uuid::new_v4().to_string()));
+        std::fs::create_dir_all(&files.0)?;
+        let a_path = files.0.join("A");
+        let b_path = files.0.join("B");
+        std::fs::write(&a_path, b"actual-A")?;
+        std::fs::write(&b_path, b"actual-B")?;
+        let a_calls = Arc::new(AtomicUsize::new(0));
+        let b_calls = Arc::new(AtomicUsize::new(0));
+        let mut manager = ToolManager::new();
+        manager.try_register(Box::new(PublicationReadTool {
+            path: a_path.clone(),
+            calls: a_calls.clone(),
+        }))?;
+        let seeded = manager
+            .execute_tool_with_context(
+                "publication_read",
+                ToolParameters::new(),
+                &ToolContext::default(),
+            )
+            .await?;
+        assert_eq!(seeded.output, "actual-A");
+        assert_eq!(a_calls.load(AtomicOrdering::SeqCst), 1);
+
+        let (event_tx, event_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let release_rx = Mutex::new(release_rx);
+        let observer_timed_out = Arc::new(AtomicBool::new(false));
+        let timeout_observed = observer_timed_out.clone();
+        manager.registration_observer = Some(Arc::new(move |event| {
+            let _ = event_tx.send(event);
+            if matches!(event, RegistrationObservation::Published) {
+                // 即使fixture失败也释放mutation；不把超时当正常调度，不遗留producer。
+                if release_rx
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .recv_timeout(std::time::Duration::from_secs(2))
+                    .is_err()
+                {
+                    timeout_observed.store(true, AtomicOrdering::SeqCst);
+                }
+            }
+        }));
+        let manager = Arc::new(manager);
+        let replacing = manager.clone();
+        let replacement_calls = b_calls.clone();
+        let replacement = std::thread::spawn(move || {
+            replacing.replace(Box::new(PublicationReadTool {
+                path: b_path,
+                calls: replacement_calls,
+            }))
+        });
+        let published = event_rx.recv_timeout(std::time::Duration::from_secs(2));
+        // 公共owned lookup可在publication窗口看到B；checked调用必须自行获得一致代次。
+        let expected = manager
+            .get_tool("publication_read")
+            .ok_or_else(|| ToolError::NotFound("publication_read".into()))?;
+        let reading = manager.clone();
+        let checked_tool = expected.clone();
+        let (result_tx, result_rx) = std::sync::mpsc::channel();
+        let reader = std::thread::spawn(move || {
+            let result = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(ReactError::from)
+                .and_then(|runtime| {
+                    runtime.block_on(async {
+                        let admission = |_: &dyn Tool| Ok(());
+                        if streaming {
+                            reading
+                                .execute_tool_stream_with_context_draining_started_checked(
+                                    "publication_read",
+                                    ToolParameters::new(),
+                                    &ToolContext::default(),
+                                    None,
+                                    &checked_tool,
+                                    &admission,
+                                )
+                                .await
+                        } else {
+                            reading
+                                .execute_tool_with_context_draining_started_checked(
+                                    "publication_read",
+                                    ToolParameters::new(),
+                                    &ToolContext::default(),
+                                    &checked_tool,
+                                    &admission,
+                                )
+                                .await
+                        }
+                    })
+                });
+            let _ = result_tx.send(result);
+        });
+        let selection = event_rx.recv_timeout(std::time::Duration::from_secs(2));
+        // before在旧epoch选中B后可立即取得旧A缓存；after在原注册锁处观察争用。
+        // 两者仅决定何时释放barrier；最终断言始终核真实内容、effects和物理读取。
+        let result_before_release = if matches!(
+            selection,
+            Ok(RegistrationObservation::Selection { contended: false })
+        ) {
+            Some(result_rx.recv_timeout(std::time::Duration::from_secs(2)))
+        } else {
+            None
+        };
+        let release_sent = release_tx.send(());
+        let result = match result_before_release {
+            Some(result) => result,
+            None => result_rx.recv_timeout(std::time::Duration::from_secs(2)),
+        };
+        let reader_join = reader.join();
+        let replacement_join = replacement.join();
+        assert!(matches!(published, Ok(RegistrationObservation::Published)));
+        assert!(matches!(
+            selection,
+            Ok(RegistrationObservation::Selection { .. })
+        ));
+        assert!(release_sent.is_ok() && reader_join.is_ok() && replacement_join.is_ok());
+        assert!(
+            !observer_timed_out.load(AtomicOrdering::SeqCst),
+            "fixture publication barrier timed out"
+        );
+        let result = result.map_err(publication_test_error)??;
+        assert_eq!(
+            result.output, "actual-B",
+            "published B returned old A cache under its own source"
+        );
+        assert_eq!(
+            b_calls.load(AtomicOrdering::SeqCst),
+            1,
+            "B must physically read its source"
+        );
+        assert_eq!(a_calls.load(AtomicOrdering::SeqCst), 1);
+        assert_eq!(
+            result.effects,
+            vec![echo_core::tools::ToolEffect::FileRead {
+                path: "same-source-path/x".into()
+            }]
+        );
+        let cached_b = manager
+            .execute_tool_with_context(
+                "publication_read",
+                ToolParameters::new(),
+                &ToolContext::default(),
+            )
+            .await?;
+        assert_eq!(cached_b.output, "actual-B");
+        assert_eq!(cached_b.effects, result.effects);
+        assert_eq!(
+            b_calls.load(AtomicOrdering::SeqCst),
+            1,
+            "new B generation must retain its own valid cache"
+        );
+        assert_eq!(std::fs::read(a_path)?, b"actual-A");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn cache_publication_source_is_bound_nonstream() -> Result<()> {
+        cache_publication_keeps_result_source(false).await
+    }
+
+    #[tokio::test]
+    async fn cache_publication_source_is_bound_stream() -> Result<()> {
+        cache_publication_keeps_result_source(true).await
     }
 }
 

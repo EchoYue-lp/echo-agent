@@ -131,3 +131,9 @@ exact candidates, list/load failure, and dangling summary. Existing unsettled
 timeout tests count both list and load operations and require zero. Eval,
 ReactAgent, TurnDriver, bilingual documentation, SDK zero-diff, semantic,
 Issue, and independent review gates remain required.
+
+## 2026-10-29 当前调用值收敛补记
+
+本段覆盖上文关于共享legacy setter/current trace缓存的当前实现描述；历史验证与回执继续保全。旧set/clear external context已按人类NoCompat裁决退役，当前Eval与工具调用通过既有AgentInvocationContext传值。业务run id仍与trace id分离；current_run_id只观察现有ActiveTurn同incarnation的原runtime.run_id，无active或原值None即None。它不回填trace/turn/conversation，也不能被Eval当作RunStore主键。
+
+当前trace只由start_scoped_trace_run返回值写入对应snapshot，恢复/压缩/失败隔离沿该值。原“安装legacy产品run且运行后共享值仍保留”的测试义务已取消；当前invocation字段、config conversation fallback、runNone、cold/Execute/standalone恢复与typed unknown不伪终结仍须验收。最新ignored候选仅获有限源码/格式/补丁应用资格，尚无本轮编译、测试、SDK/Host/MainCI接受结论。SDK公开shape与方法的当前差异以ADR0104及对应owner窄审为准，上文零API变化声明属于原历史修复。

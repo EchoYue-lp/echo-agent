@@ -861,4 +861,636 @@ mod target_file_system_tests {
         );
         Ok(())
     }
+
+    // 以下回归只调用现成工具 API；RED 阶段仅移入测试，不替换旧生产代码。
+    fn scope_tool(
+        name: &str,
+        base: Option<&Path>,
+        provider: Arc<dyn FileSystem>,
+    ) -> Result<Box<dyn echo_core::tools::Tool>> {
+        use crate::files::{
+            code_search::CodeSearchTool, glob::GlobTool, grep::GrepTool, repo_map::RepoMapTool,
+        };
+        let tool: Box<dyn echo_core::tools::Tool> = match name {
+            "glob" => Box::new(
+                base.map(GlobTool::with_base_dir)
+                    .unwrap_or_default()
+                    .with_file_system(provider),
+            ),
+            "grep" => Box::new(
+                base.map(GrepTool::with_base_dir)
+                    .unwrap_or_default()
+                    .with_file_system(provider),
+            ),
+            "code_search" => Box::new(
+                base.map(CodeSearchTool::with_base_dir)
+                    .unwrap_or_default()
+                    .with_file_system(provider),
+            ),
+            "repo_map" | "repo_map_symbols" => Box::new(
+                base.map(RepoMapTool::with_base_dir)
+                    .unwrap_or_default()
+                    .with_file_system(provider),
+            ),
+            _ => return Err(ToolError::NotFound(name.to_string()).into()),
+        };
+        Ok(tool)
+    }
+
+    async fn scope_call(
+        name: &str,
+        base: Option<&Path>,
+        provider: Arc<dyn FileSystem>,
+        path: &Path,
+        ctx: &ToolContext,
+    ) -> Result<ToolResult> {
+        let args = serde_json::json!({
+            "path": path,
+            "pattern": if name == "glob" { "**/*.rs" } else { "scope_probe" },
+            "query": "scope_probe", "symbol_type": "function", "max_depth": 4,
+            "format": if name=="repo_map_symbols" { "symbols" } else { "tree" },
+        });
+        let params = args
+            .as_object()
+            .ok_or_else(|| ToolError::MissingParameter("object".into()))?
+            .iter()
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect();
+        scope_tool(name, base, provider)?
+            .execute_with_context(params, ctx)
+            .await
+    }
+
+    fn scope_rejected(name: &str, result: Result<ToolResult>) {
+        let diagnostic = match result {
+            Err(error) => error.to_string(),
+            Ok(result) => {
+                assert!(
+                    !result.success,
+                    "{name} escaped an explicit root: {}",
+                    result.output
+                );
+                format!("{} {}", result.output, result.error.unwrap_or_default())
+            }
+        };
+        // 断言必须来自目录范围拒绝，不能拿 fixture 断线或不存在冒充 RED/GREEN。
+        assert!(
+            diagnostic.contains("outside")
+                && (diagnostic.contains("scope") || diagnostic.contains("directory")),
+            "{name}: {diagnostic}"
+        );
+    }
+
+    async fn parent_scope_case(name: &str) -> Result<()> {
+        let host = tempfile::tempdir()?;
+        let target = tempfile::tempdir()?;
+        for root in [host.path(), target.path()] {
+            std::fs::create_dir(root.join("base"))?;
+            std::fs::create_dir(root.join("outside"))?;
+            std::fs::write(root.join("outside/escape.rs"), "pub fn scope_probe() {}\n")?;
+        }
+        let provider = Arc::new(MappedFileSystem::new(host.path(), target.path())?);
+        let base = provider.visible.join("base");
+        scope_rejected(
+            name,
+            scope_call(
+                name,
+                Some(&base),
+                provider,
+                Path::new("../outside"),
+                &ToolContext::default(),
+            )
+            .await,
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn glob_scope_parent_path_rejected_on_original_api() -> Result<()> {
+        parent_scope_case("glob").await
+    }
+    #[tokio::test]
+    async fn repo_map_scope_parent_path_rejected_on_original_api() -> Result<()> {
+        parent_scope_case("repo_map").await
+    }
+
+    #[cfg(unix)]
+    async fn child_scope_case(name: &str) -> Result<()> {
+        for directory_link in [true, false] {
+            let root = tempfile::tempdir()?;
+            let base = root.path().join("base");
+            let outside = root.path().join("outside");
+            std::fs::create_dir(&base)?;
+            std::fs::create_dir(&outside)?;
+            std::fs::write(outside.join("escape.rs"), "pub fn scope_probe() {}\n")?;
+            let (target, link) = if directory_link {
+                (outside.clone(), base.join("link"))
+            } else {
+                (outside.join("escape.rs"), base.join("link.rs"))
+            };
+            std::os::unix::fs::symlink(target, link)?;
+            scope_rejected(
+                name,
+                scope_call(
+                    name,
+                    Some(&base),
+                    Arc::new(LocalFileSystem),
+                    Path::new("."),
+                    &ToolContext::default(),
+                )
+                .await,
+            );
+        }
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn glob_scope_recursive_child_links_rejected_on_original_api() -> Result<()> {
+        child_scope_case("glob").await
+    }
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn grep_scope_recursive_child_links_rejected_on_original_api() -> Result<()> {
+        child_scope_case("grep").await
+    }
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn code_search_scope_recursive_child_links_rejected_on_original_api() -> Result<()> {
+        child_scope_case("code_search").await
+    }
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn repo_map_scope_recursive_child_links_rejected_on_original_api() -> Result<()> {
+        child_scope_case("repo_map").await
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn scope_direct_symlink_root_rejected_on_original_api() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let base = root.path().join("base");
+        let outside = root.path().join("outside");
+        std::fs::create_dir(&base)?;
+        std::fs::create_dir(&outside)?;
+        std::fs::write(outside.join("escape.rs"), "pub fn scope_probe() {}\n")?;
+        std::os::unix::fs::symlink(&outside, base.join("link"))?;
+        for name in [
+            "glob",
+            "grep",
+            "code_search",
+            "repo_map",
+            "repo_map_symbols",
+        ] {
+            scope_rejected(
+                name,
+                scope_call(
+                    name,
+                    Some(&base),
+                    Arc::new(LocalFileSystem),
+                    Path::new("link"),
+                    &ToolContext::default(),
+                )
+                .await,
+            );
+        }
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn scope_legal_internal_links_and_root_alias_remain_visible() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let base = root.path().join("base");
+        std::fs::create_dir_all(base.join("real"))?;
+        std::fs::write(base.join("real/inside.rs"), "pub fn scope_probe() {}\n")?;
+        std::os::unix::fs::symlink(base.join("real"), base.join("link"))?;
+        std::os::unix::fs::symlink(base.join("real/inside.rs"), base.join("alias.rs"))?;
+        let alias = root.path().join("root_alias");
+        std::os::unix::fs::symlink(&base, &alias)?;
+        for name in [
+            "glob",
+            "grep",
+            "code_search",
+            "repo_map",
+            "repo_map_symbols",
+        ] {
+            let result = scope_call(
+                name,
+                Some(&alias),
+                Arc::new(LocalFileSystem),
+                Path::new("."),
+                &ToolContext::default(),
+            )
+            .await?;
+            assert!(
+                result.success,
+                "{name}: {}",
+                result.error.unwrap_or_default()
+            );
+            assert!(
+                result.output.contains("inside.rs"),
+                "{name}: {}",
+                result.output
+            );
+            if name == "glob" {
+                assert!(result.output.contains(&alias.display().to_string()));
+            }
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn scope_cwd_is_only_a_resolution_base_for_unconfined_tools() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let base = root.path().join("base");
+        let outside = root.path().join("outside");
+        std::fs::create_dir(&base)?;
+        std::fs::create_dir(&outside)?;
+        std::fs::write(outside.join("inside.rs"), "pub fn scope_probe() {}\n")?;
+        let ctx = ToolContext {
+            working_dir: Some(base),
+            ..Default::default()
+        };
+        for name in ["glob", "code_search", "repo_map", "repo_map_symbols"] {
+            for path in [Path::new("../outside"), outside.as_path()] {
+                let result = scope_call(name, None, Arc::new(LocalFileSystem), path, &ctx).await?;
+                assert!(
+                    result.success,
+                    "{name}: {}",
+                    result.error.unwrap_or_default()
+                );
+                assert!(
+                    result.output.contains("inside.rs"),
+                    "{name}: {}",
+                    result.output
+                );
+            }
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn scope_no_roots_preserves_unrestricted_absolute_reads() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        std::fs::write(root.path().join("inside.rs"), "pub fn scope_probe() {}\n")?;
+        for name in [
+            "glob",
+            "grep",
+            "code_search",
+            "repo_map",
+            "repo_map_symbols",
+        ] {
+            let result = scope_call(
+                name,
+                None,
+                Arc::new(LocalFileSystem),
+                root.path(),
+                &ToolContext::default(),
+            )
+            .await?;
+            assert!(
+                result.success,
+                "{name}: {}",
+                result.error.unwrap_or_default()
+            );
+            assert!(
+                result.output.contains("inside.rs"),
+                "{name}: {}",
+                result.output
+            );
+        }
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn grep_scope_keeps_working_and_native_artifact_roots_in_recursive_union() -> Result<()> {
+        use echo_core::tools::artifact::ToolOutputArtifactConfig;
+        let root = tempfile::tempdir()?;
+        let base = root.path().join("base");
+        let working = root.path().join("working");
+        let artifact = root.path().join("artifacts");
+        for (path, file) in [
+            (&base, "base.rs"),
+            (&working, "working.rs"),
+            (&artifact, "artifact.rs"),
+        ] {
+            std::fs::create_dir(path)?;
+            std::fs::write(path.join(file), "pub fn scope_probe() {}\n")?;
+        }
+        std::os::unix::fs::symlink(&working, base.join("working_link"))?;
+        std::os::unix::fs::symlink(&artifact, base.join("artifact_link"))?;
+        let ctx = ToolContext {
+            working_dir: Some(working),
+            output_artifacts: Some(ToolOutputArtifactConfig::new(&artifact, "scope")),
+            ..Default::default()
+        };
+        let result = scope_call(
+            "grep",
+            Some(&base),
+            Arc::new(LocalFileSystem),
+            Path::new("."),
+            &ctx,
+        )
+        .await?;
+        assert!(result.success, "{}", result.error.unwrap_or_default());
+        assert!(
+            result.output.contains("working.rs") && result.output.contains("artifact.rs"),
+            "{}",
+            result.output
+        );
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn scope_target_realpath_wins_over_opposite_host_symlinks() -> Result<()> {
+        for target_inside in [true, false] {
+            let host = tempfile::tempdir()?;
+            let target = tempfile::tempdir()?;
+            for root in [host.path(), target.path()] {
+                std::fs::create_dir_all(root.join("base/real"))?;
+                std::fs::create_dir(root.join("outside"))?;
+                for dir in ["base/real", "outside"] {
+                    std::fs::write(
+                        root.join(dir).join("inside.rs"),
+                        "pub fn scope_probe() {}\n",
+                    )?;
+                }
+            }
+            for (root, inside) in [
+                (host.path(), !target_inside),
+                (target.path(), target_inside),
+            ] {
+                std::os::unix::fs::symlink(
+                    root.join(if inside { "base/real" } else { "outside" }),
+                    root.join("base/link"),
+                )?;
+            }
+            let provider = Arc::new(MappedFileSystem::new(host.path(), target.path())?);
+            let base = provider.visible.join("base");
+            for name in [
+                "glob",
+                "grep",
+                "code_search",
+                "repo_map",
+                "repo_map_symbols",
+            ] {
+                let result = scope_call(
+                    name,
+                    Some(&base),
+                    provider.clone(),
+                    Path::new("link"),
+                    &ToolContext::default(),
+                )
+                .await;
+                if target_inside {
+                    let result = result?;
+                    assert!(
+                        result.success && result.output.contains("inside.rs"),
+                        "{name}: {}",
+                        result.output
+                    );
+                } else {
+                    scope_rejected(name, result);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn scope_target_disconnect_keeps_typed_provider_failure() -> Result<()> {
+        let host = tempfile::tempdir()?;
+        let target = tempfile::tempdir()?;
+        let provider = Arc::new(MappedFileSystem::new(host.path(), target.path())?);
+        provider.online.store(false, Ordering::SeqCst);
+        for name in [
+            "glob",
+            "grep",
+            "code_search",
+            "repo_map",
+            "repo_map_symbols",
+        ] {
+            let result = scope_call(
+                name,
+                Some(&provider.visible),
+                provider.clone(),
+                Path::new("."),
+                &ToolContext::default(),
+            )
+            .await;
+            assert!(
+                matches!(result,Err(ReactError::Tool(error)) if matches!(error.as_ref(),ToolError::RemoteFailure{..})),
+                "{name} erased provider failure"
+            );
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn repo_map_symbols_scope_parent_path_rejected_on_original_api() -> Result<()> {
+        parent_scope_case("repo_map_symbols").await
+    }
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn repo_map_symbols_scope_recursive_child_links_rejected_on_original_api() -> Result<()> {
+        child_scope_case("repo_map_symbols").await
+    }
+
+    #[tokio::test]
+    async fn grep_scope_non_native_provider_does_not_inherit_host_artifact_root() -> Result<()> {
+        use echo_core::tools::artifact::ToolOutputArtifactConfig;
+        let host = tempfile::tempdir()?;
+        let target = tempfile::tempdir()?;
+        for root in [host.path(), target.path()] {
+            std::fs::create_dir(root.join("base"))?;
+            std::fs::create_dir(root.join("artifacts"))?;
+            std::fs::write(
+                root.join("artifacts/artifact.rs"),
+                "pub fn scope_probe() {}\n",
+            )?;
+        }
+        let provider = Arc::new(MappedFileSystem::new(host.path(), target.path())?);
+        let base = provider.visible.join("base");
+        let artifacts = provider.visible.join("artifacts");
+        let ctx = ToolContext {
+            output_artifacts: Some(ToolOutputArtifactConfig::new(&artifacts, "scope")),
+            ..Default::default()
+        };
+        scope_rejected(
+            "grep",
+            scope_call("grep", Some(&base), provider, &artifacts, &ctx).await,
+        );
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn scope_symlink_parent_components_validate_the_actual_io_path() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let base = root.path().join("base");
+        let outside = root.path().join("outside");
+        std::fs::create_dir_all(base.join("data"))?;
+        std::fs::create_dir_all(outside.join("sub"))?;
+        std::fs::create_dir(outside.join("data"))?;
+        // 同名内部镜像避免错误实现仅因目标不存在而被动失败。
+        for dir in [base.join("data"), outside.join("data")] {
+            std::fs::write(dir.join("marker.rs"), "pub fn scope_probe() {}\n")?;
+        }
+        std::os::unix::fs::symlink(outside.join("sub"), base.join("link"))?;
+        for name in [
+            "glob",
+            "grep",
+            "code_search",
+            "repo_map",
+            "repo_map_symbols",
+        ] {
+            scope_rejected(
+                name,
+                scope_call(
+                    name,
+                    Some(&base),
+                    Arc::new(LocalFileSystem),
+                    Path::new("link/../data"),
+                    &ToolContext::default(),
+                )
+                .await,
+            );
+        }
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn scope_relative_base_is_not_rejoined_to_recursive_entries() -> Result<()> {
+        // 不修改进程 CWD，避免并行测试相互影响；仍让native read_dir返回相对entry路径。
+        let cwd = std::env::current_dir()?;
+        let root = tempfile::tempdir_in(&cwd)?;
+        let base = root.path().join("base");
+        let outside = root.path().join("outside");
+        std::fs::create_dir(&base)?;
+        std::fs::create_dir(&outside)?;
+        std::fs::write(base.join("inside.rs"), "pub fn scope_probe() {}\n")?;
+        std::fs::write(outside.join("escape.rs"), "pub fn scope_probe() {}\n")?;
+        let relative_base = base
+            .strip_prefix(&cwd)
+            .map_err(|error| std::io::Error::other(error.to_string()))?;
+        for name in [
+            "glob",
+            "grep",
+            "code_search",
+            "repo_map",
+            "repo_map_symbols",
+        ] {
+            let result = scope_call(
+                name,
+                Some(relative_base),
+                Arc::new(LocalFileSystem),
+                Path::new("."),
+                &ToolContext::default(),
+            )
+            .await?;
+            assert!(
+                result.success && result.output.contains("inside.rs"),
+                "{name}: {}",
+                result.output
+            );
+        }
+        std::os::unix::fs::symlink(&outside, base.join("link"))?;
+        for name in [
+            "glob",
+            "grep",
+            "code_search",
+            "repo_map",
+            "repo_map_symbols",
+        ] {
+            scope_rejected(
+                name,
+                scope_call(
+                    name,
+                    Some(relative_base),
+                    Arc::new(LocalFileSystem),
+                    Path::new("."),
+                    &ToolContext::default(),
+                )
+                .await,
+            );
+        }
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn scope_dangling_child_does_not_hide_a_valid_match() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        std::fs::write(root.path().join("inside.rs"), "pub fn scope_probe() {}\n")?;
+        std::os::unix::fs::symlink(
+            root.path().join("missing.rs"),
+            root.path().join("broken.rs"),
+        )?;
+        for name in [
+            "glob",
+            "grep",
+            "code_search",
+            "repo_map",
+            "repo_map_symbols",
+        ] {
+            let result = scope_call(
+                name,
+                Some(root.path()),
+                Arc::new(LocalFileSystem),
+                Path::new("."),
+                &ToolContext::default(),
+            )
+            .await?;
+            assert!(
+                result.success && result.output.contains("inside.rs"),
+                "{name}: {}",
+                result.output
+            );
+        }
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn scope_ignored_external_build_link_keeps_original_skip_behavior() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let base = root.path().join("base");
+        let outside = root.path().join("outside");
+        std::fs::create_dir(&base)?;
+        std::fs::create_dir(&outside)?;
+        std::fs::write(base.join("inside.rs"), "pub fn scope_probe() {}\n")?;
+        std::fs::write(outside.join("escape.rs"), "pub fn scope_probe() {}\n")?;
+        std::os::unix::fs::symlink(&outside, base.join("target"))?;
+        for name in [
+            "glob",
+            "grep",
+            "code_search",
+            "repo_map",
+            "repo_map_symbols",
+        ] {
+            let result = scope_call(
+                name,
+                Some(&base),
+                Arc::new(LocalFileSystem),
+                Path::new("."),
+                &ToolContext::default(),
+            )
+            .await?;
+            assert!(
+                result.success && result.output.contains("inside.rs"),
+                "{name}: {}",
+                result.output
+            );
+            assert!(
+                !result.output.contains("escape.rs"),
+                "{name}: {}",
+                result.output
+            );
+        }
+        Ok(())
+    }
 }

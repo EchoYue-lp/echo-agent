@@ -43,22 +43,21 @@
 //! #     fn name(&self) -> &str { "my-agent" }
 //! #     fn model_name(&self) -> &str { "test-model" }
 //! #     fn system_prompt(&self) -> &str { "" }
-//! #     fn execute<'a>(&'a self, _task: &'a str)
-//! #         -> futures::future::BoxFuture<'a, echo_core::error::Result<String>> {
-//! #         Box::pin(async { Ok("done".to_string()) })
-//! #     }
-//! #     fn execute_stream<'a>(&'a self, _task: &'a str) -> futures::future::BoxFuture<
-//! #         'a,
-//! #         echo_core::error::Result<
-//! #             futures::stream::BoxStream<'a, echo_core::error::Result<echo_core::agent::AgentEvent>>,
-//! #         >,
-//! #     > {
-//! #         Box::pin(async {
-//! #             use futures::StreamExt;
-//! #             Ok(futures::stream::iter([Ok(echo_core::agent::AgentEvent::FinalAnswer(
-//! #                 "done".to_string(),
-//! #             ))])
-//! #             .boxed())
+//! #     fn execute_stream_message_with_invocation_context<'a>(
+//! #         &'a self, message: echo_core::llm::types::Message,
+//! #         _cancel: tokio_util::sync::CancellationToken, invocation: echo_core::agent::AgentInvocationContext,
+//! #     ) -> futures::future::BoxFuture<'a, echo_core::error::Result<futures::stream::BoxStream<'a, echo_core::error::Result<echo_core::agent::AgentEvent>>>> {
+//! #         Box::pin(async move {
+//! #             use echo_core::agent::{AgentEvent, AgentPhase, ExecutionStatus, ExecutionStatusKind};
+//! #             let status = |kind, sequence| AgentEvent::ExecutionStatus(ExecutionStatus {
+//! #                 adapter_generated: false, execution_id: "example-execution".into(), request_id: Some("example-response".into()), sequence,
+//! #                 phase: AgentPhase::Terminal, status: kind, reason: None,
+//! #             });
+//! #             let events = vec![Ok(status(ExecutionStatusKind::Started, 0)), Ok(AgentEvent::FinalAnswer("done".into())), Ok(status(ExecutionStatusKind::Settled, 1))];
+//! #             Ok(Box::pin(async_stream::stream! {
+//! #                 let _retained = (message, invocation);
+//! #                 for event in events { yield event; }
+//! #             }) as futures::stream::BoxStream<'a, echo_core::error::Result<AgentEvent>>)
 //! #         })
 //! #     }
 //! # }
@@ -84,8 +83,9 @@
 
 use async_trait::async_trait;
 use echo_core::agent::{
-    Agent, AgentEvent, AgentInvocationContext, AgentSteerTurnOutcome, CancellationToken,
-    EventEnvelope, EventIdentity, ExecutionUsage, MessageId, TurnId, envelope_event_stream_after,
+    Agent, AgentEvent, AgentInvocationContext, AgentOutputProjection, AgentSteerTurnOutcome,
+    CancellationToken, EventEnvelope, EventIdentity, ExecutionUsage, MessageId, TurnId,
+    envelope_event_stream_after,
 };
 use echo_core::error::{AgentFailure, ReactError};
 use echo_core::llm::Message;
@@ -486,7 +486,7 @@ impl TurnOutcome {
                 }
                 _ => None,
             },
-            AgentEvent::FinalAnswer(_) => Some(Self::Completed),
+            AgentEvent::FinalAnswer(_) => None,
             AgentEvent::Cancelled => Some(Self::Cancelled),
             AgentEvent::Error { failure, .. } => {
                 if failure.terminal_kind == echo_core::error::AgentTerminalKind::Cancelled {
@@ -737,49 +737,33 @@ impl AgentTurnDriver {
             .as_ref()
             .map(|value| value.as_str().to_string());
         let input = request.input;
-        let raw = match (&input, request.mode, invocation) {
-            (TurnInput::Text(message), TurnMode::Chat, None) => {
-                agent.chat_stream_with_cancel(message, token.clone()).await
-            }
-            (TurnInput::Text(message), TurnMode::Execute, None) => {
+        let message = match input {
+            TurnInput::Text(text) => Message::user(text),
+            TurnInput::Message(message) => *message,
+        };
+        let invocation = invocation_with_cancel(invocation, &token);
+        let raw = match request.mode {
+            TurnMode::Chat => {
                 agent
-                    .execute_stream_with_cancel(message, token.clone())
+                    .chat_stream_message_with_invocation_context(message, token.clone(), invocation)
                     .await
             }
-            (TurnInput::Text(message), TurnMode::Execute, Some(invocation)) => {
+            TurnMode::Execute => {
                 agent
-                    .execute_stream_with_invocation_context(message, token.clone(), invocation)
-                    .await
-            }
-            (TurnInput::Text(message), TurnMode::Chat, Some(invocation)) => {
-                agent
-                    .chat_stream_message_with_invocation_context(
-                        Message::user(message.clone()),
+                    .execute_stream_message_with_invocation_context(
+                        message,
                         token.clone(),
                         invocation,
                     )
                     .await
             }
-            (TurnInput::Message(message), TurnMode::Chat, invocation) => {
-                agent
-                    .chat_stream_message_with_invocation_context(
-                        message.as_ref().clone(),
-                        token.clone(),
-                        invocation_with_cancel(invocation, &token),
-                    )
-                    .await
-            }
-            (TurnInput::Message(message), TurnMode::Execute, invocation) => {
-                agent
-                    .execute_stream_message_with_invocation_context(
-                        message.as_ref().clone(),
-                        token.clone(),
-                        invocation_with_cancel(invocation, &token),
-                    )
-                    .await
-            }
         };
-        let mut source_has_runtime_status = false;
+        // Reuse the existing pure canonical projection, not another completion validator/source.
+        let source_projection = std::sync::Arc::new(std::sync::Mutex::new((
+            AgentOutputProjection::default(),
+            None::<ReactError>,
+        )));
+        let raw_projection = source_projection.clone();
         let mut raw = match raw {
             Ok(stream) => stream,
             Err(error) => {
@@ -835,12 +819,63 @@ impl AgentTurnDriver {
             }
         }
         .inspect(move |item| {
-            source_has_runtime_status |= matches!(item, Ok(AgentEvent::ExecutionStatus(_)));
+            let mut newly_validated_terminal = false;
+            {
+                let mut state = raw_projection
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner());
+                let checked = match item {
+                    Ok(AgentEvent::ExecutionStatus(status)) => {
+                        let checked = state.0.observe_status(status);
+                        newly_validated_terminal = checked.as_ref().is_ok_and(|changed| *changed)
+                            && matches!(
+                                status.status,
+                                echo_core::agent::ExecutionStatusKind::Settled
+                                    | echo_core::agent::ExecutionStatusKind::Failed
+                                    | echo_core::agent::ExecutionStatusKind::Cancelled
+                            );
+                        checked.map(|_| ())
+                    }
+                    Ok(AgentEvent::AssistantMessage { block }) => {
+                        state.0.observe_block(block).map(|_| ())
+                    }
+                    Ok(AgentEvent::FinalAnswer(answer)) => state.0.confirm_answer(answer),
+                    _ => Ok(()),
+                };
+                if let Err(error) = checked {
+                    state.1.get_or_insert(error);
+                }
+            }
+            // Borrow the validated source identity from the one existing projection.
+            // This is not another mutable owner cache, nor a guess from final text.
+            let checked_source_execution = raw_projection
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .0
+                .execution_id()
+                .map(str::to_string);
+            let matched_execution = source_execution
+                .as_deref()
+                .or(checked_source_execution.as_deref());
             let mut pending = source_progress.lock().unwrap_or_else(|p| p.into_inner());
+            if let Ok(AgentEvent::ExecutionStatus(status)) = item
+                && source_execution
+                    .as_deref()
+                    .is_some_and(|owner| owner != status.execution_id)
+            {
+                let mut projection = raw_projection
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner());
+                projection.1.get_or_insert_with(|| {
+                    ReactError::Other(
+                        "source execution does not match the admitted turn identity".into(),
+                    )
+                });
+            }
             let matches_owner = |error: &ReactError| {
                 matches!(error,
                 ReactError::ExecutionNotSettled { run_id, execution_id }
-                    if run_id == &source_run && execution_id == &source_execution)
+                    if run_id == &source_run && execution_id.as_deref() == matched_execution)
             };
             match item {
                 Err(ReactError::ExecutionNotSettled {
@@ -857,15 +892,9 @@ impl AgentTurnDriver {
                     }
                 }
                 Ok(event @ AgentEvent::ExecutionStatus(status))
-                    if event.is_terminal()
-                        && Some(status.execution_id.as_str()) == source_execution.as_deref()
-                        && pending.as_ref().is_some_and(matches_owner) =>
-                {
-                    *pending = None;
-                }
-                Ok(event)
-                    if !source_has_runtime_status
-                        && event.is_terminal()
+                    if newly_validated_terminal
+                        && event.is_execution_terminal()
+                        && Some(status.execution_id.as_str()) == matched_execution
                         && pending.as_ref().is_some_and(matches_owner) =>
                 {
                     *pending = None;
@@ -874,8 +903,27 @@ impl AgentTurnDriver {
             }
         })
         .fuse();
+        // 复用已核验的原 source projection；主投递与 raw drain 固定同一首次原因。
+        // delivery 只描述 sink，不能覆盖真实 native 取消/失败或更早 producer 原因。
+        let source_terminal_cause = || -> echo_core::error::Result<Option<TurnOutcome>> {
+            source_projection
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .0
+                .terminal_failure()
+                .as_ref()
+                .map(|error| {
+                    AgentFailure::try_from(error).map(|failure| {
+                        if failure.terminal_kind == echo_core::error::AgentTerminalKind::Cancelled {
+                            TurnOutcome::Cancelled
+                        } else {
+                            TurnOutcome::Failed(failure)
+                        }
+                    })
+                })
+                .transpose()
+        };
         let mut outcome: Option<TurnOutcome> = None;
-        let mut native_execution = false;
         let mut native_failure: Option<TurnOutcome> = None;
         let mut delivery = TurnDeliveryOutcome::NotAttempted;
         let mut final_answer: Option<String> = None;
@@ -899,7 +947,13 @@ impl AgentTurnDriver {
                 Err(error) => {
                     match AgentFailure::try_from(&error) {
                         Ok(failure) => {
-                            let cause = TurnOutcome::Failed(failure);
+                            let cause = if failure.terminal_kind
+                                == echo_core::error::AgentTerminalKind::Cancelled
+                            {
+                                TurnOutcome::Cancelled
+                            } else {
+                                TurnOutcome::Failed(failure)
+                            };
                             outcome = Some(native_failure.get_or_insert(cause).clone());
                         }
                         Err(error) => {
@@ -917,9 +971,11 @@ impl AgentTurnDriver {
             last_event_sequence = envelope.sequence;
             match &envelope.payload {
                 AgentEvent::ExecutionStatus(_) => {
-                    native_execution = true;
                     if let Some(terminal) = TurnOutcome::classify(&envelope.payload) {
-                        outcome = Some(native_failure.take().unwrap_or(terminal));
+                        if let Some(cause) = source_terminal_cause()? {
+                            native_failure.get_or_insert(cause);
+                        }
+                        outcome = Some(native_failure.as_ref().cloned().unwrap_or(terminal));
                     }
                 }
                 AgentEvent::LlmUsage {
@@ -936,9 +992,6 @@ impl AgentTurnDriver {
                 }
                 AgentEvent::FinalAnswer(answer) => {
                     if outcome.is_none() {
-                        if !native_execution {
-                            outcome = Some(TurnOutcome::Completed);
-                        }
                         final_answer = Some(answer.clone());
                         final_message_id = envelope.message_id.clone();
                     }
@@ -947,11 +1000,8 @@ impl AgentTurnDriver {
                     compaction_count = compaction_count.saturating_add(1);
                 }
                 AgentEvent::Cancelled => {
-                    if native_execution {
-                        native_failure.get_or_insert(TurnOutcome::Cancelled);
-                    } else {
-                        outcome.get_or_insert(TurnOutcome::Cancelled);
-                    }
+                    let cause = native_failure.get_or_insert(TurnOutcome::Cancelled).clone();
+                    outcome = Some(cause);
                 }
                 AgentEvent::Error { failure, .. } => {
                     let failure_outcome = if failure.terminal_kind
@@ -962,9 +1012,7 @@ impl AgentTurnDriver {
                         TurnOutcome::Failed(failure.clone())
                     };
                     let cause = native_failure.get_or_insert(failure_outcome).clone();
-                    if !native_execution {
-                        outcome.get_or_insert(cause);
-                    }
+                    outcome = Some(cause);
                 }
                 _ => {}
             }
@@ -975,7 +1023,7 @@ impl AgentTurnDriver {
                 Ok(SinkControl::Closed) => {
                     delivery = TurnDeliveryOutcome::Closed;
                     token.cancel();
-                    if outcome.is_none() && !native_execution {
+                    if outcome.is_none() {
                         outcome = Some(TurnOutcome::Cancelled);
                     }
                     break;
@@ -1009,12 +1057,15 @@ impl AgentTurnDriver {
         while let Some(item) = raw.next().await {
             // 仍读同一原source，保首个producer原因；尾部不是新的投递，不增加序号。
             match &item {
-                Ok(event @ AgentEvent::ExecutionStatus(status)) => {
+                Ok(event @ AgentEvent::ExecutionStatus(_)) => {
                     if let Some(terminal) = TurnOutcome::classify(event) {
-                        let preserve_delivery_cause = status.adapter_generated
-                            && matches!(delivery, TurnDeliveryOutcome::Failed(_))
-                            && final_answer.is_none()
-                            && matches!(outcome, Some(TurnOutcome::Failed(_)));
+                        if let Some(cause) = source_terminal_cause()? {
+                            native_failure.get_or_insert(cause);
+                        }
+                        let preserve_delivery_cause =
+                            matches!(delivery, TurnDeliveryOutcome::Failed(_))
+                                && final_answer.is_none()
+                                && matches!(outcome, Some(TurnOutcome::Failed(_)));
                         if let Some(cause) = native_failure.as_ref() {
                             outcome = Some(cause.clone());
                         } else if !preserve_delivery_cause {
@@ -1072,6 +1123,33 @@ impl AgentTurnDriver {
             return Err(error);
         }
 
+        {
+            let mut projection = source_projection
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            let contract_error = projection.1.take();
+            // 缺 native settlement 不得成功；只有 sink 首因且没有原生终态失败时，
+            // 普通 typed cancellation 或 generic missing-terminal 不改写该先前失败。
+            let preserve_delivery_cause = contract_error.is_none()
+                && native_failure.is_none()
+                && matches!(delivery, TurnDeliveryOutcome::Failed(_))
+                && matches!(outcome, Some(TurnOutcome::Failed(_)));
+            let contract_error = contract_error.or_else(|| projection.0.finish().err());
+            if let Some(error) = contract_error {
+                let failure = AgentFailure::try_from(&error)?;
+                let refusal =
+                    if failure.terminal_kind == echo_core::error::AgentTerminalKind::Cancelled {
+                        TurnOutcome::Cancelled
+                    } else {
+                        TurnOutcome::Failed(failure)
+                    };
+                if let Some(cause) = native_failure.take() {
+                    outcome = Some(cause);
+                } else if !preserve_delivery_cause {
+                    outcome = Some(refusal);
+                }
+            }
+        }
         let outcome = outcome.unwrap_or_else(|| {
             TurnOutcome::Failed(AgentFailure::message(
                 "other",
@@ -1108,7 +1186,7 @@ impl AgentTurnDriver {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use echo_core::agent::AgentEvent;
+    use echo_core::agent::{AgentEvent, ExecutionStatusKind};
     use futures::future::BoxFuture;
     use futures::stream::BoxStream;
     use std::sync::Arc;
@@ -1116,11 +1194,12 @@ mod tests {
     use std::sync::atomic::Ordering;
     use std::time::Duration as StdDuration;
 
-    /// 每次调用重建同一 raw 脚本；可选延迟用于观察流中的取消。
+    /// 每个脚本显式声明原生状态；source 不从正文或 EOF 推断成功。
     struct ScriptedAgent {
         name: &'static str,
         script: fn() -> Vec<AgentEvent>,
         delay: Option<StdDuration>,
+        cancelled_tail: bool,
     }
 
     impl ScriptedAgent {
@@ -1129,56 +1208,73 @@ mod tests {
                 name: "scripted",
                 script,
                 delay: None,
+                cancelled_tail: false,
             }
         }
-
         fn with_delay(mut self, delay: StdDuration) -> Self {
             self.delay = Some(delay);
             self
         }
-    }
-
-    impl Agent for ScriptedAgent {
-        fn name(&self) -> &str {
-            self.name
+        fn with_cancelled_tail(mut self) -> Self {
+            self.cancelled_tail = true;
+            self
         }
-
-        fn model_name(&self) -> &str {
-            "test-model"
-        }
-
-        fn system_prompt(&self) -> &str {
-            ""
-        }
-
-        fn execute<'a>(
+        fn source<'a>(
             &'a self,
-            _task: &'a str,
-        ) -> BoxFuture<'a, echo_core::error::Result<String>> {
-            Box::pin(async { Ok(String::new()) })
-        }
-
-        fn execute_stream<'a>(
-            &'a self,
-            _task: &'a str,
+            message: Message,
+            cancel: CancellationToken,
+            invocation: AgentInvocationContext,
         ) -> BoxFuture<
             'a,
             echo_core::error::Result<BoxStream<'a, echo_core::error::Result<AgentEvent>>>,
         > {
-            let script = self.script;
-            let delay = self.delay;
             Box::pin(async move {
-                let stream = futures::stream::iter((script)().into_iter().map(Ok));
-                match delay {
-                    None => Ok(stream.boxed()),
-                    Some(delay) => Ok(stream
-                        .then(move |item| async move {
-                            tokio::time::sleep(delay).await;
-                            item
-                        })
-                        .boxed()),
-                }
+                let source = async_stream::stream! {
+                    let _retained_input_and_resources = (message, invocation);
+                    for event in (self.script)() {
+                        if let Some(delay) = self.delay { tokio::time::sleep(delay).await; }
+                        yield Ok(event);
+                    }
+                    if self.cancelled_tail {
+                        cancel.cancelled().await;
+                        yield Ok(native_status("scripted", ExecutionStatusKind::Cancelled, 1));
+                    }
+                };
+                Ok(source.boxed())
             })
+        }
+    }
+    impl Agent for ScriptedAgent {
+        fn name(&self) -> &str {
+            self.name
+        }
+        fn model_name(&self) -> &str {
+            "test-model"
+        }
+        fn system_prompt(&self) -> &str {
+            ""
+        }
+        fn execute_stream_message_with_invocation_context<'a>(
+            &'a self,
+            message: Message,
+            cancel: CancellationToken,
+            invocation: AgentInvocationContext,
+        ) -> BoxFuture<
+            'a,
+            echo_core::error::Result<BoxStream<'a, echo_core::error::Result<AgentEvent>>>,
+        > {
+            self.source(message, cancel, invocation)
+        }
+        fn chat_stream_message_with_invocation_context<'a>(
+            &'a self,
+            message: Message,
+            cancel: CancellationToken,
+            invocation: AgentInvocationContext,
+        ) -> BoxFuture<
+            'a,
+            echo_core::error::Result<BoxStream<'a, echo_core::error::Result<AgentEvent>>>,
+        > {
+            self.source(message, cancel, invocation)
         }
     }
 
@@ -1188,54 +1284,32 @@ mod tests {
         fn name(&self) -> &str {
             "immediate-drain"
         }
-
         fn model_name(&self) -> &str {
             "test-model"
         }
-
         fn system_prompt(&self) -> &str {
             ""
         }
-
-        fn execute<'a>(
-            &'a self,
-            _task: &'a str,
-        ) -> BoxFuture<'a, echo_core::error::Result<String>> {
-            Box::pin(async { Ok(String::new()) })
-        }
-
-        fn execute_stream<'a>(
-            &'a self,
-            _task: &'a str,
-        ) -> BoxFuture<
-            'a,
-            echo_core::error::Result<BoxStream<'a, echo_core::error::Result<AgentEvent>>>,
-        > {
-            Box::pin(async {
-                Ok(
-                    futures::stream::iter([Ok(AgentEvent::FinalAnswer("done".to_string()))])
-                        .boxed(),
-                )
-            })
-        }
-
         fn chat_stream_message_with_invocation_context<'a>(
             &'a self,
-            _message: Message,
+            message: Message,
             _cancel: CancellationToken,
             invocation: AgentInvocationContext,
         ) -> BoxFuture<
             'a,
             echo_core::error::Result<BoxStream<'a, echo_core::error::Result<AgentEvent>>>,
         > {
-            if let Some(lifecycle) = invocation.input_lifecycle {
+            if let Some(lifecycle) = invocation.input_lifecycle.as_ref() {
                 lifecycle.mark_drained();
             }
-            Box::pin(async {
-                Ok(
-                    futures::stream::iter([Ok(AgentEvent::FinalAnswer("done".to_string()))])
-                        .boxed(),
-                )
+            Box::pin(async move {
+                Ok(async_stream::stream! {
+                    let _retained_input_and_resources = (message, invocation);
+                    yield Ok(native_status("immediate-drain", ExecutionStatusKind::Started, 0));
+                    yield Ok(AgentEvent::FinalAnswer("done".to_string()));
+                    yield Ok(native_status("immediate-drain", ExecutionStatusKind::Settled, 1));
+                }
+                .boxed())
             })
         }
     }
@@ -1246,32 +1320,12 @@ mod tests {
         fn name(&self) -> &str {
             "pending"
         }
-
         fn model_name(&self) -> &str {
             "test-model"
         }
-
         fn system_prompt(&self) -> &str {
             ""
         }
-
-        fn execute<'a>(
-            &'a self,
-            _task: &'a str,
-        ) -> BoxFuture<'a, echo_core::error::Result<String>> {
-            Box::pin(std::future::pending())
-        }
-
-        fn execute_stream<'a>(
-            &'a self,
-            _task: &'a str,
-        ) -> BoxFuture<
-            'a,
-            echo_core::error::Result<BoxStream<'a, echo_core::error::Result<AgentEvent>>>,
-        > {
-            Box::pin(std::future::pending())
-        }
-
         fn chat_stream_message_with_invocation_context<'a>(
             &'a self,
             _message: Message,
@@ -1281,7 +1335,24 @@ mod tests {
             'a,
             echo_core::error::Result<BoxStream<'a, echo_core::error::Result<AgentEvent>>>,
         > {
-            Box::pin(std::future::pending())
+            Box::pin(async move {
+                let _retained_input_and_resources = (_message, _cancel, _invocation);
+                std::future::pending().await
+            })
+        }
+        fn execute_stream_message_with_invocation_context<'a>(
+            &'a self,
+            _message: Message,
+            _cancel: CancellationToken,
+            _invocation: AgentInvocationContext,
+        ) -> BoxFuture<
+            'a,
+            echo_core::error::Result<BoxStream<'a, echo_core::error::Result<AgentEvent>>>,
+        > {
+            Box::pin(async move {
+                let _retained_input_and_resources = (_message, _cancel, _invocation);
+                std::future::pending().await
+            })
         }
     }
 
@@ -1330,7 +1401,7 @@ mod tests {
                 | ExecutionStatusKind::Candidate => "runtime_progress",
             },
             AgentEvent::LlmUsage { .. } => "usage",
-            AgentEvent::Token(_) => "token",
+            AgentEvent::AssistantMessage { .. } => "assistant",
             AgentEvent::FinalAnswer(_) => "final_answer",
             AgentEvent::Error { .. } => "error",
             AgentEvent::Cancelled => "cancelled_projection",
@@ -1454,6 +1525,23 @@ mod tests {
         }
     }
 
+    /// fixture 的独立 commentary block；不携带完成或取消含义。
+    fn commentary(text: String) -> AgentEvent {
+        AgentEvent::AssistantMessage {
+            block: echo_core::agent::AssistantMessageBlock {
+                provider_source: None,
+                block_id: format!("commentary:{text}"),
+                request_id: "fixture-response".into(),
+                sequence: 0,
+                phase: echo_core::agent::AssistantPhase::Commentary,
+                delta: text,
+                complete: true,
+                provider: None,
+                reasoning: None,
+            },
+        }
+    }
+
     fn native_status(
         execution: &str,
         kind: echo_core::agent::ExecutionStatusKind,
@@ -1497,9 +1585,8 @@ mod tests {
         Ok((invocation, capacity, drops))
     }
 
-    fn identity(label: &str) -> EventIdentity {
+    fn identity(label: &str) -> echo_core::error::Result<EventIdentity> {
         EventIdentity::new(format!("stream-{label}"), format!("turn-{label}"))
-            .expect("valid identity")
     }
 
     fn usage_event(prompt: usize, completion: usize) -> AgentEvent {
@@ -1507,7 +1594,7 @@ mod tests {
             model: "test-model".to_string(),
             prompt_tokens: prompt,
             completion_tokens: completion,
-            total_tokens: prompt + completion,
+            total_tokens: prompt.saturating_add(completion),
             cached_prompt_tokens: 0,
             cache_creation_prompt_tokens: 0,
             usage_reported: true,
@@ -1518,7 +1605,7 @@ mod tests {
     async fn tracked_initial_input_uses_immediate_agent_context_drain()
     -> echo_core::error::Result<()> {
         let (request, mut input) =
-            TurnRequest::new(identity("initial-immediate"), "hello").with_input_receipt();
+            TurnRequest::new(identity("initial-immediate")?, "hello").with_input_receipt();
         assert_eq!(input.state(), TurnInputState::Pending);
         let receipt = AgentTurnDriver
             .drive(&ImmediateDrainAgent, request, &RecordingSink::default())
@@ -1537,12 +1624,18 @@ mod tests {
     #[tokio::test]
     async fn tracked_initial_input_without_agent_publisher_keeps_no_drain()
     -> echo_core::error::Result<()> {
-        let (request, mut input) = TurnRequest::new(identity("initial-generic"), "hello")
+        let (request, mut input) = TurnRequest::new(identity("initial-generic")?, "hello")
             .mode(TurnMode::Execute)
             .with_input_receipt();
         let receipt = AgentTurnDriver
             .drive(
-                &ScriptedAgent::new(|| vec![AgentEvent::FinalAnswer("done".to_string())]),
+                &ScriptedAgent::new(|| {
+                    let mut events =
+                        vec![native_status("scripted", ExecutionStatusKind::Started, 0)];
+                    events.extend(vec![AgentEvent::FinalAnswer("done".to_string())]);
+                    events.push(native_status("scripted", ExecutionStatusKind::Settled, 1));
+                    events
+                }),
                 request,
                 &RecordingSink::default(),
             )
@@ -1562,7 +1655,7 @@ mod tests {
     async fn tracked_initial_input_publishes_accepted_before_stream_call()
     -> echo_core::error::Result<()> {
         let (request, input) =
-            TurnRequest::new(identity("initial-accepted"), "hello").with_input_receipt();
+            TurnRequest::new(identity("initial-accepted")?, "hello").with_input_receipt();
         let sink = RecordingSink::default();
         let mut drive = Box::pin(AgentTurnDriver.drive(&PendingAgent, request, &sink));
         assert!(matches!(
@@ -1580,12 +1673,18 @@ mod tests {
     #[tokio::test]
     async fn tracked_initial_input_cancelled_terminal_is_typed_without_drain()
     -> echo_core::error::Result<()> {
-        let (request, mut input) = TurnRequest::new(identity("initial-cancelled"), "hello")
+        let (request, mut input) = TurnRequest::new(identity("initial-cancelled")?, "hello")
             .mode(TurnMode::Execute)
             .with_input_receipt();
         let receipt = AgentTurnDriver
             .drive(
-                &ScriptedAgent::new(|| vec![AgentEvent::Cancelled]),
+                &ScriptedAgent::new(|| {
+                    let mut events =
+                        vec![native_status("scripted", ExecutionStatusKind::Started, 0)];
+                    events.extend(vec![AgentEvent::Cancelled]);
+                    events.push(native_status("scripted", ExecutionStatusKind::Cancelled, 1));
+                    events
+                }),
                 request,
                 &RecordingSink::default(),
             )
@@ -1604,7 +1703,7 @@ mod tests {
     #[tokio::test]
     async fn tracked_initial_input_start_failure_is_typed_without_drain()
     -> echo_core::error::Result<()> {
-        let (request, mut input) = TurnRequest::new(identity("initial-failed"), "hello")
+        let (request, mut input) = TurnRequest::new(identity("initial-failed")?, "hello")
             .mode(TurnMode::Execute)
             .with_input_receipt();
         let receipt = AgentTurnDriver
@@ -1624,12 +1723,18 @@ mod tests {
     #[tokio::test]
     async fn tracked_initial_input_terminal_sink_failure_keeps_execution_terminal()
     -> echo_core::error::Result<()> {
-        let (request, mut input) = TurnRequest::new(identity("initial-sink-failed"), "hello")
+        let (request, mut input) = TurnRequest::new(identity("initial-sink-failed")?, "hello")
             .mode(TurnMode::Execute)
             .with_input_receipt();
         let receipt = AgentTurnDriver
             .drive(
-                &ScriptedAgent::new(|| vec![AgentEvent::FinalAnswer("done".to_string())]),
+                &ScriptedAgent::new(|| {
+                    let mut events =
+                        vec![native_status("scripted", ExecutionStatusKind::Started, 0)];
+                    events.extend(vec![AgentEvent::FinalAnswer("done".to_string())]);
+                    events.push(native_status("scripted", ExecutionStatusKind::Settled, 1));
+                    events
+                }),
                 request,
                 &FailingSink,
             )
@@ -1649,10 +1754,16 @@ mod tests {
     #[tokio::test]
     async fn completed_turn_maps_final_answer_and_sequences_from_one()
     -> echo_core::error::Result<()> {
-        let agent =
-            ScriptedAgent::new(|| vec![usage_event(10, 5), AgentEvent::FinalAnswer("done".into())]);
+        let agent = ScriptedAgent::new(|| {
+            vec![
+                native_status("scripted", ExecutionStatusKind::Started, 0),
+                usage_event(10, 5),
+                AgentEvent::FinalAnswer("done".into()),
+                native_status("scripted", ExecutionStatusKind::Settled, 1),
+            ]
+        });
         let sink = RecordingSink::default();
-        let id = identity("ok");
+        let id = identity("ok")?;
         let receipt = AgentTurnDriver
             .drive(&agent, TurnRequest::new(id.clone(), "hello"), &sink)
             .await?;
@@ -1666,7 +1777,7 @@ mod tests {
             .envelopes
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        // 既有 default legacy adapter 在同一原 source 前后发布 Started / Settled。
+        // 同一脚本 source 显式发布 Started / Settled，正文不决定完成。
         assert_delivery_trace(
             &envelopes,
             &id,
@@ -1703,7 +1814,7 @@ mod tests {
         });
         let sink = RecordingSink::default();
         let receipt = AgentTurnDriver
-            .drive(&agent, TurnRequest::new(identity("native"), "run"), &sink)
+            .drive(&agent, TurnRequest::new(identity("native")?, "run"), &sink)
             .await?;
         assert_eq!(receipt.outcome, TurnOutcome::Completed);
         assert_eq!(receipt.final_answer.as_deref(), Some("native done"));
@@ -1759,7 +1870,7 @@ mod tests {
         let receipt = AgentTurnDriver
             .drive(
                 &agent,
-                TurnRequest::new(identity("native-closed"), "run"),
+                TurnRequest::new(identity("native-closed")?, "run"),
                 &sink,
             )
             .await?;
@@ -1781,9 +1892,15 @@ mod tests {
 
     #[tokio::test]
     async fn execute_mode_maps_cancelled_terminal() -> echo_core::error::Result<()> {
-        let agent: Arc<dyn Agent> = Arc::new(ScriptedAgent::new(|| vec![AgentEvent::Cancelled]));
+        let agent: Arc<dyn Agent> = Arc::new(ScriptedAgent::new(|| {
+            vec![
+                native_status("scripted", ExecutionStatusKind::Started, 0),
+                AgentEvent::Cancelled,
+                native_status("scripted", ExecutionStatusKind::Cancelled, 1),
+            ]
+        }));
         let sink = RecordingSink::default();
-        let request = TurnRequest::new(identity("cancel"), "task").mode(TurnMode::Execute);
+        let request = TurnRequest::new(identity("cancel")?, "task").mode(TurnMode::Execute);
         let receipt = AgentTurnDriver
             .drive(agent.as_ref(), request, &sink)
             .await?;
@@ -1798,13 +1915,17 @@ mod tests {
     async fn error_terminal_maps_typed_failure() -> echo_core::error::Result<()> {
         let failure = AgentFailure::try_from(&ReactError::Other("boom".to_string()))?;
         let agent: Arc<dyn Agent> = Arc::new(ScriptedAgent::new(|| {
-            vec![AgentEvent::Error {
-                source: "test".to_string(),
-                message: "boom".to_string(),
-                failure: AgentFailure::message("other", "boom"),
-            }]
+            vec![
+                native_status("scripted", ExecutionStatusKind::Started, 0),
+                AgentEvent::Error {
+                    source: "test".to_string(),
+                    message: "boom".to_string(),
+                    failure: AgentFailure::message("other", "boom"),
+                },
+                native_status("scripted", ExecutionStatusKind::Failed, 1),
+            ]
         }));
-        let request = TurnRequest::new(identity("fail"), "hello");
+        let request = TurnRequest::new(identity("fail")?, "hello");
         let receipt = AgentTurnDriver
             .drive(agent.as_ref(), request, &RecordingSink::default())
             .await?;
@@ -1818,12 +1939,14 @@ mod tests {
     async fn usage_accumulates_across_provider_calls() -> echo_core::error::Result<()> {
         let agent: Arc<dyn Agent> = Arc::new(ScriptedAgent::new(|| {
             vec![
+                native_status("scripted", ExecutionStatusKind::Started, 0),
                 usage_event(100, 40),
                 usage_event(7, 3),
                 AgentEvent::FinalAnswer("summed".to_string()),
+                native_status("scripted", ExecutionStatusKind::Settled, 1),
             ]
         }));
-        let request = TurnRequest::new(identity("usage"), "hello");
+        let request = TurnRequest::new(identity("usage")?, "hello");
         let receipt = AgentTurnDriver
             .drive(agent.as_ref(), request, &RecordingSink::default())
             .await?;
@@ -1837,6 +1960,7 @@ mod tests {
     async fn receipt_owns_final_message_and_compaction_facts() -> Result<(), String> {
         let agent: Arc<dyn Agent> = Arc::new(ScriptedAgent::new(|| {
             vec![
+                native_status("scripted", ExecutionStatusKind::Started, 0),
                 AgentEvent::ContextCompressed {
                     before_count: 12,
                     after_count: 5,
@@ -1850,6 +1974,7 @@ mod tests {
                     after_tokens: 400,
                 },
                 AgentEvent::FinalAnswer("finished".to_string()),
+                native_status("scripted", ExecutionStatusKind::Settled, 1),
             ]
         }));
         let identity = EventIdentity::for_chat(
@@ -1883,7 +2008,13 @@ mod tests {
     #[tokio::test]
     async fn failed_terminal_delivery_keeps_final_completion_facts() -> Result<(), String> {
         for at_projection in [false, true] {
-            let agent = ScriptedAgent::new(|| vec![AgentEvent::FinalAnswer("undelivered".into())]);
+            let agent = ScriptedAgent::new(|| {
+                vec![
+                    native_status("scripted", ExecutionStatusKind::Started, 0),
+                    AgentEvent::FinalAnswer("undelivered".into()),
+                    native_status("scripted", ExecutionStatusKind::Settled, 1),
+                ]
+            });
             let id = EventIdentity::for_chat(
                 Some("conversation-delivery-failure".into()),
                 "turn-delivery-failure",
@@ -1942,11 +2073,17 @@ mod tests {
     #[tokio::test]
     async fn cancelled_terminal_delivery_keeps_execution_terminal() -> echo_core::error::Result<()>
     {
-        let agent: Arc<dyn Agent> = Arc::new(ScriptedAgent::new(|| vec![AgentEvent::Cancelled]));
+        let agent: Arc<dyn Agent> = Arc::new(ScriptedAgent::new(|| {
+            vec![
+                native_status("scripted", ExecutionStatusKind::Started, 0),
+                AgentEvent::Cancelled,
+                native_status("scripted", ExecutionStatusKind::Cancelled, 1),
+            ]
+        }));
         let receipt = AgentTurnDriver
             .drive(
                 agent.as_ref(),
-                TurnRequest::new(identity("cancel-delivery-failure"), "hello"),
+                TurnRequest::new(identity("cancel-delivery-failure")?, "hello"),
                 &FailingSink,
             )
             .await?;
@@ -1962,13 +2099,17 @@ mod tests {
             let producer_failure =
                 AgentFailure::try_from(&ReactError::Other("producer boom".to_string()))?;
             let agent = ScriptedAgent::new(|| {
-                vec![AgentEvent::Error {
-                    source: "producer".into(),
-                    message: "producer boom".into(),
-                    failure: AgentFailure::message("other", "producer boom"),
-                }]
+                vec![
+                    native_status("scripted", ExecutionStatusKind::Started, 0),
+                    AgentEvent::Error {
+                        source: "producer".into(),
+                        message: "producer boom".into(),
+                        failure: AgentFailure::message("other", "producer boom"),
+                    },
+                    native_status("scripted", ExecutionStatusKind::Failed, 1),
+                ]
             });
-            let id = identity("error-delivery-failure");
+            let id = identity("error-delivery-failure")?;
             let target: fn(&AgentEvent) -> bool = if before_error {
                 |event| {
                     matches!(event, AgentEvent::ExecutionStatus(status)
@@ -2025,9 +2166,15 @@ mod tests {
     #[tokio::test]
     async fn resumed_sequencing_continues_after_persisted_sequence() -> echo_core::error::Result<()>
     {
-        let agent = ScriptedAgent::new(|| vec![AgentEvent::Cancelled]);
+        let agent = ScriptedAgent::new(|| {
+            vec![
+                native_status("scripted", ExecutionStatusKind::Started, 0),
+                AgentEvent::Cancelled,
+                native_status("scripted", ExecutionStatusKind::Cancelled, 1),
+            ]
+        });
         let sink = RecordingSink::default();
-        let id = identity("resume");
+        let id = identity("resume")?;
         let receipt = AgentTurnDriver
             .drive(
                 &agent,
@@ -2063,23 +2210,23 @@ mod tests {
     async fn closed_sink_cancels_and_yields_cancelled_terminal() -> echo_core::error::Result<()> {
         let agent: Arc<dyn Agent> = Arc::new(
             ScriptedAgent::new(|| {
-                (0..5)
-                    .map(|index| AgentEvent::Token(format!("t{index}")))
-                    .chain(std::iter::once(AgentEvent::FinalAnswer("late".to_string())))
-                    .collect()
+                vec![
+                    native_status("scripted", ExecutionStatusKind::Started, 0),
+                    commentary("before cancellation".to_string()),
+                ]
             })
-            .with_delay(StdDuration::from_millis(5)),
+            .with_delay(StdDuration::from_millis(5))
+            .with_cancelled_tail(),
         );
         let sink = RecordingSink {
             close_after: Some(1),
             ..RecordingSink::default()
         };
-        let request = TurnRequest::new(identity("closed"), "hello");
+        let request = TurnRequest::new(identity("closed")?, "hello");
         let receipt = AgentTurnDriver
             .drive(agent.as_ref(), request, &sink)
             .await?;
-        // The default cancellation wrapper yields Cancelled once the token
-        // fires and the stream stops delivering later events.
+        // sink 关闭后，同一个脚本 source 观察原 token 并发布自己的 Cancelled。
         assert_eq!(receipt.outcome, TurnOutcome::Cancelled);
         assert_eq!(receipt.delivery, TurnDeliveryOutcome::Closed);
         Ok(())
@@ -2087,8 +2234,14 @@ mod tests {
 
     #[tokio::test]
     async fn terminal_closed_sink_keeps_completed_execution() -> echo_core::error::Result<()> {
-        let agent = ScriptedAgent::new(|| vec![AgentEvent::FinalAnswer("done".into())]);
-        let id = identity("terminal-closed");
+        let agent = ScriptedAgent::new(|| {
+            vec![
+                native_status("scripted", ExecutionStatusKind::Started, 0),
+                AgentEvent::FinalAnswer("done".into()),
+                native_status("scripted", ExecutionStatusKind::Settled, 1),
+            ]
+        });
+        let id = identity("terminal-closed")?;
         let sink = SemanticSink::new(AgentEvent::is_execution_terminal, true);
         let receipt = AgentTurnDriver
             .drive(&agent, TurnRequest::new(id.clone(), "hello"), &sink)
@@ -2111,7 +2264,7 @@ mod tests {
         effect: std::path::PathBuf,
         observation_consumed: tokio::sync::Notify,
         terminal_consumed: tokio::sync::Notify,
-        terminal: fn() -> Option<AgentEvent>,
+        has_terminal: bool,
     }
 
     struct ObservationResource {
@@ -2151,15 +2304,11 @@ mod tests {
         fn system_prompt(&self) -> &str {
             ""
         }
-        fn execute<'a>(
+        fn execute_stream_message_with_invocation_context<'a>(
             &'a self,
-            _task: &'a str,
-        ) -> BoxFuture<'a, echo_core::error::Result<String>> {
-            Box::pin(async { Err(pending_observation()) })
-        }
-        fn execute_stream<'a>(
-            &'a self,
-            _task: &'a str,
+            message: Message,
+            cancel: CancellationToken,
+            invocation: AgentInvocationContext,
         ) -> BoxFuture<
             'a,
             echo_core::error::Result<BoxStream<'a, echo_core::error::Result<AgentEvent>>>,
@@ -2169,35 +2318,30 @@ mod tests {
                     return Err(pending_observation());
                 }
                 let stream = async_stream::stream! {
+                    let _retained_input_and_resources = (message, invocation);
+                    yield Ok(native_status("original-observed-attempt", ExecutionStatusKind::Started, 0));
                     if let Some(physical) = self.physical.as_ref()
                         && let Err(error) = tokio::fs::write(&physical.effect, b"original-source-entered").await
-                    {
-                        yield Err(ReactError::Other(error.to_string()));
-                        return;
-                    }
-                    if self.stream_observation {
-                        yield Err(pending_observation());
-                    } else {
-                        yield Ok(AgentEvent::Token("before observation".to_string()));
-                    }
-                    if let Some(physical) = self.physical.as_ref() {
-                        physical.observation_consumed.notify_one();
-                    }
+                    { yield Err(ReactError::Other(error.to_string())); return; }
+                    if self.stream_observation { yield Err(pending_observation()); }
+                    else { yield Ok(commentary("before observation".to_string())); }
+                    if let Some(physical) = self.physical.as_ref() { physical.observation_consumed.notify_one(); }
                     self.release_terminal.notified().await;
-                    let terminal = self.physical.as_ref()
-                        .map(|physical| (physical.terminal)())
-                        .unwrap_or_else(|| Some(AgentEvent::FinalAnswer("later terminal".to_string())));
-                    if let Some(terminal) = terminal { yield Ok(terminal); }
-                    if let Some(physical) = self.physical.as_ref() {
-                        physical.terminal_consumed.notify_one();
+                    // has_terminal 是 fixture 声明的真实 source 事实，不由 final 文本推断。
+                    if self.physical.as_ref().is_none_or(|physical| physical.has_terminal) {
+                        if cancel.is_cancelled() {
+                            yield Ok(AgentEvent::Cancelled);
+                            yield Ok(native_status("original-observed-attempt", ExecutionStatusKind::Cancelled, 1));
+                        } else {
+                            yield Ok(AgentEvent::FinalAnswer("later terminal".to_string()));
+                            yield Ok(native_status("original-observed-attempt", ExecutionStatusKind::Settled, 1));
+                        }
                     }
+                    if let Some(physical) = self.physical.as_ref() { physical.terminal_consumed.notify_one(); }
                     self.release_eof.notified().await;
                     if let Some(physical) = self.physical.as_ref()
                         && let Err(error) = tokio::fs::write(&physical.effect, b"original-source-physically-closed").await
-                    {
-                        yield Err(ReactError::Other(error.to_string()));
-                        return;
-                    }
+                    { yield Err(ReactError::Other(error.to_string())); return; }
                     self.raw_closed.store(true, Ordering::SeqCst);
                 };
                 Ok(stream.boxed())
@@ -2276,11 +2420,7 @@ mod tests {
             effect: directory.path().join("original-source-effect.txt"),
             observation_consumed: tokio::sync::Notify::new(),
             terminal_consumed: tokio::sync::Notify::new(),
-            terminal: if has_terminal {
-                || Some(AgentEvent::FinalAnswer("later terminal".to_string()))
-            } else {
-                || None
-            },
+            has_terminal,
         });
         let agent = Arc::new(ObservationAgent {
             physical: Some(physical.clone()),
@@ -2313,7 +2453,7 @@ mod tests {
         };
         let cancel = CancellationToken::new();
         let (request, mut input) = TurnRequest::new(
-            identity("matching-live-source")
+            identity("matching-live-source")?
                 .with_run_id("original-observed-run")?
                 .with_execution_id(if matching_identity {
                     "original-observed-attempt"
@@ -2477,7 +2617,7 @@ mod tests {
             raw_closed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         };
         let sink = RecordingSink::default();
-        let (request, input) = TurnRequest::new(identity("setup-observation"), "task")
+        let (request, input) = TurnRequest::new(identity("setup-observation")?, "task")
             .mode(TurnMode::Execute)
             .with_input_receipt();
         let result = AgentTurnDriver.drive(&agent, request, &sink).await;
@@ -2517,9 +2657,8 @@ mod tests {
             };
             let sink = ObservationSink;
             let request =
-                TurnRequest::new(identity("held-observation"), "task").mode(TurnMode::Execute);
-            // Exercise both real default trait wrappers. Neither wrapper's
-            // projected EOF may substitute for the held producer's closure.
+                TurnRequest::new(identity("held-observation")?, "task").mode(TurnMode::Execute);
+            // 默认 invocation 与显式 invocation 都保留同一 producer，直到原 EOF。
             let request = if retain_invocation {
                 request.invocation(AgentInvocationContext::default())
             } else {
@@ -2555,7 +2694,7 @@ mod tests {
                 raw_closed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             };
             let sink = ObservationSink;
-            let (request, input) = TurnRequest::new(identity("held-input-observation"), "task")
+            let (request, input) = TurnRequest::new(identity("held-input-observation")?, "task")
                 .mode(TurnMode::Execute)
                 .with_input_receipt();
             let mut drive = Box::pin(AgentTurnDriver.drive(&agent, request, &sink));
@@ -2598,7 +2737,7 @@ mod tests {
     async fn closed_input_watch_preserves_pending_and_drained_without_terminal_synthesis()
     -> echo_core::error::Result<()> {
         for drained in [false, true] {
-            let identity = identity("closed-input")
+            let identity = identity("closed-input")?
                 .with_run_id("original-closed-run")?
                 .with_execution_id("original-closed-attempt")?;
             let (input, lifecycle) = TurnInputReceipt::new(&identity);
@@ -2633,8 +2772,16 @@ mod tests {
     impl EventSink for ObservedTerminalSink {
         async fn on_event(&self, envelope: EventEnvelope) -> echo_core::error::Result<SinkControl> {
             let terminal = match envelope.payload {
-                AgentEvent::Cancelled => Some("cancelled"),
-                AgentEvent::FinalAnswer(_) => Some("completed"),
+                AgentEvent::ExecutionStatus(status)
+                    if status.status == ExecutionStatusKind::Cancelled =>
+                {
+                    Some("cancelled")
+                }
+                AgentEvent::ExecutionStatus(status)
+                    if status.status == ExecutionStatusKind::Settled =>
+                {
+                    Some("completed")
+                }
                 _ => None,
             };
             if let Some(terminal) = terminal {
@@ -2648,7 +2795,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn default_agent_terminal_delivery_waits_for_original_raw_eof_before_receipt()
+    async fn native_source_terminal_delivery_waits_for_original_raw_eof_before_receipt()
     -> echo_core::error::Result<()> {
         for cancelled in [true, false] {
             let agent = ObservationAgent {
@@ -2661,7 +2808,7 @@ mod tests {
             };
             let sink = RecordingSink::default();
             let cancel = CancellationToken::new();
-            let id = identity("held-terminal");
+            let id = identity("held-terminal")?;
             let (invocation, capacity, drops) = guarded_invocation().await?;
             let (request, input) = TurnRequest::new(id.clone(), "task")
                 .mode(TurnMode::Execute)
@@ -2678,7 +2825,12 @@ mod tests {
                 assert!(futures::poll!(drive.as_mut()).is_pending());
             }
             let expected_status = if cancelled { "cancelled" } else { "completed" };
-            // 默认适配器缓冲 legacy final 到原 EOF，不能提前发布物理完成。
+            // 原生 source 可以发布正文和 terminal；receipt 仍必须等原 EOF。
+            let held_trace: &[&str] = if cancelled {
+                &["started", "assistant"]
+            } else {
+                &["started", "assistant", "final_answer", "settled"]
+            };
             assert_delivery_trace(
                 &sink
                     .envelopes
@@ -2686,7 +2838,7 @@ mod tests {
                     .unwrap_or_else(|error| error.into_inner()),
                 &id,
                 0,
-                &["started", "token"],
+                held_trace,
             )?;
             assert!(!agent.raw_closed.load(Ordering::SeqCst));
             assert_eq!(capacity.available_permits(), 0);
@@ -2719,12 +2871,12 @@ mod tests {
             let expected = if cancelled {
                 [
                     "started",
-                    "token",
+                    "assistant",
                     "cancelled_projection",
                     "runtime_cancelled",
                 ]
             } else {
-                ["started", "token", "final_answer", "settled"]
+                ["started", "assistant", "final_answer", "settled"]
             };
             assert_delivery_trace(
                 &sink
@@ -2744,7 +2896,6 @@ mod tests {
     }
 
     struct TailObservationAgent {
-        native_projection: bool,
         terminal_execution_id: Option<&'static str>,
         release_physical_terminal: tokio::sync::Notify,
         release_terminal: tokio::sync::Notify,
@@ -2763,25 +2914,21 @@ mod tests {
         fn system_prompt(&self) -> &str {
             ""
         }
-        fn execute<'a>(
+
+        fn execute_stream_message_with_invocation_context<'a>(
             &'a self,
-            _task: &'a str,
-        ) -> BoxFuture<'a, echo_core::error::Result<String>> {
-            Box::pin(async { Err(pending_observation()) })
-        }
-        fn execute_stream<'a>(
-            &'a self,
-            _task: &'a str,
+            message: Message,
+            _cancel: CancellationToken,
+            invocation: AgentInvocationContext,
         ) -> BoxFuture<
             'a,
             echo_core::error::Result<BoxStream<'a, echo_core::error::Result<AgentEvent>>>,
         > {
             Box::pin(async move {
                 Ok(async_stream::stream! {
-                    if self.native_projection {
-                        yield Ok(native_status("original-observed-attempt", echo_core::agent::ExecutionStatusKind::Started, 0));
-                    }
-                    yield Ok(AgentEvent::Token("before terminal".to_string()));
+                    let _retained_input_and_resources = (message, invocation);
+                    yield Ok(native_status("original-observed-attempt", ExecutionStatusKind::Started, 0));
+                    yield Ok(commentary("before terminal".to_string()));
                     self.release_terminal.notified().await;
                     yield Ok(AgentEvent::FinalAnswer("original terminal".to_string()));
                     self.release_observation.notified().await;
@@ -2798,82 +2945,13 @@ mod tests {
         }
     }
 
-    // 借用同一个原 source 与 Notify，既不复制执行器也不创建第二 owner。
-    struct DirectNativeSource<'a>(&'a dyn Agent);
-
-    impl Agent for DirectNativeSource<'_> {
-        fn name(&self) -> &str {
-            self.0.name()
-        }
-        fn model_name(&self) -> &str {
-            self.0.model_name()
-        }
-        fn system_prompt(&self) -> &str {
-            self.0.system_prompt()
-        }
-        fn execute<'a>(&'a self, task: &'a str) -> BoxFuture<'a, echo_core::error::Result<String>> {
-            self.0.execute(task)
-        }
-        fn execute_stream<'a>(
-            &'a self,
-            task: &'a str,
-        ) -> BoxFuture<
-            'a,
-            echo_core::error::Result<BoxStream<'a, echo_core::error::Result<AgentEvent>>>,
-        > {
-            self.0.execute_stream(task)
-        }
-
-        fn execute_stream_with_invocation_context<'a>(
-            &'a self,
-            task: &'a str,
-            _cancel: CancellationToken,
-            invocation: AgentInvocationContext,
-        ) -> BoxFuture<
-            'a,
-            echo_core::error::Result<BoxStream<'a, echo_core::error::Result<AgentEvent>>>,
-        > {
-            // 原生 producer 直接返回同一原流；仅持有 invocation，不走 legacy 缓冲。
-            Box::pin(async move {
-                let raw = self.0.execute_stream(task).await?;
-                Ok(raw
-                    .map(move |item| {
-                        let _keep = &invocation;
-                        item
-                    })
-                    .boxed())
-            })
-        }
-        fn execute_stream_message_with_invocation_context<'a>(
-            &'a self,
-            _message: Message,
-            _cancel: CancellationToken,
-            invocation: AgentInvocationContext,
-        ) -> BoxFuture<
-            'a,
-            echo_core::error::Result<BoxStream<'a, echo_core::error::Result<AgentEvent>>>,
-        > {
-            // 本 source 不消费正文；结构化入口也持有原 invocation 到原 EOF。
-            Box::pin(async move {
-                let raw = self.0.execute_stream("").await?;
-                Ok(raw
-                    .map(move |item| {
-                        let _keep = &invocation;
-                        item
-                    })
-                    .boxed())
-            })
-        }
-    }
-
     #[tokio::test]
     async fn late_cleanup_observation_prevents_receipt_after_delivered_terminal()
     -> echo_core::error::Result<()> {
-        for native_projection in [false, true] {
+        for structured_input in [false, true] {
             for matching_identity in [false, true] {
                 for cancelled in [true, false] {
                     let agent = TailObservationAgent {
-                        native_projection,
                         terminal_execution_id: None,
                         release_physical_terminal: tokio::sync::Notify::new(),
                         release_terminal: tokio::sync::Notify::new(),
@@ -2884,14 +2962,14 @@ mod tests {
                     let sink = RecordingSink::default();
                     let cancel = CancellationToken::new();
                     let id = if matching_identity {
-                        identity("late-cleanup-observation")
+                        identity("late-cleanup-observation")?
                             .with_run_id("original-observed-run")?
                             .with_execution_id("original-observed-attempt")?
                     } else {
-                        identity("late-cleanup-observation")
+                        identity("late-cleanup-observation")?
                     };
                     let (invocation, capacity, drops) = guarded_invocation().await?;
-                    let initial = if native_projection {
+                    let initial = if structured_input {
                         TurnRequest::from_message(id.clone(), Message::user("task".to_string()))
                     } else {
                         TurnRequest::new(id.clone(), "task")
@@ -2904,9 +2982,7 @@ mod tests {
                     if !cancelled {
                         agent.release_terminal.notify_one();
                     }
-                    let native = DirectNativeSource(&agent);
-                    let source: &dyn Agent = if native_projection { &native } else { &agent };
-                    let mut drive = Box::pin(AgentTurnDriver.drive(source, request, &sink));
+                    let mut drive = Box::pin(AgentTurnDriver.drive(&agent, request, &sink));
                     assert!(futures::poll!(drive.as_mut()).is_pending());
                     if cancelled {
                         cancel.cancel();
@@ -2914,12 +2990,8 @@ mod tests {
                         agent.release_terminal.notify_one();
                         assert!(futures::poll!(drive.as_mut()).is_pending());
                     }
-                    // 原生路径必须确实交付过正文投影；legacy 路径必须仍缓冲它。
-                    let expected = if native_projection {
-                        vec!["started", "token", "final_answer"]
-                    } else {
-                        vec!["started", "token"]
-                    };
+                    // 两种输入都调用同一原生 source，确认正文不代表物理完成。
+                    let expected = vec!["started", "assistant", "final_answer"];
                     assert_delivery_trace(
                         &sink
                             .envelopes
@@ -2981,34 +3053,33 @@ mod tests {
         fn name(&self) -> &str {
             "failing"
         }
-
         fn model_name(&self) -> &str {
             "test-model"
         }
-
         fn system_prompt(&self) -> &str {
             ""
         }
-
-        fn execute<'a>(
+        fn chat_stream_message_with_invocation_context<'a>(
             &'a self,
-            _task: &'a str,
-        ) -> BoxFuture<'a, echo_core::error::Result<String>> {
-            Box::pin(async { Ok(String::new()) })
-        }
-
-        fn execute_stream<'a>(
-            &'a self,
-            _task: &'a str,
+            _message: Message,
+            _cancel: CancellationToken,
+            _invocation: AgentInvocationContext,
         ) -> BoxFuture<
             'a,
             echo_core::error::Result<BoxStream<'a, echo_core::error::Result<AgentEvent>>>,
         > {
-            Box::pin(async {
-                Err(echo_core::error::ReactError::Other(
-                    "stream could not start".to_string(),
-                ))
-            })
+            Box::pin(async move { Err(ReactError::Other("stream could not start".to_string())) })
+        }
+        fn execute_stream_message_with_invocation_context<'a>(
+            &'a self,
+            _message: Message,
+            _cancel: CancellationToken,
+            _invocation: AgentInvocationContext,
+        ) -> BoxFuture<
+            'a,
+            echo_core::error::Result<BoxStream<'a, echo_core::error::Result<AgentEvent>>>,
+        > {
+            Box::pin(async move { Err(ReactError::Other("stream could not start".to_string())) })
         }
     }
 
@@ -3018,30 +3089,38 @@ mod tests {
         fn name(&self) -> &str {
             "cancelled-start"
         }
-
         fn model_name(&self) -> &str {
             "test-model"
         }
-
         fn system_prompt(&self) -> &str {
             ""
         }
-
-        fn execute<'a>(
+        fn chat_stream_message_with_invocation_context<'a>(
             &'a self,
-            _task: &'a str,
-        ) -> BoxFuture<'a, echo_core::error::Result<String>> {
-            Box::pin(async { Ok(String::new()) })
-        }
-
-        fn execute_stream<'a>(
-            &'a self,
-            _task: &'a str,
+            _message: Message,
+            _cancel: CancellationToken,
+            _invocation: AgentInvocationContext,
         ) -> BoxFuture<
             'a,
             echo_core::error::Result<BoxStream<'a, echo_core::error::Result<AgentEvent>>>,
         > {
-            Box::pin(async {
+            Box::pin(async move {
+                Err(echo_core::error::AgentError::Cancelled(
+                    "cancelled before stream start".to_string(),
+                )
+                .into())
+            })
+        }
+        fn execute_stream_message_with_invocation_context<'a>(
+            &'a self,
+            _message: Message,
+            _cancel: CancellationToken,
+            _invocation: AgentInvocationContext,
+        ) -> BoxFuture<
+            'a,
+            echo_core::error::Result<BoxStream<'a, echo_core::error::Result<AgentEvent>>>,
+        > {
+            Box::pin(async move {
                 Err(echo_core::error::AgentError::Cancelled(
                     "cancelled before stream start".to_string(),
                 )
@@ -3053,7 +3132,7 @@ mod tests {
     #[tokio::test]
     async fn stream_start_failure_maps_to_failed_receipt() -> echo_core::error::Result<()> {
         let agent: Arc<dyn Agent> = Arc::new(FailingAgent);
-        let request = TurnRequest::new(identity("startfail"), "hello");
+        let request = TurnRequest::new(identity("startfail")?, "hello");
         let sink = RecordingSink::default();
         let receipt = AgentTurnDriver
             .drive(agent.as_ref(), request, &sink)
@@ -3073,7 +3152,7 @@ mod tests {
 
     #[tokio::test]
     async fn stream_start_cancellation_maps_to_cancelled_receipt() -> echo_core::error::Result<()> {
-        let (request, mut input) = TurnRequest::new(identity("start-cancelled"), "hello")
+        let (request, mut input) = TurnRequest::new(identity("start-cancelled")?, "hello")
             .mode(TurnMode::Execute)
             .with_input_receipt();
         let sink = RecordingSink::default();
@@ -3100,7 +3179,7 @@ mod tests {
         let receipt = AgentTurnDriver
             .drive(
                 &FailingAgent,
-                TurnRequest::new(identity("start-delivery-failure"), "hello"),
+                TurnRequest::new(identity("start-delivery-failure")?, "hello"),
                 &FailingSink,
             )
             .await?;
@@ -3130,19 +3209,32 @@ mod tests {
 
     #[tokio::test]
     async fn sink_failure_is_failed_not_cancelled() -> echo_core::error::Result<()> {
-        let agent = ScriptedAgent::new(|| {
-            vec![
-                AgentEvent::Token("partial".into()),
-                AgentEvent::FinalAnswer("must not win".into()),
-            ]
-        });
-        let id = identity("sink-failure");
+        let cancel = CancellationToken::new();
+        let agent = CancelledTailAgent {
+            typed_error_tail: true,
+            cancel: cancel.clone(),
+            release_eof: tokio::sync::Notify::new(),
+            cancel_seen: std::sync::atomic::AtomicBool::new(false),
+            typed_cancel_emitted: std::sync::atomic::AtomicBool::new(false),
+            raw_closed: std::sync::atomic::AtomicBool::new(false),
+            slots: Arc::new(tokio::sync::Semaphore::new(1)),
+            drops: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            original_status: Mutex::new(None),
+        };
+        agent.release_eof.notify_one();
+        let id = identity("sink-failure")?;
         let sink = SemanticSink::new(
-            |event| matches!(event, AgentEvent::Token(text) if text == "partial"),
+            |event| matches!(event, AgentEvent::AssistantMessage { block } if block.delta == "partial"),
             false,
         );
         let receipt = AgentTurnDriver
-            .drive(&agent, TurnRequest::new(id.clone(), "hello"), &sink)
+            .drive(
+                &agent,
+                TurnRequest::new(id.clone(), "hello")
+                    .mode(TurnMode::Execute)
+                    .cancel(cancel.clone()),
+                &sink,
+            )
             .await?;
         let failure = AgentFailure::message("other", "injected durable sink failure");
         assert_eq!(receipt.outcome, TurnOutcome::Failed(failure.clone()));
@@ -3150,6 +3242,19 @@ mod tests {
         assert!(receipt.final_answer.is_none());
         assert_eq!(receipt.last_event_sequence, 2);
         assert_eq!(sink.hits.load(Ordering::SeqCst), 1);
+        assert!(cancel.is_cancelled());
+        assert!(agent.cancel_seen.load(Ordering::SeqCst));
+        assert!(agent.typed_cancel_emitted.load(Ordering::SeqCst));
+        assert!(agent.raw_closed.load(Ordering::SeqCst));
+        assert_eq!(agent.slots.available_permits(), 1);
+        assert_eq!(agent.drops.load(Ordering::SeqCst), 1);
+        assert!(
+            agent
+                .original_status
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .is_none()
+        );
         assert_delivery_trace(
             &sink
                 .recording
@@ -3158,7 +3263,7 @@ mod tests {
                 .unwrap_or_else(|error| error.into_inner()),
             &id,
             0,
-            &["started", "token"],
+            &["started", "assistant"],
         )?;
         Ok(())
     }
@@ -3229,11 +3334,13 @@ mod tests {
                 *self
                     .working_dir
                     .lock()
-                    .unwrap_or_else(|error| error.into_inner()) = invocation.working_dir;
-                Ok(
-                    futures::stream::iter([Ok(AgentEvent::FinalAnswer("message-ok".to_string()))])
-                        .boxed(),
-                )
+                    .unwrap_or_else(|error| error.into_inner()) = invocation.working_dir.clone();
+                Ok(async_stream::stream! {
+                    let _retained_input_and_resources = (message, invocation);
+                    yield Ok(native_status("invocation-recording", ExecutionStatusKind::Started, 0));
+                    yield Ok(AgentEvent::FinalAnswer("message-ok".to_string()));
+                    yield Ok(native_status("invocation-recording", ExecutionStatusKind::Settled, 1));
+                }.boxed())
             })
         }
     }
@@ -3262,7 +3369,7 @@ mod tests {
         message.assistant_blocks = Some(Vec::new());
         message.approved_assistant_blocks = Some(Vec::new());
         let expected = serde_json::to_value(&message)?;
-        let request = TurnRequest::from_message(identity("boxed-message-payload"), message);
+        let request = TurnRequest::from_message(identity("boxed-message-payload")?, message);
         let TurnInput::Message(boxed) = request.input else {
             return Err("structured input lost its message payload".into());
         };
@@ -3280,7 +3387,7 @@ mod tests {
         let agent = Arc::new(InvocationRecordingAgent::default());
         let expected = std::path::PathBuf::from("/tmp/eko-turn-driver-test");
         let request = TurnRequest::from_message(
-            identity("message-invocation"),
+            identity("message-invocation")?,
             Message::user("hello".to_string()),
         )
         .invocation(AgentInvocationContext {
@@ -3307,7 +3414,7 @@ mod tests {
     -> echo_core::error::Result<()> {
         let agent = Arc::new(InvocationRecordingAgent::default());
         let expected = std::path::PathBuf::from("/tmp/eko-text-chat-test");
-        let request = TurnRequest::new(identity("text-invocation"), "text hello").invocation(
+        let request = TurnRequest::new(identity("text-invocation")?, "text hello").invocation(
             AgentInvocationContext {
                 working_dir: Some(expected.clone()),
                 ..AgentInvocationContext::default()
@@ -3342,7 +3449,7 @@ mod tests {
         let agent = Arc::new(InvocationRecordingAgent::default());
         let invocation_only = CancellationToken::new();
         invocation_only.cancel();
-        let first = TurnRequest::new(identity("invocation-cancel"), "first").invocation(
+        let first = TurnRequest::new(identity("invocation-cancel")?, "first").invocation(
             AgentInvocationContext {
                 cancel: Some(invocation_only),
                 ..AgentInvocationContext::default()
@@ -3355,7 +3462,7 @@ mod tests {
         let request_cancel = CancellationToken::new();
         let shadowed_invocation_cancel = CancellationToken::new();
         shadowed_invocation_cancel.cancel();
-        let second = TurnRequest::new(identity("request-cancel"), "second")
+        let second = TurnRequest::new(identity("request-cancel")?, "second")
             .invocation(AgentInvocationContext {
                 cancel: Some(shadowed_invocation_cancel),
                 ..AgentInvocationContext::default()
@@ -3398,9 +3505,11 @@ mod tests {
     {
         let agent: Arc<dyn Agent> = Arc::new(ScriptedAgent::new(|| {
             vec![
-                AgentEvent::Token("one".to_string()),
-                AgentEvent::Token("two".to_string()),
+                native_status("scripted", ExecutionStatusKind::Started, 0),
+                commentary("one".to_string()),
+                commentary("two".to_string()),
                 AgentEvent::FinalAnswer("done".to_string()),
+                native_status("scripted", ExecutionStatusKind::Settled, 1),
             ]
         }));
         let sink = DelayedSink {
@@ -3414,7 +3523,7 @@ mod tests {
             progressed.store(true, Ordering::SeqCst);
         });
 
-        let id = identity("async-sink");
+        let id = identity("async-sink")?;
         let receipt = AgentTurnDriver
             .drive(agent.as_ref(), TurnRequest::new(id.clone(), "hello"), &sink)
             .await?;
@@ -3432,7 +3541,13 @@ mod tests {
             &sink.envelopes.lock().await,
             &id,
             0,
-            &["started", "token", "token", "final_answer", "settled"],
+            &[
+                "started",
+                "assistant",
+                "assistant",
+                "final_answer",
+                "settled",
+            ],
         )?;
         let tokens: Vec<_> = sink
             .envelopes
@@ -3440,7 +3555,7 @@ mod tests {
             .await
             .iter()
             .filter_map(|event| match &event.payload {
-                AgentEvent::Token(text) => Some(text.clone()),
+                AgentEvent::AssistantMessage { block } => Some(block.delta.clone()),
                 _ => None,
             })
             .collect();
@@ -3451,9 +3566,12 @@ mod tests {
     #[tokio::test]
     async fn missing_terminal_is_a_failed_receipt() -> echo_core::error::Result<()> {
         let agent: Arc<dyn Agent> = Arc::new(ScriptedAgent::new(|| {
-            vec![AgentEvent::Token("partial".to_string())]
+            vec![
+                native_status("scripted", ExecutionStatusKind::Started, 0),
+                commentary("partial".to_string()),
+            ]
         }));
-        let request = TurnRequest::new(identity("noterminal"), "hello");
+        let request = TurnRequest::new(identity("noterminal")?, "hello");
         let receipt = AgentTurnDriver
             .drive(agent.as_ref(), request, &RecordingSink::default())
             .await?;
@@ -3484,13 +3602,15 @@ mod tests {
         }
         let agent: Arc<dyn Agent> = Arc::new(ScriptedAgent::new(|| {
             vec![
+                native_status("scripted", ExecutionStatusKind::Started, 0),
                 usage_event(7, 3),
-                AgentEvent::Token("t".to_string()),
+                commentary("t".to_string()),
                 AgentEvent::FinalAnswer("fin".to_string()),
+                native_status("scripted", ExecutionStatusKind::Settled, 1),
             ]
         }));
         let sink = OwningSink::default();
-        let id = identity("exactly");
+        let id = identity("exactly")?;
         let request = TurnRequest::new(id.clone(), "hello");
         let receipt = AgentTurnDriver
             .drive(agent.as_ref(), request, &sink)
@@ -3518,7 +3638,7 @@ mod tests {
             &envelopes,
             &id,
             0,
-            &["started", "usage", "token", "final_answer", "settled"],
+            &["started", "usage", "assistant", "final_answer", "settled"],
         )?;
         assert_eq!(envelopes.iter().filter(|event| matches!(&event.payload, AgentEvent::FinalAnswer(answer) if answer == "fin")).count(), 1);
         assert_eq!(receipt.last_event_sequence, 5);
@@ -3526,7 +3646,7 @@ mod tests {
     }
 
     struct CancelledTailAgent {
-        native: bool,
+        typed_error_tail: bool,
         cancel: CancellationToken,
         release_eof: tokio::sync::Notify,
         cancel_seen: std::sync::atomic::AtomicBool,
@@ -3547,19 +3667,11 @@ mod tests {
         fn system_prompt(&self) -> &str {
             ""
         }
-        fn execute<'a>(
+        fn execute_stream_message_with_invocation_context<'a>(
             &'a self,
-            _task: &'a str,
-        ) -> BoxFuture<'a, echo_core::error::Result<String>> {
-            Box::pin(async {
-                Err(ReactError::Agent(Box::new(
-                    echo_core::error::AgentError::Cancelled("original source cancelled".into()),
-                )))
-            })
-        }
-        fn execute_stream<'a>(
-            &'a self,
-            _task: &'a str,
+            message: Message,
+            _cancel: CancellationToken,
+            invocation: AgentInvocationContext,
         ) -> BoxFuture<
             'a,
             echo_core::error::Result<BoxStream<'a, echo_core::error::Result<AgentEvent>>>,
@@ -3575,13 +3687,12 @@ mod tests {
                 };
                 Ok(async_stream::stream! {
                     let _guard = guard;
-                    if self.native {
-                        yield Ok(native_status("native-cancel-tail", echo_core::agent::ExecutionStatusKind::Started, 0));
-                    }
-                    yield Ok(AgentEvent::Token("partial".into()));
+                    let _retained_input_and_resources = (message, invocation);
+                    yield Ok(native_status("native-cancel-tail", ExecutionStatusKind::Started, 0));
+                    yield Ok(commentary("partial".into()));
                     self.cancel.cancelled().await;
                     self.cancel_seen.store(true, Ordering::SeqCst);
-                    if self.native {
+                    if !self.typed_error_tail {
                         let event = native_status("native-cancel-tail", echo_core::agent::ExecutionStatusKind::Cancelled, 1);
                         if let AgentEvent::ExecutionStatus(status) = &event {
                             *self.original_status.lock().unwrap_or_else(|error| error.into_inner()) = Some(status.clone());
@@ -3599,12 +3710,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sink_failure_preserves_legacy_cause_but_accepts_native_cancelled_at_original_eof()
+    async fn sink_failure_preserves_typed_error_cause_and_native_cancelled_at_original_eof()
     -> echo_core::error::Result<()> {
-        for native in [false, true] {
+        for typed_error_tail in [true, false] {
             let cancel = CancellationToken::new();
             let agent = CancelledTailAgent {
-                native,
+                typed_error_tail,
                 cancel: cancel.clone(),
                 release_eof: tokio::sync::Notify::new(),
                 cancel_seen: std::sync::atomic::AtomicBool::new(false),
@@ -3615,17 +3726,15 @@ mod tests {
                 original_status: Mutex::new(None),
             };
             let sink = SemanticSink::new(
-                |event| matches!(event, AgentEvent::Token(text) if text == "partial"),
+                |event| matches!(event, AgentEvent::AssistantMessage { block } if block.delta == "partial"),
                 false,
             );
-            let id = identity("cancelled-tail-cause");
+            let id = identity("cancelled-tail-cause")?;
             let (request, input) = TurnRequest::new(id.clone(), "task")
                 .mode(TurnMode::Execute)
                 .cancel(cancel.clone())
                 .with_input_receipt();
-            let native_source = DirectNativeSource(&agent);
-            let source: &dyn Agent = if native { &native_source } else { &agent };
-            let mut drive = Box::pin(AgentTurnDriver.drive(source, request, &sink));
+            let mut drive = Box::pin(AgentTurnDriver.drive(&agent, request, &sink));
             assert!(futures::poll!(drive.as_mut()).is_pending());
             assert!(cancel.is_cancelled());
             assert!(
@@ -3633,7 +3742,10 @@ mod tests {
                 "sink 失败必须触发同一个原 source 的 typed cancel 尾部"
             );
             assert_eq!(sink.hits.load(Ordering::SeqCst), 1);
-            assert_eq!(agent.typed_cancel_emitted.load(Ordering::SeqCst), !native);
+            assert_eq!(
+                agent.typed_cancel_emitted.load(Ordering::SeqCst),
+                typed_error_tail
+            );
             assert!(!agent.raw_closed.load(Ordering::SeqCst));
             assert_eq!(agent.slots.available_permits(), 0);
             assert_eq!(agent.drops.load(Ordering::SeqCst), 0);
@@ -3646,7 +3758,7 @@ mod tests {
                     .unwrap_or_else(|error| error.into_inner()),
                 &id,
                 0,
-                &["started", "token"],
+                &["started", "assistant"],
             )?;
             assert!(futures::poll!(drive.as_mut()).is_pending());
             assert_eq!(
@@ -3659,7 +3771,7 @@ mod tests {
             let failure = AgentFailure::message("other", "injected durable sink failure");
             assert_eq!(
                 receipt.outcome,
-                if native {
+                if !typed_error_tail {
                     TurnOutcome::Cancelled
                 } else {
                     TurnOutcome::Failed(failure.clone())
@@ -3679,7 +3791,7 @@ mod tests {
                 .original_status
                 .lock()
                 .unwrap_or_else(|error| error.into_inner());
-            if native {
+            if !typed_error_tail {
                 assert!(
                     matches!(original.as_ref(), Some(status) if !status.adapter_generated
                     && status.execution_id == "native-cancel-tail"
@@ -3690,7 +3802,7 @@ mod tests {
             }
             assert!(
                 matches!(input.state(), TurnInputState::TurnSettled { outcome, .. }
-                if outcome == if native { AgentSteerTurnOutcome::Cancelled } else { AgentSteerTurnOutcome::Failed })
+                if outcome == if !typed_error_tail { AgentSteerTurnOutcome::Cancelled } else { AgentSteerTurnOutcome::Failed })
             );
             assert_delivery_trace(
                 &sink
@@ -3700,8 +3812,195 @@ mod tests {
                     .unwrap_or_else(|error| error.into_inner()),
                 &id,
                 0,
-                &["started", "token"],
+                &["started", "assistant"],
             )?;
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn native_failure_then_tail_error_keeps_exact_first_cause_in_delivery_and_raw_drain()
+    -> echo_core::error::Result<()> {
+        struct NativeFailureTail {
+            kind: ExecutionStatusKind,
+            wait_for_cancel: bool,
+            original: Mutex<Option<echo_core::agent::ExecutionStatus>>,
+            eof: std::sync::atomic::AtomicBool,
+        }
+        impl Agent for NativeFailureTail {
+            fn name(&self) -> &str {
+                "native-failure-tail"
+            }
+            fn model_name(&self) -> &str {
+                "test-model"
+            }
+            fn system_prompt(&self) -> &str {
+                ""
+            }
+            fn execute_stream_message_with_invocation_context<'a>(
+                &'a self,
+                message: Message,
+                cancel: CancellationToken,
+                invocation: AgentInvocationContext,
+            ) -> BoxFuture<
+                'a,
+                echo_core::error::Result<BoxStream<'a, echo_core::error::Result<AgentEvent>>>,
+            > {
+                Box::pin(async move {
+                    Ok(async_stream::stream! {
+                        let _retained_input_and_resources = (message, invocation);
+                        yield Ok(native_status("native-failure-tail", ExecutionStatusKind::Started, 0));
+                        yield Ok(commentary("partial".into()));
+                        if self.wait_for_cancel { cancel.cancelled().await; }
+                        let mut terminal = native_status("native-failure-tail", self.kind.clone(), 1);
+                        if let AgentEvent::ExecutionStatus(status) = &mut terminal {
+                            status.reason = Some("original native first cause".into());
+                            *self.original.lock().unwrap_or_else(|error| error.into_inner()) = Some(status.clone());
+                        }
+                        yield Ok(terminal);
+                        yield Err(ReactError::Other("later raw tail failure".into()));
+                        self.eof.store(true, Ordering::SeqCst);
+                    }.boxed())
+                })
+            }
+        }
+        for kind in [ExecutionStatusKind::Cancelled, ExecutionStatusKind::Failed] {
+            for detached in [false, true] {
+                let agent = NativeFailureTail {
+                    kind: kind.clone(),
+                    wait_for_cancel: detached,
+                    original: Mutex::new(None),
+                    eof: std::sync::atomic::AtomicBool::new(false),
+                };
+                let sink = SemanticSink::new(
+                    if detached {
+                        |event| matches!(event, AgentEvent::AssistantMessage { block } if block.delta == "partial")
+                    } else {
+                        |_| false
+                    },
+                    false,
+                );
+                let cancel = CancellationToken::new();
+                let id = identity("native-first-cause")?;
+                let (request, input) = TurnRequest::new(id.clone(), "task")
+                    .mode(TurnMode::Execute)
+                    .cancel(cancel.clone())
+                    .with_input_receipt();
+                let receipt = AgentTurnDriver.drive(&agent, request, &sink).await?;
+                assert!(agent.eof.load(Ordering::SeqCst));
+                let expected = if kind == ExecutionStatusKind::Cancelled {
+                    TurnOutcome::Cancelled
+                } else {
+                    TurnOutcome::Failed(AgentFailure::try_from(&ReactError::Other(
+                        "original native first cause".into(),
+                    ))?)
+                };
+                assert_eq!(receipt.outcome, expected);
+                assert_eq!(
+                    receipt.delivery,
+                    if detached {
+                        TurnDeliveryOutcome::Failed(AgentFailure::message(
+                            "other",
+                            "injected durable sink failure",
+                        ))
+                    } else {
+                        TurnDeliveryOutcome::Delivered
+                    }
+                );
+                assert_eq!(cancel.is_cancelled(), detached);
+                assert_eq!(
+                    sink.hits.load(Ordering::SeqCst),
+                    if detached { 1 } else { 0 }
+                );
+                assert!(receipt.final_answer.is_none());
+                assert!(receipt.final_message_id.is_none());
+                assert_eq!(receipt.last_event_sequence, if detached { 2 } else { 4 });
+                let original = agent
+                    .original
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner());
+                assert!(
+                    matches!(original.as_ref(), Some(status) if !status.adapter_generated
+                    && status.execution_id == "native-failure-tail" && status.sequence == 1
+                    && status.status == kind && status.reason.as_deref() == Some("original native first cause"))
+                );
+                assert!(
+                    matches!(input.state(), TurnInputState::TurnSettled { outcome, drained: false }
+                    if outcome == if kind == ExecutionStatusKind::Cancelled { AgentSteerTurnOutcome::Cancelled } else { AgentSteerTurnOutcome::Failed })
+                );
+                let envelopes = sink
+                    .recording
+                    .envelopes
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner());
+                let expected_trace: &[&str] = if detached {
+                    &["started", "assistant"]
+                } else if kind == ExecutionStatusKind::Cancelled {
+                    &["started", "assistant", "runtime_cancelled", "error"]
+                } else {
+                    &["started", "assistant", "runtime_failed", "error"]
+                };
+                // 此专用轨迹保留 native terminal 后的原 tail Error，不放宽通用 helper。
+                assert_eq!(
+                    envelopes
+                        .iter()
+                        .map(|event| delivery_kind(&event.payload))
+                        .collect::<Vec<_>>(),
+                    expected_trace
+                );
+                let violations = echo_core::agent::validate_envelope_trajectory(&envelopes);
+                assert!(violations.is_empty(), "{violations:?}");
+                assert_eq!(
+                    envelopes.first().map(|event| (
+                        &event.stream_id,
+                        &event.turn_id,
+                        &event.conversation_id,
+                        &event.run_id,
+                        &event.execution_id,
+                        &event.message_id,
+                    )),
+                    Some((
+                        &id.stream_id,
+                        &id.turn_id,
+                        &id.conversation_id,
+                        &id.run_id,
+                        &id.execution_id,
+                        &id.message_id,
+                    ))
+                );
+                assert_eq!(
+                    envelopes
+                        .iter()
+                        .map(|event| event.sequence)
+                        .collect::<Vec<_>>(),
+                    if detached {
+                        vec![1, 2]
+                    } else {
+                        vec![1, 2, 3, 4]
+                    }
+                );
+                let terminals: Vec<_> = envelopes
+                    .iter()
+                    .filter(|event| event.payload.is_execution_terminal())
+                    .collect();
+                if detached {
+                    assert!(terminals.is_empty());
+                } else {
+                    assert_eq!(terminals.len(), 1);
+                    assert_eq!(terminals.first().map(|event| event.sequence), Some(3));
+                    assert!(matches!(envelopes.get(2).map(|event| &event.payload),
+                        Some(AgentEvent::ExecutionStatus(status)) if !status.adapter_generated
+                        && status.execution_id == "native-failure-tail" && status.sequence == 1
+                        && status.status == kind && status.reason.as_deref() == Some("original native first cause")));
+                    let expected_tail_failure = AgentFailure::try_from(&ReactError::Other(
+                        "later raw tail failure".into(),
+                    ))?;
+                    assert!(matches!(envelopes.get(3).map(|event| &event.payload),
+                        Some(AgentEvent::Error { source, message, failure })
+                        if source == "agent_stream" && message == "later raw tail failure"
+                        && failure == &expected_tail_failure));
+                }
+            }
         }
         Ok(())
     }
@@ -3711,7 +4010,6 @@ mod tests {
     -> echo_core::error::Result<()> {
         for matching_owner in [false, true] {
             let agent = TailObservationAgent {
-                native_projection: true,
                 terminal_execution_id: Some(if matching_owner {
                     "original-observed-attempt"
                 } else {
@@ -3723,9 +4021,8 @@ mod tests {
                 release_eof: tokio::sync::Notify::new(),
                 raw_closed: std::sync::atomic::AtomicBool::new(false),
             };
-            let source = DirectNativeSource(&agent);
             let sink = RecordingSink::default();
-            let id = identity("native-unknown-owner")
+            let id = identity("native-unknown-owner")?
                 .with_run_id("original-observed-run")?
                 .with_execution_id("original-observed-attempt")?;
 
@@ -3755,7 +4052,7 @@ mod tests {
                     .invocation(invocation)
                     .with_input_receipt();
             agent.release_terminal.notify_one();
-            let mut drive = Box::pin(AgentTurnDriver.drive(&source, request, &sink));
+            let mut drive = Box::pin(AgentTurnDriver.drive(&agent, request, &sink));
             assert!(futures::poll!(drive.as_mut()).is_pending());
             assert_delivery_trace(
                 &sink
@@ -3764,7 +4061,7 @@ mod tests {
                     .unwrap_or_else(|error| error.into_inner()),
                 &id,
                 0,
-                &["started", "token", "final_answer"],
+                &["started", "assistant", "final_answer"],
             )?;
             assert_eq!(input.state(), TurnInputState::Accepted);
             agent.release_observation.notify_one();
@@ -3834,6 +4131,323 @@ mod tests {
                 )
                 .await;
             }
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod canonical_turn_kernel_contract_tests {
+    use super::*;
+    use echo_core::agent::{AgentPhase, ExecutionStatus, ExecutionStatusKind};
+    use futures::future::BoxFuture;
+    use futures::stream::BoxStream;
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    fn status(owner: &str, kind: ExecutionStatusKind, sequence: u64) -> AgentEvent {
+        AgentEvent::ExecutionStatus(ExecutionStatus {
+            adapter_generated: false,
+            execution_id: owner.into(),
+            request_id: Some("request".into()),
+            sequence,
+            phase: AgentPhase::Terminal,
+            status: kind,
+            reason: None,
+        })
+    }
+    struct NativeSource {
+        events: Mutex<Vec<echo_core::error::Result<AgentEvent>>>,
+        typed_calls: AtomicUsize,
+        text_calls: AtomicUsize,
+        seen: Mutex<Option<(Message, AgentInvocationContext)>>,
+        physical_eof: AtomicUsize,
+        owner_drops: AtomicUsize,
+    }
+    impl NativeSource {
+        fn new(events: Vec<echo_core::error::Result<AgentEvent>>) -> Self {
+            Self {
+                events: Mutex::new(events),
+                typed_calls: AtomicUsize::new(0),
+                text_calls: AtomicUsize::new(0),
+                seen: Mutex::new(None),
+                physical_eof: AtomicUsize::new(0),
+                owner_drops: AtomicUsize::new(0),
+            }
+        }
+    }
+    impl Agent for NativeSource {
+        fn name(&self) -> &str {
+            "native-source"
+        }
+        fn model_name(&self) -> &str {
+            "fixture"
+        }
+        fn system_prompt(&self) -> &str {
+            ""
+        }
+        fn execute<'a>(&'a self, _: &'a str) -> BoxFuture<'a, echo_core::error::Result<String>> {
+            Box::pin(async { Err(ReactError::Other("unscoped entry".into())) })
+        }
+        fn execute_stream<'a>(
+            &'a self,
+            _: &'a str,
+        ) -> BoxFuture<
+            'a,
+            echo_core::error::Result<BoxStream<'a, echo_core::error::Result<AgentEvent>>>,
+        > {
+            self.text_calls.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async { Err(ReactError::Other("unscoped source".into())) })
+        }
+        fn execute_stream_message_with_invocation_context<'a>(
+            &'a self,
+            message: Message,
+            _: CancellationToken,
+            invocation: AgentInvocationContext,
+        ) -> BoxFuture<
+            'a,
+            echo_core::error::Result<BoxStream<'a, echo_core::error::Result<AgentEvent>>>,
+        > {
+            self.typed_calls.fetch_add(1, Ordering::SeqCst);
+            *self.seen.lock().unwrap_or_else(|error| error.into_inner()) =
+                Some((message, invocation));
+            let events = std::mem::take(
+                &mut *self
+                    .events
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner()),
+            );
+            Box::pin(async move {
+                struct Guard<'a>(&'a AtomicUsize);
+                impl Drop for Guard<'_> {
+                    fn drop(&mut self) {
+                        self.0.fetch_add(1, Ordering::SeqCst);
+                    }
+                }
+                let source = async_stream::stream! {
+                    let _guard=Guard(&self.owner_drops);
+                    for event in events { yield event; }
+                    self.physical_eof.fetch_add(1,Ordering::SeqCst);
+                };
+                Ok(Box::pin(source) as BoxStream<'a, echo_core::error::Result<AgentEvent>>)
+            })
+        }
+    }
+    #[derive(Default)]
+    struct Sink(Mutex<Vec<EventEnvelope>>);
+    #[async_trait]
+    impl EventSink for Sink {
+        async fn on_event(&self, event: EventEnvelope) -> echo_core::error::Result<SinkControl> {
+            self.0
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .push(event);
+            Ok(SinkControl::Continue)
+        }
+    }
+    fn identity() -> echo_core::error::Result<EventIdentity> {
+        EventIdentity::for_run("run")?.with_execution_id("native-source")
+    }
+    #[tokio::test]
+    async fn canonical_driver_text_uses_typed_input_and_preserves_real_owner_and_usage()
+    -> echo_core::error::Result<()> {
+        let agent = NativeSource::new(vec![
+            Ok(status("native-source", ExecutionStatusKind::Started, 0)),
+            Ok(AgentEvent::LlmUsage {
+                model: "fixture".into(),
+                prompt_tokens: 3,
+                completion_tokens: 5,
+                total_tokens: 8,
+                cached_prompt_tokens: 0,
+                cache_creation_prompt_tokens: 0,
+                usage_reported: true,
+            }),
+            Ok(AgentEvent::FinalAnswer("中文🙂".into())),
+            Ok(status("native-source", ExecutionStatusKind::Settled, 1)),
+        ]);
+        let sink = Sink::default();
+        let receipt = AgentTurnDriver
+            .drive(
+                &agent,
+                TurnRequest::new(identity()?, "same input").mode(TurnMode::Execute),
+                &sink,
+            )
+            .await?;
+        assert!(matches!(receipt.outcome, TurnOutcome::Completed));
+        assert_eq!(receipt.final_answer.as_deref(), Some("中文🙂"));
+        assert_eq!(
+            (
+                receipt.prompt_tokens,
+                receipt.completion_tokens,
+                receipt.llm_calls
+            ),
+            (3, 5, 1)
+        );
+        assert_eq!(agent.typed_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(agent.text_calls.load(Ordering::SeqCst), 0);
+        let seen = agent.seen.lock().unwrap_or_else(|error| error.into_inner());
+        assert!(seen.as_ref().is_some_and(|(message,_)|message.text_content().as_deref()==Some("same input")));
+        assert_eq!(
+            sink.0
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .len(),
+            4
+        );
+        Ok(())
+    }
+    #[test]
+    fn canonical_final_answer_notification_is_not_a_turn_completion() {
+        assert!(TurnOutcome::classify(&AgentEvent::FinalAnswer("confirmed body".into())).is_none());
+    }
+    #[tokio::test]
+    async fn canonical_driver_rejects_final_only_missing_final_and_foreign_owner()
+    -> echo_core::error::Result<()> {
+        let scripts = [
+            vec![Ok(AgentEvent::FinalAnswer("body only".into()))],
+            vec![
+                Ok(status("native-source", ExecutionStatusKind::Started, 0)),
+                Ok(status("native-source", ExecutionStatusKind::Settled, 1)),
+            ],
+            vec![
+                Ok(status("native-source", ExecutionStatusKind::Started, 0)),
+                Ok(AgentEvent::FinalAnswer("body".into())),
+                Ok(status("foreign", ExecutionStatusKind::Settled, 1)),
+            ],
+        ];
+        for events in scripts {
+            let agent = NativeSource::new(events);
+            let request = TurnRequest::from_message(identity()?, Message::user("input".into()))
+                .mode(TurnMode::Execute);
+            let receipt = AgentTurnDriver
+                .drive(&agent, request, &Sink::default())
+                .await?;
+            assert!(!matches!(receipt.outcome, TurnOutcome::Completed));
+            assert!(receipt.final_answer.is_none());
+        }
+        Ok(())
+    }
+    #[tokio::test]
+    async fn canonical_driver_preserves_original_post_terminal_failure_through_eof()
+    -> echo_core::error::Result<()> {
+        let agent = NativeSource::new(vec![
+            Ok(status("native-source", ExecutionStatusKind::Started, 0)),
+            Ok(AgentEvent::FinalAnswer("before tail".into())),
+            Ok(status("native-source", ExecutionStatusKind::Settled, 1)),
+            Err(ReactError::Other("original tail error".into())),
+        ]);
+        let request = TurnRequest::from_message(identity()?, Message::user("input".into()))
+            .mode(TurnMode::Execute);
+        let receipt = AgentTurnDriver
+            .drive(&agent, request, &Sink::default())
+            .await?;
+        assert!(matches!(receipt.outcome, TurnOutcome::Failed(_)));
+        assert!(receipt.final_answer.is_none());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn canonical_driver_binds_unassigned_request_execution_only_from_verified_started()
+    -> echo_core::error::Result<()> {
+        for foreign in [false, true] {
+            let observation_run = if foreign { "foreign-run" } else { "run" };
+            let agent = NativeSource::new(vec![
+                Ok(status("native-source", ExecutionStatusKind::Started, 0)),
+                Err(ReactError::ExecutionNotSettled {
+                    run_id: observation_run.into(),
+                    execution_id: Some("native-source".into()),
+                }),
+                Ok(AgentEvent::FinalAnswer("safe current".into())),
+                Ok(status("native-source", ExecutionStatusKind::Settled, 1)),
+            ]);
+            let identity =
+                EventIdentity::new("original-stream", "original-turn")?.with_run_id("run")?;
+            assert!(identity.execution_id.is_none());
+            let request = TurnRequest::from_message(identity, Message::user("input".into()))
+                .mode(TurnMode::Execute);
+            let result = AgentTurnDriver
+                .drive(&agent, request, &Sink::default())
+                .await;
+            if foreign {
+                assert!(
+                    matches!(result, Err(ReactError::ExecutionNotSettled { run_id, .. }) if run_id=="foreign-run")
+                );
+            } else {
+                assert!(
+                    matches!(result, Ok(receipt) if matches!(receipt.outcome,TurnOutcome::Completed))
+                );
+            }
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn canonical_driver_original_terminal_failure_precedes_late_tail_failure()
+    -> echo_core::error::Result<()> {
+        for kind in [ExecutionStatusKind::Failed, ExecutionStatusKind::Cancelled] {
+            let mut terminal = status("native-source", kind.clone(), 1);
+            if let AgentEvent::ExecutionStatus(status) = &mut terminal {
+                status.reason = Some("original first cause".into());
+            }
+            let agent = NativeSource::new(vec![
+                Ok(status("native-source", ExecutionStatusKind::Started, 0)),
+                Ok(terminal),
+                Err(ReactError::Other("later tail cause".into())),
+            ]);
+            let request = TurnRequest::from_message(identity()?, Message::user("input".into()))
+                .mode(TurnMode::Execute);
+            let receipt = AgentTurnDriver
+                .drive(&agent, request, &Sink::default())
+                .await?;
+            match kind {
+                ExecutionStatusKind::Cancelled => {
+                    assert!(matches!(receipt.outcome, TurnOutcome::Cancelled))
+                }
+                _ => assert!(
+                    matches!(receipt.outcome,TurnOutcome::Failed(failure) if failure.message=="original first cause")
+                ),
+            }
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn canonical_conflicting_or_repeated_terminal_cannot_clear_original_observation()
+    -> echo_core::error::Result<()> {
+        for repeated in [false, true] {
+            let mut events = vec![
+                Ok(status("native-source", ExecutionStatusKind::Started, 0)),
+                Ok(AgentEvent::FinalAnswer("safe current".into())),
+            ];
+            if repeated {
+                events.push(Ok(status("native-source", ExecutionStatusKind::Settled, 1)));
+            }
+            events.push(Err(ReactError::ExecutionNotSettled {
+                run_id: "run".into(),
+                execution_id: Some("native-source".into()),
+            }));
+            events.push(Ok(status(
+                "native-source",
+                ExecutionStatusKind::Settled,
+                if repeated { 1 } else { 0 },
+            )));
+            let source = NativeSource::new(events);
+            let identity =
+                EventIdentity::new("original-stream", "original-turn")?.with_run_id("run")?;
+            assert!(identity.execution_id.is_none());
+            let (request, input) =
+                TurnRequest::from_message(identity, Message::user("current".into()))
+                    .mode(TurnMode::Execute)
+                    .with_input_receipt();
+            let result = AgentTurnDriver
+                .drive(&source, request, &Sink::default())
+                .await;
+            assert!(
+                matches!(result,Err(ReactError::ExecutionNotSettled{run_id,execution_id:Some(execution)}) if run_id=="run"&&execution=="native-source")
+            );
+            assert!(matches!(input.state(), TurnInputState::Accepted));
+            assert_eq!(source.physical_eof.load(Ordering::SeqCst), 1);
+            assert_eq!(source.owner_drops.load(Ordering::SeqCst), 1);
         }
         Ok(())
     }

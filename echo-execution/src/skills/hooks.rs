@@ -1357,12 +1357,25 @@ async fn execute_command_hook(
     }
 
     // -- Fallback: direct process execution (no sandbox) --
+    // 同一动作期限覆盖输入和输出；序列化不持有已启动的子进程。
+    let mut stdin_bytes = serde_json::to_vec(&stdin_json).unwrap_or_default();
+    stdin_bytes.push(b'\n');
+    // 公开注册已校验 timeout <= MAX_HOOK_TIMEOUT；内部输入仍显式拒绝不可表示的期限。
+    let Some(deadline) = tokio::time::Instant::now().checked_add(timeout) else {
+        return hook_execution_message(
+            "Hook command execution failed: timeout deadline is out of range".to_string(),
+        );
+    };
     let (program, args) = build_hook_shell_command(command, shell);
     let mut cmd = tokio::process::Command::new(&program);
     for arg in &args {
         cmd.arg(arg);
     }
     cmd.kill_on_drop(true);
+    // 本地可信命令也须防框架超时后遗留子进程；只清理由本次 spawn 创建的独立组，
+    // 不把宿主或其它 Hook 的进程组误当成这个 Child 的清理对象。
+    #[cfg(unix)]
+    cmd.process_group(0);
 
     if !source_dir.is_empty() && Path::new(source_dir).exists() {
         cmd.current_dir(source_dir);
@@ -1398,15 +1411,50 @@ async fn execute_command_hook(
     };
 
     let mut child = child;
-    if let Some(mut stdin) = child.stdin.take() {
-        use tokio::io::AsyncWriteExt;
-        let json_str = serde_json::to_string(&stdin_json).unwrap_or_default();
-        let _ = stdin.write_all(json_str.as_bytes()).await;
-        let _ = stdin.write_all(b"\n").await;
-        drop(stdin);
-    }
+    let process_group_id = child.id();
+    let stdin = child.stdin.take();
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+    let output = {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let write_input = async move {
+            if let Some(mut stdin) = stdin {
+                // 旧合同允许命令不读输入即正常退出。BrokenPipe 等输入错误不能提前
+                // 丢弃该命令的合法 stdout/exit；输出和原 Child 仍受同一期限观察。
+                let _ = stdin.write_all(&stdin_bytes).await;
+            }
+            Ok::<(), std::io::Error>(())
+        };
+        let read_stdout = async move {
+            let mut bytes = Vec::new();
+            if let Some(mut stdout) = stdout {
+                stdout.read_to_end(&mut bytes).await?;
+            }
+            Ok::<_, std::io::Error>(bytes)
+        };
+        let read_stderr = async move {
+            let mut bytes = Vec::new();
+            if let Some(mut stderr) = stderr {
+                stderr.read_to_end(&mut bytes).await?;
+            }
+            Ok::<_, std::io::Error>(bytes)
+        };
+        let communicate = async {
+            // 同一 future 并行消费双向管道，不另 spawn reader/writer，也不移动 Child。
+            // 首个被观察到的输出/等待 I/O 错误立即结束通信，不能等到 deadline
+            // 后把它归成 timeout；外层仍显式清理同一原 Child 后再返回该错误。
+            let ((), stdout, stderr, status) =
+                tokio::try_join!(write_input, read_stdout, read_stderr, child.wait())?;
+            Ok::<_, std::io::Error>(std::process::Output {
+                stdout,
+                stderr,
+                status,
+            })
+        };
+        tokio::time::timeout_at(deadline, communicate).await
+    };
 
-    match tokio::time::timeout(timeout, child.wait_with_output()).await {
+    match output {
         Ok(Ok(output)) => {
             let stdout = String::from_utf8_lossy(&output.stdout).to_string();
             let stderr = String::from_utf8_lossy(&output.stderr).to_string();
@@ -1429,7 +1477,23 @@ async fn execute_command_hook(
                 error_kind = ?e.kind(),
                 "Hook command execution error"
             );
-            hook_execution_message(format!("Hook command execution failed: {e}"))
+            let cleanup_started = std::time::Instant::now();
+            let cleanup =
+                crate::sandbox::local::cleanup_child_process(&mut child, process_group_id).await;
+            debug!(
+                event = %context.event.as_str(),
+                action = "command",
+                cleanup_elapsed_ms = cleanup_started.elapsed().as_millis(),
+                cleanup_confirmed = cleanup.is_ok(),
+                "Hook original child cleanup observed"
+            );
+            let message = match cleanup {
+                Ok(()) => format!("Hook command execution failed: {e}"),
+                Err(cleanup) => {
+                    format!("Hook command execution failed: {e}; cleanup failed: {cleanup}")
+                }
+            };
+            hook_execution_message(message)
         }
         Err(_) => {
             warn!(
@@ -1438,7 +1502,26 @@ async fn execute_command_hook(
                 timeout_secs = timeout_secs,
                 "Hook command timed out"
             );
-            hook_execution_message(format!("Hook command timed out after {timeout_secs}s"))
+            // 动作期限已到，communicate 的管道 future 已结束；不解析迟到输出。
+            // 复用原显式 kill/wait 合同后才返回，不能以 wrapper 超时冒充物理结算。
+            // 原 helper 的 Child.wait 没有独立期限，因此清理等待可能超过动作期限。
+            let cleanup_started = std::time::Instant::now();
+            let cleanup =
+                crate::sandbox::local::cleanup_child_process(&mut child, process_group_id).await;
+            debug!(
+                event = %context.event.as_str(),
+                action = "command",
+                cleanup_elapsed_ms = cleanup_started.elapsed().as_millis(),
+                cleanup_confirmed = cleanup.is_ok(),
+                "Hook original child cleanup observed"
+            );
+            let message = match cleanup {
+                Ok(()) => format!("Hook command timed out after {timeout_secs}s"),
+                Err(cleanup) => format!(
+                    "Hook command timed out after {timeout_secs}s; cleanup failed: {cleanup}"
+                ),
+            };
+            hook_execution_message(message)
         }
     }
 }

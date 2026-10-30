@@ -20,7 +20,7 @@
 
 > 具名退役：当前源码移除 A2A／LSP 的实现、feature、公开出口和专属示例；
 > ACP、MCP、channels、Task/Subagent、通用工具和存储菜单继续保留。
-> 旧插件 `lsp.yaml` 由原 prepare owner 冻结并明确诊断，不启动服务，也不删除用户文件。
+> 旧插件 `lsp.yaml` 仅保留用户原件；当前prepare不probe、读取、冻结、hash或缓存它，不纳入generation身份、不生成LSP专属诊断，也不启动服务。见[ADR0105](docs/adr/0105-current-config-and-plugin-inputs.md)。
 > 源码同步不代表删后构建、最终锁、SDK正式新Git来源、native或发布资格已通过。
 > 边界和恢复锚点见[ADR0090](docs/adr/0090-a2a-lsp-retirement-contract.md)。
 
@@ -193,7 +193,7 @@ echo-agent ships with **67 registered tools** across 8 crates. The prelude expos
 
 | Feature | Description | API Preview |
 |---------|-------------|-------------|
-| **ReAct Engine** | Thought → Action → Observation loop with CoT | `agent.execute("task").await?` |
+| **ReAct Engine** | 原生模型消息、工具调用与观察的ReAct循环 | `agent.execute("task").await?` |
 | **Tool System** | `#[tool]` macro with auto JSON Schema, timeout + retry | `#[tool(name = "calc")] async fn calc(...)` |
 | **Memory** | `Store` (long-term KV) + `RuntimeStateStore` (crash recovery) + `ConversationStore` (transcript) | `.with_memory_tools(store)` |
 | **Context Compression** | SlidingWindow / LLM Summary / Hybrid | `SlidingWindowCompressor::new(4096)` |
@@ -292,7 +292,7 @@ echo-agent is built around several key concepts that enable flexible, production
 
 ### 1. ReAct Engine — Thought → Action → Observation loop
 
-The foundation of echo-agent is the ReAct (Reasoning + Acting) pattern with built-in Chain-of-Thought prompting. Agents think step-by-step, decide which tool to call, observe results, and continue until they reach a final answer.
+echo-agent复用ReAct主循环处理模型消息、工具调用与观察。Reasoning由明确的provider/model能力和调用配置决定；框架不默认注入强制分析提示。最终候选继续由既有校验、Stop、持久化与执行结算确认。
 
 ```rust,no_run
 use echo_agent::prelude::*;
@@ -349,7 +349,7 @@ Built-in data tools (feature `data`): Polars-powered read/filter/aggregate/stats
 ### 3. Memory — Store + RuntimeStateStore + ConversationStore
 
 - **Store**: Long-term key-value storage with namespace isolation (`InMemoryStore`, `FileStore`, `SqliteStore`)
-- **RuntimeStateStore**: ReAct runtime checkpoint (messages + active skills + blocked reason) for crash recovery (`SqliteRuntimeStateStore`). The public `current_plan` field is retained only for legacy Store round trips; ReactAgent ignores historical values and writes `None` at new safe points.
+- **RuntimeStateStore**：ReAct 运行时检查点保存消息、激活技能、阻塞原因和工作目录，支持合法当前格式的恢复；计划与依赖图由 `TaskRevisionService` 的单一 TaskRun graph 持有，checkpoint 不保存计划副本。
 - **ConversationStore**: User-visible transcript projection, atomically settled with a paired `RuntimeStateStore` before compaction or terminal publication
 
 The raw Store API provides direct KV access; Agent Store tools recall only
@@ -641,30 +641,29 @@ async fn main() -> echo_agent::error::Result<()> {
 }
 ```
 
-### 13. Streaming — Real-time token-by-token output
+### 13. 当前原生流与完整结束
 
-Receive `AgentEvent` streams including tokens, tool calls, and final answers as they happen.
+`chat_stream/execute_stream` 保留流式事件能力；消费者使用当前 `AssistantMessage` /
+`ExecutionStatus` 及公共 `AgentOutputProjection`，runtime `FinalAnswer` 只确认批准正文。
+最终通知不能提前break；同一原source必须读取到物理EOF，处理原错误后才能finish并返回成功。
+推理、进度与正文分开，安全最终正文不漏、不双拼，不从普通String补造结算。
 
-```rust,no_run
-use echo_agent::prelude::*;
-use futures::StreamExt;
+完整消费代码统一维护在已纳Cargo example编译链的
+[demo17_chat](echo-agent-learning/examples/demo17_chat.rs)，避免README另写一套状态机。
+配置模型后可手动运行：
 
-#[tokio::main]
-async fn main() -> echo_agent::error::Result<()> {
-    let agent = ReactAgentBuilder::new()
-        .model("qwen3.7-max")
-        .build()?;
-    let mut stream = agent.execute_stream("Explain quantum entanglement").await?;
-    while let Some(event) = stream.next().await {
-        match event? {
-            AgentEvent::Token(t) => print!("{t}"),
-            AgentEvent::FinalAnswer(a) => { println!("\n{a}"); break; }
-            _ => {}
-        }
-    }
-    Ok(())
-}
+```bash
+cargo run -p echo-agent-learning --example demo17_chat
 ```
+
+例子的默认main只选Part4比较；要实际观察流式输出，请在同文件main启用Part3的
+`demo_chat_stream()`。这里保留原默认行为，不自动增加模型调用次数。
+
+当前入门文档的同类片段纳入workspace-only learning crate的`no_run` rustdoc编译链，
+本地 `scripts/verify.sh` 显式执行 `cargo test -p echo-agent-learning --doc --all-features --locked`，
+CI learning 组按既有默认 feature 运行 `cargo test -p echo-agent-learning --doc --locked`；
+`--all-targets` 本身不运行 doctest。
+[原生协议说明](docs/zh/43-native-message-execution.md)解释结果、显示与物理结算的区别。
 
 ### 14. Structured Output — LLM responses to typed Rust structs
 
@@ -842,8 +841,8 @@ struct MyCallback;
 
 #[callback]
 impl MyCallback {
-    async fn on_tool_start(&self, _agent: &str, tool: &str, _args: &serde_json::Value) {
-        println!("[tool] {tool}");
+    async fn on_tool_start_with_id(&self, _agent: &str, call_id: &str, tool: &str, _args: &serde_json::Value) {
+        println!("[tool:{call_id}] {tool}");
     }
 }
 ```
@@ -1050,7 +1049,7 @@ small public-facade composition example:
 
 ## Compatibility
 
-Any **OpenAI-compatible** API, plus native Anthropic and Ollama:
+直接适配的 wire 协议为 **OpenAI Chat Completions、OpenAI Responses 和 Anthropic Messages**。其它服务按其实际兼容端点和模型能力显式配置；协议、provider、完整端点与模型事实分别保留。
 
 | Provider | Endpoint | Notes |
 |----------|---------|-------|
@@ -1058,8 +1057,11 @@ Any **OpenAI-compatible** API, plus native Anthropic and Ollama:
 | Anthropic | `https://api.anthropic.com/v1` | Native Claude API |
 | DeepSeek | `https://api.deepseek.com/v1` | DeepSeek-V3/R1 |
 | Alibaba Qwen | `https://dashscope.aliyuncs.com/compatible-mode/v1` | Qwen3-max, Qwen-plus |
-| Ollama (local) | `http://localhost:11434` | Native protocol |
+| Ollama（OpenAI兼容接入） | `http://localhost:11434/v1/` | 显式选择 Chat Completions；具体模型与字段支持须核对 |
 | LM Studio | `http://localhost:1234/v1` | Any GGUF model |
+
+Ollama 原生聊天使用 `/api/chat` 与 NDJSON，OpenAI 兼容聊天使用 `/v1/chat/completions`；本表按后者接入。Thinking／`think` 参数是所选协议内的模型配置，不构成第四种 wire adapter，也不表示全部 OpenAI 功能均受支持。参见 [Ollama 官方兼容说明](https://docs.ollama.com/api/openai-compatibility) 与 [原生聊天接口](https://docs.ollama.com/api/chat)。
+
 
 ---
 

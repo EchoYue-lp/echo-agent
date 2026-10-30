@@ -169,44 +169,66 @@ let graph = GraphBuilder::new("parallel_processing")
 
 ---
 
-## Streaming Events
+## 流式事件与原 source EOF
 
 ```rust
-let mut stream = graph.run_stream(state).await?;
+use echo_agent::error::ReactError;
+use echo_agent::workflow::WorkflowEvent;
+use futures::StreamExt;
 
+let mut stream = graph.run_stream(state).await?;
+let mut first_error = None;
+let mut unresolved = None;
+let mut completed = None;
 while let Some(event) = stream.next().await {
-    match event? {
-        WorkflowEvent::NodeStart { node_name, step_index } => {
-            println!("▶ Starting node: {} (step {})", node_name, step_index);
+    match event {
+        Ok(WorkflowEvent::NodeStart { node_name, step_index }) => {
+            println!("▶ 开始节点: {node_name} (步骤 {step_index})");
         }
-        WorkflowEvent::NodeEnd { node_name, step_index, elapsed } => {
-            println!("✓ Completed: {} in {:?}", node_name, elapsed);
+        Ok(WorkflowEvent::NodeEnd { node_name, elapsed, .. }) => {
+            println!("✓ 完成节点: {node_name} 耗时 {elapsed:?}");
         }
-        WorkflowEvent::Token { node_name, token } => {
-            print!("{}", token);  // Stream tokens from agent nodes
+        Ok(WorkflowEvent::Token { token, .. }) => print!("{token}"),
+        Ok(WorkflowEvent::NodeError { node_name, error }) => {
+            eprintln!("✗ 节点错误 {node_name}: {error}");
         }
-        WorkflowEvent::NodeError { node_name, error } => {
-            eprintln!("✗ Error in {}: {}", node_name, error);
+        Ok(WorkflowEvent::Completed { result, total_steps, elapsed }) => {
+            completed = Some((result, total_steps, elapsed));
         }
-        WorkflowEvent::Completed { result, total_steps, elapsed } => {
-            println!("\n=== Workflow completed in {:?} ===", elapsed);
-            println!("Result: {}", result);
+        Err(error @ ReactError::ExecutionNotSettled { .. }) => {
+            unresolved.get_or_insert(error);
         }
+        Err(error) => { first_error.get_or_insert(error); }
     }
 }
+if let Some(error) = unresolved { return Err(error); }
+if let Some(error) = first_error { return Err(error); }
+let (_result, total_steps, elapsed) = completed.ok_or_else(|| {
+    ReactError::Other("工作流原流 EOF 前没有成功完成事实".into())
+})?;
+// 节点正文已通过 Token 投影展示，不再次把完整 result 追加到正文。
+println!("\n工作流完成：{total_steps} 步，耗时 {elapsed:?}");
 ```
 
-`NodeError` is a terminal diagnostic event: the stream emits it before ending
-with the same error and never emits `Completed` after a failed node. When a
-parallel branch fails, the workflow cancels and drains its remaining siblings
-so a hung branch cannot mask the failure or outlive caller cancellation.
-Agent nodes forward `AgentEvent::Token` as `WorkflowEvent::Token`; their final
-answer is committed to `SharedState` before `NodeEnd` is emitted.
+`WorkflowEvent::Token` 保留为当前工作流的派生 UI 文本投影，并不是已退役的
+AgentEvent Token。Agent 节点接纳完整 typed Message/Invocation，读取当前
+`AssistantMessage`，由既有 `AgentOutputProjection` 区分 reasoning 和可见正文；
+Reasoning 不折成工作流答案。它核验同 source 的真实 `ExecutionStatus`、保留 typed
+未结算观察和首因，并继续读取原 Agent source 到物理 EOF。只有 finish 成功后才把
+完整安全最终答案写入 `SharedState`，再由原节点路径发出 `NodeEnd`；缺失、合成或
+foreign 终态不能通过。runtime FinalAnswer 通知只确认结果，不能触发提前提交。
 
-`run`, `run_until_interrupt`, checkpoint resume, and `run_stream` all delegate
-node routing, path/step accounting, fan-out, errors, and completion to one
-internal execution loop. Streaming is an event projection of that loop, not a
-second executor.
+最终正文缺口由原投影补齐，不能把确认通知再拼入已经发出的 WorkflowEvent Token。
+如果 UI 选择只在末尾显示完整 `Completed.result`，则可以省略逐段 Token 的显示；
+两种呈现方式不能同时把同一正文追加两次。
+
+`NodeError` 是诊断事件，后续保留原 typed Err；不从诊断字符串重造第一个失败。
+普通失败不会再生成 Completed；并行分支失败后取消并排空 sibling，保留实际物理收尾。
+外层工作流 UI 事件不能为未知 source 补身份或清除未结算观察。
+
+`run`、`run_until_interrupt`、checkpoint resume 与 `run_stream` 共用既有执行循环。
+状态提交、path/step、fan-out、保护 claim 和结算不因增加流式呈现而出现第二套权威。
+此片段使用上文已构造的 graph/state；本轮未执行 Rust 片段编译或工作流验收。
 
 ---
 

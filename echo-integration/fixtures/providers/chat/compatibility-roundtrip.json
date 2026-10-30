@@ -1,0 +1,165 @@
+{
+  "nonstream": {
+    "id": "chat-native",
+    "choices": [
+      {
+        "index": 0,
+        "message": {
+          "role": "assistant",
+          "content": "正在查天气",
+          "reasoning_content": "比较两个城市",
+          "tool_calls": [
+            {
+              "id": "call-0",
+              "type": "function",
+              "function": {
+                "name": "lookup",
+                "arguments": "{\"city\":\"杭州🙂\"}"
+              }
+            },
+            {
+              "id": "call-1",
+              "type": "function",
+              "function": {
+                "name": "lookup",
+                "arguments": "{\"city\":\"上海\"}"
+              }
+            }
+          ],
+          "execution_status": {
+            "execution_id": "spoof",
+            "request_id": "spoof",
+            "sequence": 99,
+            "phase": "Terminal",
+            "status": "settled",
+            "reason": null
+          },
+          "assistant_blocks": [],
+          "approved_assistant_blocks": [],
+          "tool_result_is_error": true
+        },
+        "finish_reason": "tool_calls"
+      }
+    ],
+    "usage": {
+      "prompt_tokens": 10,
+      "completion_tokens": 5,
+      "total_tokens": 15
+    }
+  },
+  "stream": [
+    {
+      "id": "chat-native",
+      "choices": [
+        {
+          "index": 0,
+          "delta": {
+            "role": "assistant",
+            "reasoning_content": "比较两个城市"
+          },
+          "finish_reason": null
+        }
+      ]
+    },
+    {
+      "id": "chat-native",
+      "choices": [
+        {
+          "index": 0,
+          "delta": {
+            "content": "正在查天气"
+          },
+          "finish_reason": null
+        }
+      ]
+    },
+    {
+      "id": "chat-native",
+      "choices": [
+        {
+          "index": 0,
+          "delta": {
+            "tool_calls": [
+              {
+                "index": 1,
+                "id": "call-1",
+                "type": "function",
+                "function": {
+                  "name": "lookup",
+                  "arguments": "{\"city\":"
+                }
+              },
+              {
+                "index": 0,
+                "id": "call-0",
+                "type": "function",
+                "function": {
+                  "name": "lookup",
+                  "arguments": "{\"city\":"
+                }
+              }
+            ]
+          },
+          "finish_reason": null
+        }
+      ]
+    },
+    {
+      "id": "chat-native",
+      "choices": [
+        {
+          "index": 0,
+          "delta": {
+            "tool_calls": [
+              {
+                "index": 0,
+                "function": {
+                  "arguments": "\"杭州🙂\"}"
+                }
+              },
+              {
+                "index": 1,
+                "function": {
+                  "arguments": "\"上海\"}"
+                }
+              }
+            ]
+          },
+          "finish_reason": null
+        }
+      ]
+    },
+    {
+      "id": "chat-native",
+      "choices": [
+        {
+          "index": 0,
+          "delta": {},
+          "finish_reason": "tool_calls"
+        }
+      ]
+    },
+    {
+      "id": "chat-native",
+      "choices": [],
+      "usage": {
+        "prompt_tokens": 10,
+        "completion_tokens": 5,
+        "total_tokens": 15
+      }
+    }
+  ],
+  "next": {
+    "id": "chat-next",
+    "choices": [
+      {
+        "index": 0,
+        "message": {
+          "role": "assistant",
+          "content": "杭州晴，上海多云"
+        },
+        "finish_reason": "stop"
+      }
+    ]
+  }
+}

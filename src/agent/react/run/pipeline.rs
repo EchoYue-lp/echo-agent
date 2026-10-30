@@ -66,6 +66,8 @@ pub(crate) struct ToolExecutionContext {
     pub permission_decision: Option<PermissionDecision>,
     /// Approval proof bound to the final effective invocation.
     pub approval_receipt: Option<ToolApprovalReceipt>,
+    /// 本次permission/hook求值所选择的原owned工具实例。
+    pub authorized_tool: Option<std::sync::Arc<dyn echo_core::tools::Tool>>,
     /// Permission mode override returned by hooks for this call only.
     pub permission_mode_override: Option<PermissionMode>,
     /// Ordered provenance for policy rewrites applied before execution.
@@ -384,6 +386,13 @@ impl PipelineStage for PermissionStage {
         ctx: &mut ToolExecutionContext,
         snapshot: &crate::agent::snapshot::AgentRunSnapshot,
     ) -> Result<()> {
+        let authorized_tool = snapshot
+            .tools
+            .tool_manager
+            .get_tool(&ctx.tool_name)
+            .ok_or_else(|| echo_core::error::ToolError::NotFound(ctx.tool_name.clone()))?;
+        let permissions = authorized_tool.permissions();
+        ctx.authorized_tool = Some(authorized_tool);
         #[cfg(feature = "human-loop")]
         if let Some(decision) = snapshot
             .permission_service
@@ -503,6 +512,7 @@ impl PipelineStage for PermissionStage {
                 &ctx.input,
                 ctx.permission_mode_override,
                 approval_suggestions.as_deref(),
+                &permissions,
             )
             .await
             .map_err(|error| ReactError::Other(error.to_string()))?;
@@ -515,6 +525,7 @@ impl PipelineStage for PermissionStage {
                 &ctx.input,
                 ctx.permission_mode_override,
                 approval_suggestions.as_deref(),
+                &permissions,
             )
             .await
             .map_err(|_| ReactError::Other("Permission check failed".into()))?;
@@ -577,21 +588,45 @@ impl PipelineStage for ReadBeforeEditStage {
             return Ok(());
         }
         let paths = extract_path_params(&ctx.tool_name, &ctx.params);
+        let tool = ctx.authorized_tool.clone().ok_or_else(|| {
+            ReactError::Other("read-before-edit has no owned tool binding".into())
+        })?;
+        let context = invocation_tool_context(ctx, snapshot);
+        let mut resolved_paths = Vec::new();
+        for path in paths {
+            let proof = snapshot
+                .resolve_file_tracking_path(tool.clone(), &path, &ctx.params, &context)
+                .await;
+            let (source, canonical) = match proof {
+                Ok(proof) => proof,
+                Err(ReactError::Io(error)) if error.kind() == std::io::ErrorKind::Unsupported => {
+                    ctx.block(
+                        crate::tools::ToolFailureCategory::Unavailable,
+                        format!(
+                            "Read-before-edit requires a bound target proof for '{}': {error}",
+                            ctx.tool_name
+                        ),
+                    );
+                    return Ok(());
+                }
+                Err(error) => return Err(error),
+            };
+            resolved_paths.push((path, source, canonical.to_string_lossy().into_owned()));
+        }
         let ttl = std::time::Duration::from_secs(30 * 60);
         let mut files = snapshot
             .recently_read_files
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        for path in paths {
-            let canonical = resolve_tracking_path(&path, snapshot.config.working_dir.as_deref());
-            let read = match files.get(&canonical) {
-                Some(instant) if instant.elapsed() < ttl => true,
-                Some(_) => {
-                    files.remove(&canonical);
-                    false
-                }
-                None => false,
-            };
+        for (path, source, canonical) in resolved_paths {
+            let read = files.get_mut(&canonical).is_some_and(|observations| {
+                observations.retain(|(_, at)| at.elapsed() < ttl);
+                observations.iter().any(|(known, _)| {
+                    known.as_ref().is_some_and(|known| {
+                        crate::agent::snapshot::same_file_tracking_source(known, &source)
+                    })
+                })
+            });
             if !read {
                 ctx.block(crate::tools::ToolFailureCategory::Unavailable, format!(
                     "Read-before-edit is enabled. File '{path}' has not been read. Use read_file first."
@@ -785,6 +820,58 @@ impl PipelineStage for InvocationStage {
     }
 }
 
+fn invocation_tool_context(
+    ctx: &ToolExecutionContext,
+    snapshot: &crate::agent::snapshot::AgentRunSnapshot,
+) -> echo_core::tools::ToolContext {
+    let effect_sink: Option<echo_core::tools::ToolEffectSinkFn> =
+        if snapshot.run_store.is_some() && snapshot.trace_run_id.is_some() {
+            let invocation = snapshot.clone();
+            let tool_name = ctx.tool_name.clone();
+            let call_id = ctx.call_id.clone();
+            Some(std::sync::Arc::new(move |effect| {
+                let invocation = invocation.clone();
+                let tool_name = tool_name.clone();
+                let call_id = call_id.clone();
+                Box::pin(async move {
+                    invocation
+                        .record_tool_effect(&effect, &tool_name, &call_id)
+                        .await;
+                })
+            }))
+        } else {
+            None
+        };
+    echo_core::tools::ToolContext {
+        working_dir: snapshot.config.working_dir.clone(),
+        conversation_id: snapshot.config.conversation_id.clone(),
+        run_id: snapshot.current_run_id.clone(),
+        turn_id: snapshot.current_turn_id.clone(),
+        message_id: snapshot.current_message_id.clone(),
+        execution_id: snapshot.current_execution_id.clone(),
+        call_id: Some(ctx.call_id.clone()),
+        approval_receipt: ctx.approval_receipt.clone(),
+        effect_sink,
+        active_message: snapshot.current_message.clone(),
+        output_artifacts: snapshot.config.tool_output_artifacts.clone(),
+        tool_visibility: snapshot.tools.visibility.clone(),
+        tool_access: Some(
+            if snapshot.tools.is_plan_mode() || snapshot.tools.readonly_tools {
+                echo_core::tools::ToolAccess::ReadOnly
+            } else {
+                echo_core::tools::ToolAccess::Mutating
+            },
+        ),
+        script_execution_profile: None,
+        cancel: snapshot.external_cancel.clone(),
+        trace_sink: snapshot.external_trace_sink.clone(),
+        delegation_policy: snapshot.external_delegation_policy,
+        resource_guards: snapshot.resource_guards.clone(),
+        subagent_lineage: snapshot.subagent_lineage.clone(),
+        uplink: snapshot.external_uplink.clone(),
+    }
+}
+
 /// Executes the tool via ToolManager.
 pub struct ExecuteStage;
 
@@ -800,6 +887,12 @@ impl PipelineStage for ExecuteStage {
         snapshot: &crate::agent::snapshot::AgentRunSnapshot,
     ) -> Result<()> {
         let execution_start = std::time::Instant::now();
+        let authorized_tool = ctx.authorized_tool.clone().ok_or_else(|| {
+            echo_core::error::ToolError::AccessDenied {
+                path: ctx.tool_name.clone(),
+                reason: "Tool execution has no permission-stage implementation binding".into(),
+            }
+        })?;
 
         if ctx.call_id.is_empty() {
             ctx.call_id = format!("call_{}", uuid::Uuid::new_v4());
@@ -823,52 +916,7 @@ impl PipelineStage for ExecuteStage {
         // Build a per-agent ToolContext from the snapshot's RuntimeConfig so
         // the (shared, stateless) ToolManager receives the correct working_dir
         // for THIS agent/session — avoiding cross-session cwd contamination.
-        let effect_sink: Option<echo_core::tools::ToolEffectSinkFn> =
-            if snapshot.run_store.is_some() && snapshot.trace_run_id.is_some() {
-                let invocation = snapshot.clone();
-                let tool_name = ctx.tool_name.clone();
-                let call_id = ctx.call_id.clone();
-                Some(std::sync::Arc::new(move |effect| {
-                    let invocation = invocation.clone();
-                    let tool_name = tool_name.clone();
-                    let call_id = call_id.clone();
-                    Box::pin(async move {
-                        invocation
-                            .record_tool_effect(&effect, &tool_name, &call_id)
-                            .await;
-                    })
-                }))
-            } else {
-                None
-            };
-        let tool_ctx = echo_core::tools::ToolContext {
-            working_dir: snapshot.config.working_dir.clone(),
-            conversation_id: snapshot.config.conversation_id.clone(),
-            run_id: snapshot.current_run_id.clone(),
-            turn_id: snapshot.current_turn_id.clone(),
-            message_id: snapshot.current_message_id.clone(),
-            execution_id: snapshot.current_execution_id.clone(),
-            call_id: Some(ctx.call_id.clone()),
-            approval_receipt: ctx.approval_receipt.clone(),
-            effect_sink,
-            active_message: snapshot.current_message.clone(),
-            output_artifacts: snapshot.config.tool_output_artifacts.clone(),
-            tool_visibility: snapshot.tools.visibility.clone(),
-            tool_access: Some(
-                if snapshot.tools.is_plan_mode() || snapshot.tools.readonly_tools {
-                    echo_core::tools::ToolAccess::ReadOnly
-                } else {
-                    echo_core::tools::ToolAccess::Mutating
-                },
-            ),
-            script_execution_profile: None,
-            cancel: snapshot.external_cancel.clone(),
-            trace_sink: snapshot.external_trace_sink.clone(),
-            delegation_policy: snapshot.external_delegation_policy,
-            resource_guards: snapshot.resource_guards.clone(),
-            subagent_lineage: snapshot.subagent_lineage.clone(),
-            uplink: snapshot.external_uplink.clone(),
-        };
+        let tool_ctx = invocation_tool_context(ctx, snapshot);
 
         let call_plan_mode =
             ctx.plan_mode || ctx.permission_mode_override == Some(PermissionMode::Plan);
@@ -896,11 +944,7 @@ impl PipelineStage for ExecuteStage {
             Ok(())
         };
 
-        let execution_result = if snapshot
-            .tools
-            .tool_manager
-            .supports_streaming(&ctx.tool_name)
-        {
+        let execution_result = if authorized_tool.supports_streaming() {
             if let Some(stream_tx) = ctx.stream_tx.as_ref() {
                 // A guard cannot approve a chunk before seeing the complete
                 // result: policy matches may span chunk boundaries. The
@@ -928,6 +972,7 @@ impl PipelineStage for ExecuteStage {
                             ctx.params.clone(),
                             &streaming_ctx,
                             Some(event_tx),
+                            &authorized_tool,
                             &admission,
                         ),
                 );
@@ -997,6 +1042,7 @@ impl PipelineStage for ExecuteStage {
                         ctx.params.clone(),
                         &tool_ctx,
                         None,
+                        &authorized_tool,
                         &admission,
                     )
                     .await
@@ -1009,6 +1055,7 @@ impl PipelineStage for ExecuteStage {
                     &ctx.tool_name,
                     ctx.params.clone(),
                     &tool_ctx,
+                    &authorized_tool,
                     &admission,
                 )
                 .await
@@ -1031,11 +1078,8 @@ impl PipelineStage for ExecuteStage {
                 .await;
         }
 
-        let may_have_side_effects = snapshot
-            .tools
-            .tool_manager
-            .get_tool(&ctx.tool_name)
-            .is_none_or(|tool| tool.risk_level() != crate::tools::ToolRiskLevel::ReadOnly);
+        let may_have_side_effects =
+            authorized_tool.risk_level() != crate::tools::ToolRiskLevel::ReadOnly;
         let result = match execution_result {
             Ok(r) => r,
             Err(error @ ReactError::ExecutionNotSettled { .. }) => return Err(error),
@@ -1111,7 +1155,27 @@ impl PipelineStage for ExecuteStage {
         if result.success {
             for effect in &result.effects {
                 if let echo_core::tools::ToolEffect::FileRead { path } = effect {
-                    snapshot.record_file_read(path);
+                    if snapshot.config.force_read_before_edit {
+                        match snapshot
+                            .resolve_file_tracking_path(
+                                authorized_tool.clone(),
+                                path,
+                                &ctx.params,
+                                &tool_ctx,
+                            )
+                            .await
+                        {
+                            Ok((source, _)) => snapshot.record_file_read(path, source),
+                            Err(error) => {
+                                // effect/结果是已确认事实，缺授权source不能把它抹成工具失败。
+                                tracing::warn!(tool = %ctx.tool_name, "File read source proof unavailable: {error}");
+                                snapshot.record_file_read_observation(path, None);
+                            }
+                        }
+                    } else {
+                        // flag关闭只保诊断观察，不调用默认Unsupported或猜来源来加新gate。
+                        snapshot.record_file_read_observation(path, None);
+                    }
                 }
             }
         }
@@ -1813,21 +1877,6 @@ fn extract_path_params(tool_name: &str, params: &ToolParameters) -> Vec<String> 
         .unwrap_or_default()
 }
 
-fn resolve_tracking_path(path: &str, working_dir: Option<&std::path::Path>) -> String {
-    let path = std::path::Path::new(path);
-    let resolved = if path.is_absolute() {
-        path.to_path_buf()
-    } else if let Some(working_dir) = working_dir {
-        working_dir.join(path)
-    } else {
-        path.to_path_buf()
-    };
-    std::fs::canonicalize(&resolved)
-        .unwrap_or(resolved)
-        .to_string_lossy()
-        .to_string()
-}
-
 #[cfg(test)]
 mod tests {
     #[cfg(feature = "files")]
@@ -2248,6 +2297,7 @@ mod tests {
             plan_mode: false,
             permission_decision: None,
             approval_receipt: None,
+            authorized_tool: None,
             permission_mode_override: None,
             rewrites: Vec::new(),
             invocation_emitted: false,
@@ -2277,6 +2327,7 @@ mod tests {
             plan_mode: false,
             permission_decision: None,
             approval_receipt: None,
+            authorized_tool: None,
             permission_mode_override: None,
             rewrites: Vec::new(),
             invocation_emitted: false,
@@ -2953,12 +3004,19 @@ mod tests {
                     .write()
                     .await
                     .register_user_hooks(definition);
-                let legacy = agent.capture_legacy_external_context();
+
                 let run_id = agent
-                    .start_legacy_trace_run("permission trace", &legacy)
+                    .start_scoped_trace_run(
+                        "permission trace",
+                        None,
+                        agent.config().conversation_id.as_deref(),
+                        None,
+                        None,
+                    )
                     .await
                     .ok_or_else(|| ReactError::Other("trace did not start".to_string()))?;
-                let snapshot = crate::agent::snapshot::AgentRunSnapshot::from_agent(&agent);
+                let mut snapshot = crate::agent::snapshot::AgentRunSnapshot::from_agent(&agent);
+                snapshot.trace_run_id = Some(run_id.clone());
                 let result = snapshot
                     .execute_tool_with_policy(
                         "permission-call".to_string(),
@@ -3306,12 +3364,19 @@ mod tests {
             .model("test-model")
             .with_run_store(store.clone())
             .build()?;
-        let legacy = agent.capture_legacy_external_context();
+
         let run_id = agent
-            .start_legacy_trace_run("effects", &legacy)
+            .start_scoped_trace_run(
+                "effects",
+                None,
+                agent.config().conversation_id.as_deref(),
+                None,
+                None,
+            )
             .await
             .ok_or_else(|| ReactError::Other("trace did not start".to_string()))?;
-        let snapshot = crate::agent::snapshot::AgentRunSnapshot::from_agent(&agent);
+        let mut snapshot = crate::agent::snapshot::AgentRunSnapshot::from_agent(&agent);
+        snapshot.trace_run_id = Some(run_id.clone());
         for (tool, kind, success) in [
             ("write_file", echo_core::tools::ToolResultKind::Text, true),
             (
@@ -3388,14 +3453,23 @@ mod tests {
             let store = Arc::new(InMemoryRunStore::new());
             let agent = crate::agent::ReactAgentBuilder::new()
                 .model("test-model")
+                // PermissionStage绑定owned实例；复用原shell stub，仍只验证trace而不执行。
+                .tool(Box::new(EffectTool))
                 .with_run_store(store.clone())
                 .build()?;
-            let legacy = agent.capture_legacy_external_context();
+
             let run_id = agent
-                .start_legacy_trace_run("permission trace", &legacy)
+                .start_scoped_trace_run(
+                    "permission trace",
+                    None,
+                    agent.config().conversation_id.as_deref(),
+                    None,
+                    None,
+                )
                 .await
                 .ok_or_else(|| ReactError::Other("trace did not start".to_string()))?;
-            let snapshot = crate::agent::snapshot::AgentRunSnapshot::from_agent(&agent);
+            let mut snapshot = crate::agent::snapshot::AgentRunSnapshot::from_agent(&agent);
+            snapshot.trace_run_id = Some(run_id.clone());
             let mut ctx = completed_context(String::new());
             ctx.result = None;
             let requires_approval = decision.requires_approval();
@@ -4005,6 +4079,7 @@ mod tests {
             let snapshot = Arc::clone(&snapshot);
             let completion_tx = completion_tx.clone();
             tokio::spawn(async move {
+                ctx.authorized_tool = snapshot.tools.tool_manager.get_tool(&ctx.tool_name);
                 let result = ExecuteStage.run(&mut ctx, &snapshot).await;
                 let _ = completion_tx
                     .send((
@@ -4225,6 +4300,7 @@ mod tests {
         let mut context = streaming_context("closed-delivery", "unused", 0, 0, sender);
         context.tool_name = "closed_delivery".to_string();
         context.requested_tool_name = context.tool_name.clone();
+        context.authorized_tool = snapshot.tools.tool_manager.get_tool(&context.tool_name);
         let mut execution = tokio::spawn(async move {
             let result = ExecuteStage.run(&mut context, &snapshot).await;
             (result, context.result)
@@ -4334,7 +4410,7 @@ mod tests {
                 effect: effect.clone(),
             }))
             .tool_execution_pipeline(ToolExecutionPipeline {
-                stages: vec![Box::new(ExecuteStage)],
+                stages: vec![Box::new(PermissionStage), Box::new(ExecuteStage)],
             })
             .build()?;
         let parent = crate::agent::CancellationToken::new();
@@ -4411,6 +4487,8 @@ mod tests {
     /// Records which terminal callback methods fire for one pipeline run.
     #[derive(Default)]
     struct RecordingCallback {
+        start_call_ids: std::sync::Mutex<Vec<String>>,
+        terminal_call_ids: std::sync::Mutex<Vec<(String, &'static str)>>,
         tool_end_calls: std::sync::atomic::AtomicUsize,
         tool_error_calls: std::sync::atomic::AtomicUsize,
         tool_interrupted_calls: std::sync::atomic::AtomicUsize,
@@ -4420,25 +4498,50 @@ mod tests {
     }
 
     impl echo_core::agent::AgentCallback for RecordingCallback {
-        fn on_tool_end<'a>(
+        fn on_tool_start_with_id<'a>(
             &'a self,
             _agent: &'a str,
+            call_id: &'a str,
+            _tool: &'a str,
+            _args: &'a Value,
+        ) -> futures::future::BoxFuture<'a, ()> {
+            Box::pin(async move {
+                self.start_call_ids
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .push(call_id.to_string());
+            })
+        }
+
+        fn on_tool_end_with_id<'a>(
+            &'a self,
+            _agent: &'a str,
+            call_id: &'a str,
             _tool: &'a str,
             _result: &'a str,
         ) -> futures::future::BoxFuture<'a, ()> {
-            Box::pin(async {
+            Box::pin(async move {
+                self.terminal_call_ids
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .push((call_id.to_string(), "end"));
                 self.tool_end_calls
                     .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             })
         }
 
-        fn on_tool_error<'a>(
+        fn on_tool_error_with_id<'a>(
             &'a self,
             _agent: &'a str,
+            call_id: &'a str,
             _tool: &'a str,
             err: &'a ReactError,
         ) -> futures::future::BoxFuture<'a, ()> {
             Box::pin(async move {
+                self.terminal_call_ids
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .push((call_id.to_string(), "error"));
                 self.tool_error_calls
                     .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 self.tool_error_messages
@@ -4451,12 +4554,16 @@ mod tests {
         fn on_tool_interrupted_with_id<'a>(
             &'a self,
             _agent: &'a str,
-            _call_id: &'a str,
+            call_id: &'a str,
             _tool: &'a str,
             input: &'a Value,
             error: &'a ReactError,
         ) -> futures::future::BoxFuture<'a, ()> {
             Box::pin(async move {
+                self.terminal_call_ids
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .push((call_id.to_string(), "interrupted"));
                 self.tool_interrupted_calls
                     .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 self.interrupted_inputs
@@ -4528,6 +4635,29 @@ mod tests {
                 .run(&mut ctx, &snapshot)
                 .await?;
 
+            assert_eq!(
+                callback
+                    .start_call_ids
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .as_slice(),
+                &[ctx.call_id.clone()]
+            );
+            assert_eq!(
+                callback
+                    .terminal_call_ids
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .as_slice(),
+                &[(
+                    ctx.call_id.clone(),
+                    if returns_result {
+                        "error"
+                    } else {
+                        "interrupted"
+                    }
+                )]
+            );
             assert_eq!(
                 ctx.result.as_ref().map(|result| result.success),
                 Some(false)
@@ -4605,12 +4735,19 @@ mod tests {
             .write()
             .await
             .register_user_hooks(hooks);
-        let legacy = agent.capture_legacy_external_context();
+
         let run_id = agent
-            .start_legacy_trace_run("interrupted post-hook", &legacy)
+            .start_scoped_trace_run(
+                "interrupted post-hook",
+                None,
+                agent.config().conversation_id.as_deref(),
+                None,
+                None,
+            )
             .await
             .ok_or_else(|| ReactError::Other("trace run did not start".into()))?;
-        let snapshot = crate::agent::snapshot::AgentRunSnapshot::from_agent(&agent);
+        let mut snapshot = crate::agent::snapshot::AgentRunSnapshot::from_agent(&agent);
+        snapshot.trace_run_id = Some(run_id.clone());
         let input = serde_json::json!({"admitted": "canonical input"});
         let params =
             HashMap::from([("admitted".to_string(), serde_json::json!("canonical input"))]);
@@ -5475,12 +5612,19 @@ mod tests {
                 .guard(guard)
                 .tool(Box::new(OutputAndErrorTool))
                 .build()?;
-            let legacy = agent.capture_legacy_external_context();
+
             let run_id = agent
-                .start_legacy_trace_run("output and error", &legacy)
+                .start_scoped_trace_run(
+                    "output and error",
+                    None,
+                    agent.config().conversation_id.as_deref(),
+                    None,
+                    None,
+                )
                 .await
                 .ok_or_else(|| ReactError::Other("trace did not start".to_string()))?;
-            let snapshot = crate::agent::snapshot::AgentRunSnapshot::from_agent(&agent);
+            let mut snapshot = crate::agent::snapshot::AgentRunSnapshot::from_agent(&agent);
+            snapshot.trace_run_id = Some(run_id.clone());
             let failure = snapshot
                 .execute_tool_with_policy(
                     "output-and-error".to_string(),
@@ -5551,12 +5695,19 @@ mod tests {
             .guard(Arc::new(BlockSensitiveProjection))
             .tool(Box::new(PartialFailureTool))
             .build()?;
-        let legacy = agent.capture_legacy_external_context();
+
         let run_id = agent
-            .start_legacy_trace_run("partial failure", &legacy)
+            .start_scoped_trace_run(
+                "partial failure",
+                None,
+                agent.config().conversation_id.as_deref(),
+                None,
+                None,
+            )
             .await
             .ok_or_else(|| ReactError::Other("trace did not start".to_string()))?;
-        let snapshot = crate::agent::snapshot::AgentRunSnapshot::from_agent(&agent);
+        let mut snapshot = crate::agent::snapshot::AgentRunSnapshot::from_agent(&agent);
+        snapshot.trace_run_id = Some(run_id.clone());
         let result = snapshot
             .execute_tool_with_policy(
                 "partial-failure".to_string(),
@@ -5729,13 +5880,21 @@ mod tests {
             .with_run_store(store.clone())
             .tool(Box::new(TypedEffectTool))
             .build()?;
-        let legacy = agent.capture_legacy_external_context();
+
         let run_id = agent
-            .start_legacy_trace_run("typed effects", &legacy)
+            .start_scoped_trace_run(
+                "typed effects",
+                None,
+                agent.config().conversation_id.as_deref(),
+                None,
+                None,
+            )
             .await
             .ok_or_else(|| ReactError::Other("trace did not start".to_string()))?;
-        let snapshot = crate::agent::snapshot::AgentRunSnapshot::from_agent(&agent);
+        let mut snapshot = crate::agent::snapshot::AgentRunSnapshot::from_agent(&agent);
+        snapshot.trace_run_id = Some(run_id.clone());
         let mut ctx = completed_context("opaque output".to_string());
+        ctx.authorized_tool = snapshot.tools.tool_manager.get_tool(&ctx.tool_name);
         ExecuteStage.run(&mut ctx, &snapshot).await?;
         TraceRecordingStage.run(&mut ctx, &snapshot).await?;
         let run = store
@@ -5768,15 +5927,26 @@ mod tests {
             .with_run_store(store.clone())
             .tool(Box::new(TypedEffectTool))
             .build()?;
-        let legacy = agent.capture_legacy_external_context();
+
         let run_id = agent
-            .start_legacy_trace_run("effect before post hook", &legacy)
+            .start_scoped_trace_run(
+                "effect before post hook",
+                None,
+                agent.config().conversation_id.as_deref(),
+                None,
+                None,
+            )
             .await
             .ok_or_else(|| ReactError::Other("trace did not start".to_string()))?;
-        let snapshot = crate::agent::snapshot::AgentRunSnapshot::from_agent(&agent);
+        let mut snapshot = crate::agent::snapshot::AgentRunSnapshot::from_agent(&agent);
+        snapshot.trace_run_id = Some(run_id.clone());
         let mut ctx = completed_context(String::new());
         let pipeline = ToolExecutionPipeline {
-            stages: vec![Box::new(ExecuteStage), Box::new(PendingPostStage)],
+            stages: vec![
+                Box::new(PermissionStage),
+                Box::new(ExecuteStage),
+                Box::new(PendingPostStage),
+            ],
         };
         assert!(
             tokio::time::timeout(
@@ -5900,12 +6070,19 @@ mod tests {
                 .guard(guard)
                 .tool(Box::new(ErrorOnlyTool))
                 .build()?;
-            let legacy = agent.capture_legacy_external_context();
+
             let run_id = agent
-                .start_legacy_trace_run("error-only tool", &legacy)
+                .start_scoped_trace_run(
+                    "error-only tool",
+                    None,
+                    agent.config().conversation_id.as_deref(),
+                    None,
+                    None,
+                )
                 .await
                 .ok_or_else(|| ReactError::Other("trace did not start".to_string()))?;
-            let snapshot = crate::agent::snapshot::AgentRunSnapshot::from_agent(&agent);
+            let mut snapshot = crate::agent::snapshot::AgentRunSnapshot::from_agent(&agent);
+            snapshot.trace_run_id = Some(run_id.clone());
             let failure = snapshot
                 .execute_tool_with_policy(
                     "error-only".to_string(),
@@ -6033,6 +6210,22 @@ mod tests {
             .run(&mut ctx, &snapshot)
             .await?;
 
+        assert_eq!(
+            callback
+                .start_call_ids
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .as_slice(),
+            &[ctx.call_id.clone()]
+        );
+        assert_eq!(
+            callback
+                .terminal_call_ids
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .as_slice(),
+            &[(ctx.call_id.clone(), "error")]
+        );
         assert_eq!(
             callback
                 .tool_error_calls
@@ -6255,12 +6448,19 @@ mod tests {
             .write()
             .await
             .register_user_hooks(hooks);
-        let legacy = agent.capture_legacy_external_context();
+
         let run_id = agent
-            .start_legacy_trace_run("guarded post-hook block", &legacy)
+            .start_scoped_trace_run(
+                "guarded post-hook block",
+                None,
+                agent.config().conversation_id.as_deref(),
+                None,
+                None,
+            )
             .await
             .ok_or_else(|| ReactError::Other("trace did not start".to_string()))?;
-        let snapshot = crate::agent::snapshot::AgentRunSnapshot::from_agent(&agent);
+        let mut snapshot = crate::agent::snapshot::AgentRunSnapshot::from_agent(&agent);
+        snapshot.trace_run_id = Some(run_id.clone());
         let failure = snapshot
             .execute_tool_with_policy(
                 "post-hook-guard".to_string(),
@@ -6333,6 +6533,963 @@ mod tests {
                 .iter()
                 .all(|error| !error.contains("opaque output"))
         );
+        Ok(())
+    }
+    // 并入pipeline.rs原tests模块；只用原R23 API，可以先取得行为RED。
+    #[cfg(feature = "human-loop")]
+    struct Source8PermissionTool {
+        mutating: bool,
+        streaming: bool,
+        effects: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        started: Option<std::sync::Arc<tokio::sync::Notify>>,
+        release: Option<std::sync::Arc<tokio::sync::Notify>>,
+    }
+
+    #[cfg(feature = "human-loop")]
+    impl echo_core::tools::Tool for Source8PermissionTool {
+        fn name(&self) -> &str {
+            "source8_permission_swap"
+        }
+        fn description(&self) -> &str {
+            "deterministic owned-tool fixture"
+        }
+        fn parameters(&self) -> Value {
+            serde_json::json!({"type":"object"})
+        }
+        fn permissions(&self) -> Vec<echo_core::tools::permission::ToolPermission> {
+            vec![if self.mutating {
+                echo_core::tools::permission::ToolPermission::Write
+            } else {
+                echo_core::tools::permission::ToolPermission::Read
+            }]
+        }
+        fn risk_level(&self) -> echo_core::tools::ToolRiskLevel {
+            if self.mutating {
+                echo_core::tools::ToolRiskLevel::Standard
+            } else {
+                echo_core::tools::ToolRiskLevel::ReadOnly
+            }
+        }
+        fn capabilities(&self) -> echo_core::tools::ToolCapabilities {
+            if self.mutating {
+                echo_core::tools::ToolCapabilities::mutating(self.risk_level(), self.permissions())
+            } else {
+                echo_core::tools::ToolCapabilities::read_only(self.permissions())
+            }
+        }
+        fn supports_streaming(&self) -> bool {
+            self.streaming
+        }
+        fn execute<'a>(
+            &'a self,
+            _parameters: ToolParameters,
+        ) -> futures::future::BoxFuture<'a, Result<ToolResult>> {
+            Box::pin(async move {
+                self.effects
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                if let Some(started) = &self.started {
+                    started.notify_one();
+                }
+                if let Some(release) = &self.release {
+                    release.notified().await;
+                }
+                Ok(ToolResult::success(if self.mutating {
+                    "new-write-effect"
+                } else {
+                    "original-read"
+                }))
+            })
+        }
+    }
+
+    #[cfg(feature = "human-loop")]
+    struct Source8ReplaceAtStart {
+        manager: std::sync::OnceLock<std::sync::Arc<crate::tools::ToolManager>>,
+        effects: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        streaming: bool,
+        calls: std::sync::atomic::AtomicUsize,
+        retained_old: std::sync::atomic::AtomicBool,
+    }
+
+    #[cfg(feature = "human-loop")]
+    impl echo_core::agent::AgentCallback for Source8ReplaceAtStart {
+        fn on_tool_start_with_id<'a>(
+            &'a self,
+            _agent: &'a str,
+            _call: &'a str,
+            name: &'a str,
+            _input: &'a Value,
+        ) -> futures::future::BoxFuture<'a, ()> {
+            Box::pin(async move {
+                if name != "source8_permission_swap" {
+                    return;
+                }
+                self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                if let Some(manager) = self.manager.get() {
+                    let old = manager.replace(Box::new(Source8PermissionTool {
+                        mutating: true,
+                        streaming: self.streaming,
+                        effects: self.effects.clone(),
+                        started: None,
+                        release: None,
+                    }));
+                    self.retained_old
+                        .store(old.is_some(), std::sync::atomic::Ordering::SeqCst);
+                }
+            })
+        }
+    }
+
+    #[cfg(feature = "human-loop")]
+    #[tokio::test]
+    async fn source8_permission_generation_is_bound_across_start_callback() -> Result<()> {
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        for streaming in [false, true] {
+            let old_effects = Arc::new(AtomicUsize::new(0));
+            let new_effects = Arc::new(AtomicUsize::new(0));
+            let callback = Arc::new(Source8ReplaceAtStart {
+                manager: std::sync::OnceLock::new(),
+                effects: new_effects.clone(),
+                streaming,
+                calls: AtomicUsize::new(0),
+                retained_old: AtomicBool::new(false),
+            });
+            let agent = crate::agent::ReactAgentBuilder::new()
+                .model("test-model")
+                .permission_service(Arc::new(crate::human_loop::PermissionService::new()))
+                .tool(Box::new(Source8PermissionTool {
+                    mutating: false,
+                    streaming,
+                    effects: old_effects.clone(),
+                    started: None,
+                    release: None,
+                }))
+                .callback(callback.clone())
+                .build()?;
+            callback
+                .manager
+                .set(agent.tool_manager().clone())
+                .map_err(|_| ReactError::Other("fixture manager already set".into()))?;
+            let snapshot = crate::agent::snapshot::AgentRunSnapshot::from_agent(&agent);
+            let outcome = snapshot
+                .execute_tool_with_policy(
+                    "source8-read-then-replace".into(),
+                    "source8_permission_swap",
+                    &ToolParameters::new(),
+                    &serde_json::json!({}),
+                    None,
+                )
+                .await;
+            assert_eq!(callback.calls.load(Ordering::SeqCst), 1);
+            assert!(callback.retained_old.load(Ordering::SeqCst));
+            assert_eq!(
+                new_effects.load(Ordering::SeqCst),
+                0,
+                "stream={streaming}: a Write implementation ran under the old Read permission"
+            );
+            assert_eq!(old_effects.load(Ordering::SeqCst), 0);
+            let error = outcome.err().ok_or_else(|| {
+                ReactError::Other("replacement was not rejected before the effect".into())
+            })?;
+            assert!(error.error.to_string().contains("changed after permission"));
+        }
+        Ok(())
+    }
+
+    // 只使用原R23 API，加入pipeline原tests模块。未执行，不冒实际RED。
+    #[cfg(all(feature = "files", unix))]
+    mod source8_file_target_tests {
+        use super::*;
+        use echo_core::tools::filesystem::{FileEntry, FileMetadata, FileSystem};
+        use std::path::{Path, PathBuf};
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+        struct TargetFiles {
+            visible: PathBuf,
+            target: PathBuf,
+            writes: AtomicUsize,
+            reads: AtomicUsize,
+            fail_canonical: AtomicBool,
+        }
+        impl TargetFiles {
+            fn actual(&self, path: &Path) -> Result<PathBuf> {
+                let path = if path.is_absolute() {
+                    path.to_path_buf()
+                } else {
+                    self.visible.join(path)
+                };
+                let suffix = path.strip_prefix(&self.visible).map_err(|_| {
+                    ReactError::Other("fixture path escaped target namespace".into())
+                })?;
+                Ok(self.target.join(suffix))
+            }
+            fn visible(&self, path: &Path) -> Result<PathBuf> {
+                Ok(self
+                    .visible
+                    .join(path.strip_prefix(&self.target).map_err(|_| {
+                        ReactError::Other("fixture target link escaped namespace".into())
+                    })?))
+            }
+        }
+        impl FileSystem for TargetFiles {
+            fn paths_are_native(&self) -> bool {
+                false
+            }
+            fn current_dir(&self) -> Result<PathBuf> {
+                Ok(self.visible.clone())
+            }
+            fn canonicalize(&self, path: &Path) -> Result<PathBuf> {
+                if self.fail_canonical.load(Ordering::SeqCst) {
+                    return Err(echo_core::error::ToolError::RemoteFailure {
+                        tool: "fixture_files".into(),
+                        message: "target canonical unavailable".into(),
+                        http_status: None,
+                        failure: Box::new(crate::tools::ToolFailure::new(
+                            crate::tools::ToolFailureCategory::Unavailable,
+                        )),
+                    }
+                    .into());
+                }
+                self.visible(
+                    &echo_tools::filesystem::LocalFileSystem.canonicalize(&self.actual(path)?)?,
+                )
+            }
+            fn metadata(&self, path: &Path) -> Result<FileMetadata> {
+                echo_tools::filesystem::LocalFileSystem.metadata(&self.actual(path)?)
+            }
+            fn symlink_metadata(&self, path: &Path) -> Result<FileMetadata> {
+                echo_tools::filesystem::LocalFileSystem.symlink_metadata(&self.actual(path)?)
+            }
+            fn read(&self, path: &Path) -> Result<Vec<u8>> {
+                self.reads.fetch_add(1, Ordering::SeqCst);
+                echo_tools::filesystem::LocalFileSystem.read(&self.actual(path)?)
+            }
+            fn open_read(&self, path: &Path) -> Result<Box<dyn std::io::Read + Send>> {
+                self.reads.fetch_add(1, Ordering::SeqCst);
+                echo_tools::filesystem::LocalFileSystem.open_read(&self.actual(path)?)
+            }
+            fn read_dir(&self, path: &Path) -> Result<Vec<FileEntry>> {
+                let mut rows =
+                    echo_tools::filesystem::LocalFileSystem.read_dir(&self.actual(path)?)?;
+                for row in &mut rows {
+                    row.path = self.visible(&row.path)?;
+                }
+                Ok(rows)
+            }
+            fn create_dir_all(&self, path: &Path) -> Result<()> {
+                echo_tools::filesystem::LocalFileSystem.create_dir_all(&self.actual(path)?)
+            }
+            fn create_file(&self, path: &Path) -> Result<()> {
+                self.writes.fetch_add(1, Ordering::SeqCst);
+                echo_tools::filesystem::LocalFileSystem.create_file(&self.actual(path)?)
+            }
+            fn write(&self, path: &Path, data: &[u8]) -> Result<()> {
+                self.writes.fetch_add(1, Ordering::SeqCst);
+                echo_tools::filesystem::LocalFileSystem.write(&self.actual(path)?, data)
+            }
+            fn append(&self, path: &Path, data: &[u8]) -> Result<()> {
+                self.writes.fetch_add(1, Ordering::SeqCst);
+                echo_tools::filesystem::LocalFileSystem.append(&self.actual(path)?, data)
+            }
+            fn rename(&self, from: &Path, to: &Path) -> Result<()> {
+                self.writes.fetch_add(1, Ordering::SeqCst);
+                echo_tools::filesystem::LocalFileSystem
+                    .rename(&self.actual(from)?, &self.actual(to)?)
+            }
+            fn remove_file(&self, path: &Path) -> Result<()> {
+                self.writes.fetch_add(1, Ordering::SeqCst);
+                echo_tools::filesystem::LocalFileSystem.remove_file(&self.actual(path)?)
+            }
+            fn remove_dir(&self, path: &Path) -> Result<()> {
+                echo_tools::filesystem::LocalFileSystem.remove_dir(&self.actual(path)?)
+            }
+            fn remove_dir_all(&self, path: &Path) -> Result<()> {
+                echo_tools::filesystem::LocalFileSystem.remove_dir_all(&self.actual(path)?)
+            }
+            fn set_mode(&self, path: &Path, mode: u32) -> Result<()> {
+                echo_tools::filesystem::LocalFileSystem.set_mode(&self.actual(path)?, mode)
+            }
+            fn atomic_write(&self, path: &Path, data: &[u8]) -> Result<()> {
+                self.writes.fetch_add(1, Ordering::SeqCst);
+                echo_tools::filesystem::LocalFileSystem.atomic_write(&self.actual(path)?, data)
+            }
+            fn atomic_compare_and_swap(
+                &self,
+                path: &Path,
+                expected: &[u8],
+                data: &[u8],
+            ) -> Result<bool> {
+                self.writes.fetch_add(1, Ordering::SeqCst);
+                echo_tools::filesystem::LocalFileSystem.atomic_compare_and_swap(
+                    &self.actual(path)?,
+                    expected,
+                    data,
+                )
+            }
+            fn checkpoint(&self, _path: &Path) -> Result<Option<String>> {
+                Ok(None)
+            }
+        }
+
+        async fn invoke(
+            snapshot: &crate::agent::snapshot::AgentRunSnapshot,
+            id: &str,
+            name: &str,
+            input: Value,
+        ) -> Result<ToolResult> {
+            let params = input
+                .as_object()
+                .ok_or_else(|| ReactError::Other("fixture arguments not object".into()))?
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
+            match snapshot
+                .execute_tool_with_policy(id.into(), name, &params, &input, None)
+                .await
+            {
+                Ok(outcome) => Ok(outcome.result),
+                Err(failure) => failure.result.ok_or(failure.error),
+            }
+        }
+
+        #[tokio::test]
+        async fn source8_read_before_edit_does_not_use_host_alias_for_target() -> Result<()> {
+            for (host_alias, target_alias, force, relative) in [
+                (true, false, true, false),
+                (true, false, true, true),
+                (false, true, true, false),
+                (false, true, true, true),
+                (true, false, false, false),
+            ] {
+                let temp = tempfile::tempdir()?;
+                let host = temp.path().join("host");
+                let target = temp.path().join("target");
+                std::fs::create_dir_all(&host)?;
+                std::fs::create_dir_all(&target)?;
+                std::fs::write(host.join("b"), b"host-b")?;
+                if host_alias {
+                    std::os::unix::fs::symlink("b", host.join("a"))?;
+                } else {
+                    std::fs::write(host.join("a"), b"host-a")?;
+                }
+                std::fs::write(target.join("b"), b"target-b")?;
+                if target_alias {
+                    std::os::unix::fs::symlink("b", target.join("a"))?;
+                } else {
+                    std::fs::write(target.join("a"), b"target-a")?;
+                }
+                let files = Arc::new(TargetFiles {
+                    visible: std::fs::canonicalize(&host)?,
+                    target: std::fs::canonicalize(&target)?,
+                    writes: AtomicUsize::new(0),
+                    reads: AtomicUsize::new(0),
+                    fail_canonical: AtomicBool::new(false),
+                });
+                let mut agent = crate::agent::ReactAgentBuilder::new()
+                    .model("test-model")
+                    .enable_tools()
+                    .file_system(files.clone())
+                    .working_dir(files.visible.clone())
+                    .build()?;
+                agent.config.force_read_before_edit = force;
+                agent.tool_manager().replace(Box::new(
+                    echo_tools::files::files::ReadFileTool::new().with_file_system(files.clone()),
+                ));
+                agent.tool_manager().replace(Box::new(
+                    echo_tools::files::files::WriteFileTool::new().with_file_system(files.clone()),
+                ));
+                let snapshot = crate::agent::snapshot::AgentRunSnapshot::from_agent(&agent);
+                let a = if relative {
+                    "a".into()
+                } else {
+                    files.visible.join("a").to_string_lossy().into_owned()
+                };
+                let b = if relative {
+                    "b".into()
+                } else {
+                    files.visible.join("b").to_string_lossy().into_owned()
+                };
+                let read = invoke(
+                    &snapshot,
+                    "read-target-a",
+                    "read_file",
+                    serde_json::json!({"path":a}),
+                )
+                .await?;
+                assert!(read.success);
+                assert!(files.reads.load(Ordering::SeqCst) > 0);
+                let write = invoke(
+                    &snapshot,
+                    "write-target-b",
+                    "write_file",
+                    serde_json::json!({"path":b,"content":"changed"}),
+                )
+                .await?;
+                let allowed = !force || target_alias;
+                assert_eq!(
+                    write.success, allowed,
+                    "host_alias={host_alias} target_alias={target_alias} force={force} relative={relative}: {:?}",
+                    write.error
+                );
+                assert_eq!(
+                    std::fs::read(target.join("b"))?,
+                    if allowed {
+                        b"changed".to_vec()
+                    } else {
+                        b"target-b".to_vec()
+                    }
+                );
+                assert_eq!(files.writes.load(Ordering::SeqCst) > 0, allowed);
+                assert_eq!(std::fs::read(host.join("b"))?, b"host-b");
+            }
+            Ok(())
+        }
+
+        #[tokio::test]
+        async fn source8_read_before_edit_honors_tool_base_dir_over_snapshot_cwd() -> Result<()> {
+            for read_tool_target in [false, true] {
+                let temp = tempfile::tempdir()?;
+                let a = temp.path().join("A");
+                let b = temp.path().join("B");
+                std::fs::create_dir_all(&a)?;
+                std::fs::create_dir_all(&b)?;
+                std::fs::write(a.join("x"), b"a")?;
+                std::fs::write(b.join("x"), b"b")?;
+                let mut agent = crate::agent::ReactAgentBuilder::new()
+                    .model("test-model")
+                    .enable_tools()
+                    .working_dir(&a)
+                    .build()?;
+                agent.config.force_read_before_edit = true;
+                agent.tool_manager().replace(Box::new(
+                    echo_tools::files::files::WriteFileTool::with_base_dir(&b),
+                ));
+                // 受控readonly工具使用共同父root，允许明确读取A或B的绝对路径。
+                agent.tool_manager().replace(Box::new(
+                    echo_tools::files::files::ReadFileTool::with_base_dir(temp.path()),
+                ));
+                let snapshot = crate::agent::snapshot::AgentRunSnapshot::from_agent(&agent);
+                let read_path = if read_tool_target {
+                    b.join("x")
+                } else {
+                    a.join("x")
+                };
+                let read = invoke(
+                    &snapshot,
+                    "read-A-or-B",
+                    "read_file",
+                    serde_json::json!({"path":read_path}),
+                )
+                .await?;
+                assert!(read.success);
+                let write = invoke(
+                    &snapshot,
+                    "write-relative-B",
+                    "write_file",
+                    serde_json::json!({"path":"x","content":"changed"}),
+                )
+                .await?;
+                assert_eq!(
+                    write.success, read_tool_target,
+                    "read_B={read_tool_target}: {:?}",
+                    write.error
+                );
+                assert_eq!(
+                    std::fs::read(b.join("x"))?,
+                    if read_tool_target {
+                        b"changed".to_vec()
+                    } else {
+                        b"b".to_vec()
+                    }
+                );
+                assert_eq!(std::fs::read(a.join("x"))?, b"a");
+            }
+            Ok(())
+        }
+
+        #[tokio::test]
+        async fn source8_read_from_one_provider_cannot_authorize_same_path_in_another() -> Result<()>
+        {
+            let temp = tempfile::tempdir()?;
+            let host = temp.path().join("host");
+            let first = temp.path().join("first");
+            let second = temp.path().join("second");
+            for dir in [&host, &first, &second] {
+                std::fs::create_dir_all(dir)?;
+                std::fs::write(dir.join("x"), b"original")?;
+            }
+            let make = |target: PathBuf| {
+                Arc::new(TargetFiles {
+                    visible: host.clone(),
+                    target,
+                    writes: AtomicUsize::new(0),
+                    reads: AtomicUsize::new(0),
+                    fail_canonical: AtomicBool::new(false),
+                })
+            };
+            let first_files = make(first.clone());
+            let second_files = make(second.clone());
+            let mut agent = crate::agent::ReactAgentBuilder::new()
+                .model("test-model")
+                .enable_tools()
+                .file_system(first_files.clone())
+                .working_dir(&host)
+                .build()?;
+            agent.config.force_read_before_edit = true;
+            agent.tool_manager().replace(Box::new(
+                echo_tools::files::files::WriteFileTool::new()
+                    .with_file_system(second_files.clone()),
+            ));
+            let snapshot = crate::agent::snapshot::AgentRunSnapshot::from_agent(&agent);
+            assert!(
+                invoke(
+                    &snapshot,
+                    "read-first",
+                    "read_file",
+                    serde_json::json!({"path":"x"})
+                )
+                .await?
+                .success
+            );
+            let write = invoke(
+                &snapshot,
+                "write-second",
+                "write_file",
+                serde_json::json!({"path":"x","content":"changed"}),
+            )
+            .await?;
+            assert!(!write.success, "same text path crossed provider authority");
+            assert_eq!(std::fs::read(second.join("x"))?, b"original");
+            assert_eq!(second_files.writes.load(Ordering::SeqCst), 0);
+            Ok(())
+        }
+
+        struct UnknownSourceEffectTool {
+            name: &'static str,
+            effects: Arc<AtomicUsize>,
+        }
+        impl Tool for UnknownSourceEffectTool {
+            fn name(&self) -> &str {
+                self.name
+            }
+            fn description(&self) -> &str {
+                "custom wire-like path effect without bound resolver"
+            }
+            fn parameters(&self) -> Value {
+                serde_json::json!({"type":"object","properties":{"path":{"type":"string"}},"required":["path"]})
+            }
+            fn execute<'a>(
+                &'a self,
+                params: ToolParameters,
+            ) -> futures::future::BoxFuture<'a, Result<ToolResult>> {
+                Box::pin(async move {
+                    self.effects.fetch_add(1, Ordering::SeqCst);
+                    let path = params
+                        .get("path")
+                        .and_then(Value::as_str)
+                        .ok_or_else(|| ReactError::Other("effect fixture path missing".into()))?
+                        .to_string();
+                    let effect = if self.name == "read_file" {
+                        echo_core::tools::ToolEffect::FileRead { path }
+                    } else {
+                        echo_core::tools::ToolEffect::FileEdit { path }
+                    };
+                    Ok(ToolResult::success("custom effect reported").with_effect(effect))
+                })
+            }
+        }
+
+        #[tokio::test]
+        async fn source8_unknown_custom_effects_are_preserved_without_granting_write_proof()
+        -> Result<()> {
+            use crate::trace::{InMemoryRunStore, RunEvent, RunStore};
+            for force in [false, true] {
+                let temp = tempfile::tempdir()?;
+                let path = temp.path().join("x");
+                std::fs::write(&path, b"original")?;
+                let reads = Arc::new(AtomicUsize::new(0));
+                let writes = Arc::new(AtomicUsize::new(0));
+                let traces = Arc::new(InMemoryRunStore::new());
+                let callback = Arc::new(super::RecordingCallback::default());
+                let mut agent = crate::agent::ReactAgentBuilder::new()
+                    .model("test-model")
+                    .with_run_store(traces.clone())
+                    .callback(callback.clone())
+                    .tool(Box::new(UnknownSourceEffectTool {
+                        name: "read_file",
+                        effects: reads.clone(),
+                    }))
+                    .tool(Box::new(UnknownSourceEffectTool {
+                        name: "write_file",
+                        effects: writes.clone(),
+                    }))
+                    .build()?;
+                agent.config.force_read_before_edit = force;
+                let trace = agent
+                    .start_scoped_trace_run("source proof", None, None, None, None)
+                    .await
+                    .ok_or_else(|| ReactError::Other("fixture trace missing".into()))?;
+                let mut snapshot = crate::agent::snapshot::AgentRunSnapshot::from_agent(&agent);
+                snapshot.trace_run_id = Some(trace.clone());
+                let read = invoke(
+                    &snapshot,
+                    "custom-read",
+                    "read_file",
+                    serde_json::json!({"path":path}),
+                )
+                .await?;
+                assert!(read.success);
+                assert!(matches!(
+                    read.effects.first(),
+                    Some(echo_core::tools::ToolEffect::FileRead { .. })
+                ));
+                assert_eq!(reads.load(Ordering::SeqCst), 1);
+                let write = invoke(
+                    &snapshot,
+                    "custom-write",
+                    "write_file",
+                    serde_json::json!({"path":path}),
+                )
+                .await?;
+                assert_eq!(
+                    write.success, !force,
+                    "missing source must be visible tool refusal, not infrastructure error"
+                );
+                assert_eq!(writes.load(Ordering::SeqCst), usize::from(!force));
+                if force {
+                    assert_eq!(
+                        write.failure.as_ref().map(|f| f.category),
+                        Some(crate::tools::ToolFailureCategory::Unavailable)
+                    );
+                    assert!(write.effects.is_empty());
+                } else {
+                    assert!(matches!(
+                        write.effects.first(),
+                        Some(echo_core::tools::ToolEffect::FileEdit { .. })
+                    ));
+                }
+                let run = traces
+                    .load(&trace)
+                    .await?
+                    .ok_or_else(|| ReactError::Other("effect trace missing".into()))?;
+                assert!(run.events.iter().any(|e| matches!(e,RunEvent::FileRead{path:actual,..} if actual==&path.to_string_lossy())));
+                let started = callback
+                    .start_call_ids
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .clone();
+                assert_eq!(started.iter().any(|id| id == "custom-write"), !force);
+                if force {
+                    assert!(!run.events.iter().any(
+                        |e| matches!(e,RunEvent::ToolCall{call_id,..} if call_id=="custom-write")
+                    ));
+                }
+            }
+            Ok(())
+        }
+        // 插入source8_file_target_tests模块最后}之前，作为嵌套附加控制；不追标before五case。
+        #[cfg(all(feature = "files", unix))]
+        mod source8_file_target_extra_tests {
+            use super::*;
+            use super::{TargetFiles, invoke};
+
+            #[tokio::test]
+            async fn source8_provider_error_never_falls_back_to_host_file() -> Result<()> {
+                use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+                let temp = tempfile::tempdir()?;
+                let host = temp.path().join("host");
+                let target = temp.path().join("target");
+                std::fs::create_dir_all(&host)?;
+                std::fs::create_dir_all(&target)?;
+                std::fs::write(host.join("x"), b"host-original")?;
+                std::fs::write(target.join("x"), b"target-original")?;
+                let files = Arc::new(TargetFiles {
+                    visible: host.clone(),
+                    target: target.clone(),
+                    writes: AtomicUsize::new(0),
+                    reads: AtomicUsize::new(0),
+                    fail_canonical: AtomicBool::new(false),
+                });
+                let mut agent = crate::agent::ReactAgentBuilder::new()
+                    .model("test-model")
+                    .file_system(files.clone())
+                    .working_dir(&host)
+                    .tool(Box::new(
+                        echo_tools::files::files::ReadFileTool::new()
+                            .with_file_system(files.clone()),
+                    ))
+                    .tool(Box::new(
+                        echo_tools::files::files::WriteFileTool::new()
+                            .with_file_system(files.clone()),
+                    ))
+                    .build()?;
+                agent.config.force_read_before_edit = true;
+                let snapshot = crate::agent::snapshot::AgentRunSnapshot::from_agent(&agent);
+                assert!(
+                    invoke(
+                        &snapshot,
+                        "read-before-error",
+                        "read_file",
+                        serde_json::json!({"path":"x"})
+                    )
+                    .await?
+                    .success
+                );
+                files.fail_canonical.store(true, Ordering::SeqCst);
+                let write = invoke(
+                    &snapshot,
+                    "write-after-error",
+                    "write_file",
+                    serde_json::json!({"path":"x","content":"changed"}),
+                )
+                .await;
+                match write {
+                    Ok(result) => assert!(!result.success),
+                    Err(error) => {
+                        assert!(error.to_string().contains("target canonical unavailable"))
+                    }
+                }
+                assert_eq!(files.writes.load(Ordering::SeqCst), 0);
+                assert_eq!(std::fs::read(host.join("x"))?, b"host-original");
+                assert_eq!(std::fs::read(target.join("x"))?, b"target-original");
+                Ok(())
+            }
+        }
+        // 插入source8_file_target_tests模块末尾；before为当前r08真实API，不改缓存实现。
+        struct CachedSourceRead {
+            inner: echo_tools::files::files::ReadFileTool,
+            validation_started: Option<Arc<tokio::sync::Notify>>,
+            validation_release: Option<Arc<tokio::sync::Notify>>,
+            streaming: bool,
+        }
+        impl Tool for CachedSourceRead {
+            fn name(&self) -> &str {
+                "read_file"
+            }
+            fn description(&self) -> &str {
+                "read fixture through one bound target"
+            }
+            fn parameters(&self) -> Value {
+                self.inner.parameters()
+            }
+            fn permissions(&self) -> Vec<echo_core::tools::permission::ToolPermission> {
+                self.inner.permissions()
+            }
+            fn risk_level(&self) -> echo_core::tools::ToolRiskLevel {
+                echo_core::tools::ToolRiskLevel::ReadOnly
+            }
+            fn supports_streaming(&self) -> bool {
+                self.streaming
+            }
+            fn resolve_file_tracking_path(
+                &self,
+                path: &str,
+                params: &ToolParameters,
+                ctx: &ToolContext,
+            ) -> Result<(Arc<dyn FileSystem>, PathBuf)> {
+                self.inner.resolve_file_tracking_path(path, params, ctx)
+            }
+            fn validate_parameters<'a>(
+                &'a self,
+                params: &'a ToolParameters,
+            ) -> futures::future::BoxFuture<'a, Result<()>> {
+                Box::pin(async move {
+                    self.inner.validate_parameters(params).await?;
+                    if let Some(started) = &self.validation_started {
+                        started.notify_one();
+                    }
+                    if let Some(release) = &self.validation_release {
+                        release.notified().await;
+                    }
+                    Ok(())
+                })
+            }
+            fn execute_with_context<'a>(
+                &'a self,
+                params: ToolParameters,
+                ctx: &'a ToolContext,
+            ) -> futures::future::BoxFuture<'a, Result<ToolResult>> {
+                self.inner.execute_with_context(params, ctx)
+            }
+        }
+
+        async fn source8_cached_read_observation_stays_with_selected_source(
+            streaming: bool,
+        ) -> Result<()> {
+            let temp = tempfile::tempdir()?;
+            let host = temp.path().join("host");
+            let a = temp.path().join("A");
+            let b = temp.path().join("B");
+            for path in [&host, &a, &b] {
+                std::fs::create_dir_all(path)?;
+            }
+            std::fs::write(a.join("x"), b"target-A")?;
+            std::fs::write(b.join("x"), b"target-B")?;
+            let make = |target: PathBuf| {
+                Arc::new(TargetFiles {
+                    visible: host.clone(),
+                    target,
+                    writes: AtomicUsize::new(0),
+                    reads: AtomicUsize::new(0),
+                    fail_canonical: AtomicBool::new(false),
+                })
+            };
+            let files_a = make(a.clone());
+            let files_b = make(b.clone());
+            let started = Arc::new(tokio::sync::Notify::new());
+            let release = Arc::new(tokio::sync::Notify::new());
+            let mut agent = crate::agent::ReactAgentBuilder::new()
+                .model("test-model")
+                .working_dir(&host)
+                .file_system(files_a.clone())
+                .tool(Box::new(CachedSourceRead {
+                    inner: echo_tools::files::files::ReadFileTool::new()
+                        .with_file_system(files_a.clone()),
+                    validation_started: Some(started.clone()),
+                    validation_release: Some(release.clone()),
+                    streaming,
+                }))
+                .build()?;
+            agent.config.force_read_before_edit = true;
+            let snapshot = Arc::new(crate::agent::snapshot::AgentRunSnapshot::from_agent(&agent));
+            let first_snapshot = snapshot.clone();
+            let first = tokio::spawn(async move {
+                invoke(
+                    &first_snapshot,
+                    "selected-A-pending-validator",
+                    "read_file",
+                    serde_json::json!({"path":"x"}),
+                )
+                .await
+            });
+            let entered =
+                tokio::time::timeout(std::time::Duration::from_secs(2), started.notified()).await;
+            agent.tool_manager().replace(Box::new(CachedSourceRead {
+                inner: echo_tools::files::files::ReadFileTool::new()
+                    .with_file_system(files_b.clone()),
+                validation_started: None,
+                validation_release: None,
+                streaming,
+            }));
+            let b_result = invoke(
+                &snapshot,
+                "B-fill-new-cache",
+                "read_file",
+                serde_json::json!({"path":"x"}),
+            )
+            .await;
+            // 无论B回包怎样，先恢复并join已选中的A，再断言；不遗留测试producer。
+            release.notify_one();
+            let a_result = first.await.map_err(|e| ReactError::Other(e.to_string()))?;
+            let b_result = b_result?;
+            let a_result = a_result?;
+            let b_cached = invoke(
+                &snapshot,
+                "B-positive-cache",
+                "read_file",
+                serde_json::json!({"path":"x"}),
+            )
+            .await?;
+            let read_a = files_a.reads.load(Ordering::SeqCst);
+            let read_b = files_b.reads.load(Ordering::SeqCst);
+            agent.tool_manager().replace(Box::new(
+                echo_tools::files::files::WriteFileTool::new().with_file_system(files_a.clone()),
+            ));
+            let write = invoke(
+                &snapshot,
+                "write-A-after-source-proof",
+                "write_file",
+                serde_json::json!({"path":"x","content":"changed-A"}),
+            )
+            .await?;
+            let wrote_a = files_a.writes.load(Ordering::SeqCst) > 0;
+            assert!(entered.is_ok());
+            assert!(b_result.success && b_cached.success && a_result.success);
+            assert!(b_result.output.contains("target-B") && b_cached.output.contains("target-B"));
+            assert_eq!(
+                read_b, 1,
+                "B positive call must use its own valid new cache"
+            );
+            assert!(
+                !wrote_a || read_a > 0,
+                "B cached FileRead was relabeled as A and authorized an unread A write"
+            );
+            assert_eq!(
+                read_a, 1,
+                "selected A must actually read A after the cache epoch changes"
+            );
+            assert!(a_result.output.contains("target-A"));
+            assert!(
+                write.success && wrote_a,
+                "the actual A read must authorize its own source"
+            );
+            assert_eq!(std::fs::read(a.join("x"))?, b"changed-A");
+            assert_eq!(std::fs::read(b.join("x"))?, b"target-B");
+            Ok(())
+        }
+
+        #[tokio::test]
+        async fn source8_cache_epoch_cannot_relabel_file_read_source_nonstream() -> Result<()> {
+            source8_cached_read_observation_stays_with_selected_source(false).await
+        }
+        #[tokio::test]
+        async fn source8_cache_epoch_cannot_relabel_file_read_source_stream() -> Result<()> {
+            source8_cached_read_observation_stays_with_selected_source(true).await
+        }
+    }
+
+    // 仅GREEN后控制：显式引用获准的新expected Arc入参，不放进原API RED overlay。
+    #[cfg(feature = "human-loop")]
+    #[tokio::test]
+    async fn source8_checked_owned_tool_started_before_replace_can_finish() -> Result<()> {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let manager = Arc::new(crate::tools::ToolManager::new());
+        let old_effects = Arc::new(AtomicUsize::new(0));
+        let new_effects = Arc::new(AtomicUsize::new(0));
+        let started = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        manager.try_register(Box::new(Source8PermissionTool {
+            mutating: false,
+            streaming: false,
+            effects: old_effects.clone(),
+            started: Some(started.clone()),
+            release: Some(release.clone()),
+        }))?;
+        let expected = manager
+            .get_tool("source8_permission_swap")
+            .ok_or_else(|| ReactError::Other("original tool missing".into()))?;
+        let running_manager = manager.clone();
+        let task = tokio::spawn(async move {
+            let admission = |_tool: &dyn Tool| Ok(());
+            running_manager
+                .execute_tool_with_context_draining_started_checked(
+                    "source8_permission_swap",
+                    ToolParameters::new(),
+                    &ToolContext::default(),
+                    &expected,
+                    &admission,
+                )
+                .await
+        });
+        let entered =
+            tokio::time::timeout(std::time::Duration::from_secs(2), started.notified()).await;
+        manager.replace(Box::new(Source8PermissionTool {
+            mutating: true,
+            streaming: false,
+            effects: new_effects.clone(),
+            started: None,
+            release: None,
+        }));
+        // 无论入口检查是否失败，都先释放并join原source，断言不会遗留等待任务。
+        release.notify_one();
+        let result = task
+            .await
+            .map_err(|error| ReactError::Other(error.to_string()))??;
+        assert!(entered.is_ok());
+        assert!(result.success);
+        assert_eq!(result.output, "original-read");
+        assert_eq!(old_effects.load(Ordering::SeqCst), 1);
+        assert_eq!(new_effects.load(Ordering::SeqCst), 0);
         Ok(())
     }
 }

@@ -188,7 +188,7 @@ pub mod prelude {
     pub use crate::budget::TokenBudgetConfig;
     pub use echo_core::agent::{PromptTemplateManager, RunBudgetPolicy};
     // Config
-    pub use crate::config::{AgentSettings, FrameworkConfig, ModelConfig, SourcedModelConfig};
+    pub use crate::config::{AgentSettings, FrameworkConfig, ModelConfig};
 
     /// Convenience alias for [`ReactAgentBuilder`], the canonical builder type.
     pub type AgentBuilder = ReactAgentBuilder;

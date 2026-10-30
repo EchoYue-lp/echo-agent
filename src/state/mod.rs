@@ -92,8 +92,8 @@ pub mod delivery {
 
 // ── AgentCheckpoint ────────────────────────────────────────────────────
 
-pub(crate) mod legacy_control_history;
-pub use legacy_control_history::pending_recovery::PreparedPendingControlRecovery;
+#[cfg(test)]
+mod current_native_recovery_tests;
 
 /// A full checkpoint of agent runtime state, suitable for serialization
 /// and later restoration (hydration).
@@ -103,10 +103,6 @@ pub struct AgentCheckpoint {
     pub conversation_id: String,
     /// Serialized message history.
     pub messages_json: String,
-    /// Legacy plan text retained for checkpoint decoding and Store round trips.
-    /// ReactAgent neither restores this as task state nor writes new values;
-    /// the revisioned Task graph is the planning authority.
-    pub current_plan: Option<String>,
     /// Names of currently active skills.
     pub active_skills: Vec<String>,
     /// If the agent was blocked, the reason.
@@ -136,7 +132,7 @@ pub struct TranscriptProjectionCheckpoint {
     pub projected: Vec<TranscriptProjectionMessage>,
     /// Derived context occurrences, interleaved with `projected` by position.
     /// They have no transcript ordinal and do not acknowledge a new fact.
-    /// `None` denotes a legacy cursor without transformation provenance.
+    /// `None`表示本次视图未声明context-only派生；当前格式仍可表示无派生的模式。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_only: Option<Vec<TranscriptContextOnlyMessage>>,
 }
@@ -234,7 +230,6 @@ pub struct RestoredAgentCheckpoint {
 
 #[derive(Serialize, Deserialize)]
 struct AgentCheckpointPayload {
-    #[serde(default = "default_agent_checkpoint_payload_version")]
     schema_version: u16,
     messages: Vec<crate::llm::types::Message>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -243,24 +238,13 @@ struct AgentCheckpointPayload {
     pending_transcript_projection: Option<PendingTranscriptProjection>,
 }
 
-fn default_agent_checkpoint_payload_version() -> u16 {
-    1
-}
-
-#[derive(Deserialize)]
-#[serde(untagged)]
-enum AgentCheckpointPayloadCompat {
-    Current(Box<AgentCheckpointPayload>),
-    Legacy(Vec<crate::llm::types::Message>),
-}
-
 impl AgentCheckpoint {
     /// Create a new checkpoint.
     pub fn new(conversation_id: impl Into<String>) -> Self {
         Self {
             conversation_id: conversation_id.into(),
             messages_json: String::new(),
-            current_plan: None,
+
             active_skills: Vec::new(),
             blocked_reason: None,
             working_dir: None,
@@ -306,25 +290,8 @@ impl AgentCheckpoint {
     pub fn restore_managed_runtime_payload(
         &self,
     ) -> crate::error::Result<ManagedAgentCheckpointPayload> {
-        self.restore_managed_payload_for_read(false)
-    }
-
-    /// 原恢复owner的只读检查；仅推迟工具配对语义，格式/身份/cursor/debt照常核验。
-    /// 返回值不是可执行或已hydrated许可，普通restore/save/CAS仍用严格入口。
-    pub(crate) fn inspect_payload_for_recovery(
-        &self,
-    ) -> crate::error::Result<ManagedAgentCheckpointPayload> {
-        self.restore_managed_payload_for_read(true)
-    }
-
-    fn restore_managed_payload_for_read(
-        &self,
-        defer_tool_pairing: bool,
-    ) -> crate::error::Result<ManagedAgentCheckpointPayload> {
         let payload = self.restore_payload()?;
-        if !defer_tool_pairing {
-            validate_tool_message_pairing(&payload.messages)?;
-        }
+        validate_tool_message_pairing(&payload.messages)?;
         self.validate_transcript_projection(payload.transcript_projection.as_ref())?;
         self.validate_pending_transcript_projection(
             payload.pending_transcript_projection.as_ref(),
@@ -492,17 +459,8 @@ impl AgentCheckpoint {
         transcript_projection: Option<TranscriptProjectionCheckpoint>,
         pending_transcript_projection: Option<PendingTranscriptProjection>,
     ) -> crate::error::Result<String> {
-        let bound = transcript_projection
-            .as_ref()
-            .is_some_and(|cursor| cursor.context_only.is_some())
-            || pending_transcript_projection
-                .as_ref()
-                .is_some_and(|pending| {
-                    pending.cursor_before.context_only.is_some()
-                        || pending.cursor_after.context_only.is_some()
-                });
         serde_json::to_string(&AgentCheckpointPayload {
-            schema_version: if bound { 3 } else { 2 },
+            schema_version: 3,
             messages,
             transcript_projection,
             pending_transcript_projection,
@@ -517,64 +475,25 @@ impl AgentCheckpoint {
     }
 
     fn restore_payload(&self) -> crate::error::Result<ManagedAgentCheckpointPayload> {
-        let payload: AgentCheckpointPayloadCompat = serde_json::from_str(&self.messages_json)
-            .map_err(|error| {
-                crate::error::ReactError::RuntimeState(Box::new(
-                    echo_core::error::RuntimeStateError::SerializationError(format!(
-                        "Failed to deserialize checkpoint messages: {error}"
-                    )),
+        // 当前payload只有一种明确版本。raw/runtime-only可不带cursor；缺版本、裸数组
+        // 与旧版本均不是当前记录，不能通过缺字段猜出恢复许可。
+        let payload: AgentCheckpointPayload =
+            serde_json::from_str(&self.messages_json).map_err(|error| {
+                invalid_checkpoint(format!(
+                    "Failed to deserialize current checkpoint payload: {error}"
                 ))
             })?;
-        match payload {
-            AgentCheckpointPayloadCompat::Current(payload) => {
-                if !(1..=3).contains(&payload.schema_version) {
-                    return Err(invalid_checkpoint(format!(
-                        "unsupported checkpoint payload version {}",
-                        payload.schema_version
-                    )));
-                }
-                if payload.schema_version == 1 && payload.pending_transcript_projection.is_some() {
-                    return Err(invalid_checkpoint(
-                        "legacy checkpoint payload cannot contain pending transcript projection"
-                            .to_string(),
-                    ));
-                }
-                let bound = payload
-                    .transcript_projection
-                    .as_ref()
-                    .is_some_and(|cursor| cursor.context_only.is_some())
-                    || payload
-                        .pending_transcript_projection
-                        .as_ref()
-                        .is_some_and(|pending| {
-                            pending.cursor_before.context_only.is_some()
-                                || pending.cursor_after.context_only.is_some()
-                        });
-                let effective = payload
-                    .pending_transcript_projection
-                    .as_ref()
-                    .map(|pending| &pending.cursor_after)
-                    .or(payload.transcript_projection.as_ref());
-                if (payload.schema_version < 3 && bound)
-                    || (payload.schema_version == 3
-                        && !effective.is_some_and(|cursor| cursor.context_only.is_some()))
-                {
-                    return Err(invalid_checkpoint(
-                        "checkpoint context binding requires payload version 3".to_string(),
-                    ));
-                }
-                Ok(ManagedAgentCheckpointPayload {
-                    messages: payload.messages,
-                    transcript_projection: payload.transcript_projection,
-                    pending_transcript_projection: payload.pending_transcript_projection,
-                })
-            }
-            AgentCheckpointPayloadCompat::Legacy(messages) => Ok(ManagedAgentCheckpointPayload {
-                messages,
-                transcript_projection: None,
-                pending_transcript_projection: None,
-            }),
+        if payload.schema_version != 3 {
+            return Err(invalid_checkpoint(format!(
+                "unsupported checkpoint payload version {}",
+                payload.schema_version
+            )));
         }
+        Ok(ManagedAgentCheckpointPayload {
+            messages: payload.messages,
+            transcript_projection: payload.transcript_projection,
+            pending_transcript_projection: payload.pending_transcript_projection,
+        })
     }
 
     /// Completed tool call IDs present in this checkpoint, in message order.
@@ -713,15 +632,6 @@ pub struct RuntimeCheckpointCasRequest {
     pub checkpoint: AgentCheckpoint,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub managed_import: Option<ManagedImportEpochTransition>,
-}
-
-/// 原恢复owner提交派生context的输入；沿同一个CAS版本，不另建恢复状态机。
-/// source保原checkpoint/版本，origins只承载已核运行期注册来源。
-#[derive(Clone)]
-pub struct RuntimeCheckpointRecoveryRequest {
-    pub original: ManagedRuntimeStateSnapshot,
-    pub checkpoint: AgentCheckpoint,
-    pub origins: Vec<crate::compression::RecoveredToolOrigin>,
 }
 
 /// Proof that one managed transcript import advanced the epoch being bound.
@@ -1390,39 +1300,6 @@ pub trait RuntimeStateStore: Send + Sync {
     ) -> futures::future::BoxFuture<'a, crate::error::Result<Option<ManagedRuntimeStateSnapshot>>>
     {
         self.load_runtime_state(scope_id, runtime_state_id)
-    }
-
-    /// 只读检查原恢复记录，不修复/写回/归一化owner或索引。
-    /// 未显式实现纯读检查时默认Unsupported；normal load可能执行reconcile写入，不能代用。
-    /// 原checkpoint和scope/version必须原样返回，不签发执行或新副作用许可。
-    fn inspect_runtime_state_for_recovery_with_context<'a>(
-        &'a self,
-        _context: crate::memory::PersistenceCallContext,
-        _scope_id: &'a str,
-        _runtime_state_id: &'a str,
-    ) -> futures::future::BoxFuture<'a, crate::error::Result<Option<ManagedRuntimeStateSnapshot>>>
-    {
-        Box::pin(async {
-            Err(echo_core::error::RuntimeStateError::Unsupported(
-                "explicit readonly runtime recovery inspection".to_string(),
-            )
-            .into())
-        })
-    }
-
-    /// 保存不可变旧来源后，复用原CAS提交已知控制历史派生版本。
-    /// 默认不支持，不能默默降级为无版本写入或改原digest来放行。
-    fn commit_checkpoint_recovery_with_context<'a>(
-        &'a self,
-        _context: crate::memory::PersistenceCallContext,
-        _request: RuntimeCheckpointRecoveryRequest,
-    ) -> futures::future::BoxFuture<'a, crate::error::Result<RuntimeCheckpointCasReceipt>> {
-        Box::pin(async {
-            Err(echo_core::error::RuntimeStateError::Unsupported(
-                "checkpoint recovery CAS commit".to_string(),
-            )
-            .into())
-        })
     }
 
     /// Load the stable scope authority used to fence admission and deletion.
@@ -2593,29 +2470,20 @@ fn require_settled_transcript_projection(
 /// Managed state first settles its durable transcript effect, verifies the
 /// pending marker is gone, and retires the generation behind a tombstone. It
 /// never deletes a separate transcript that happens to share the incarnation
-/// ID because no stable transcript-delete identity is retained here. Legacy
-/// unmanaged pairs keep their historical incarnation-transcript cleanup.
+/// ID because no stable transcript-delete identity is retained here.
+/// Raw Store CRUD remains explicit; this coordinator requires managed capabilities.
 pub async fn clear_persisted_runtime_incarnation(
     conversation_store: &dyn crate::memory::ConversationStore,
     runtime_state_store: &dyn RuntimeStateStore,
     scope_id: &str,
     runtime_state_id: &str,
 ) -> crate::error::Result<RuntimeStateClearReceipt> {
-    if managed_persistence_pair(conversation_store, runtime_state_store)? {
-        return clear_persisted_runtime_incarnation_with_context(
-            conversation_store,
-            runtime_state_store,
-            scope_id,
-            runtime_state_id,
-            crate::memory::PersistenceCallContext::with_timeout(PERSISTED_STATE_OPERATION_TIMEOUT)?,
-        )
-        .await;
-    }
-    clear_legacy_runtime_incarnation(
+    clear_persisted_runtime_incarnation_with_context(
         conversation_store,
         runtime_state_store,
         scope_id,
         runtime_state_id,
+        crate::memory::PersistenceCallContext::with_timeout(PERSISTED_STATE_OPERATION_TIMEOUT)?,
     )
     .await
 }
@@ -2678,32 +2546,6 @@ fn managed_persistence_pair(
         )
         .into()),
     }
-}
-
-async fn clear_legacy_runtime_incarnation(
-    conversation_store: &dyn crate::memory::ConversationStore,
-    runtime_state_store: &dyn RuntimeStateStore,
-    scope_id: &str,
-    runtime_state_id: &str,
-) -> crate::error::Result<RuntimeStateClearReceipt> {
-    if runtime_state_id != scope_id {
-        let indexed = runtime_state_store.runtime_state_ids(scope_id).await?;
-        if !indexed
-            .iter()
-            .any(|indexed_id| indexed_id == runtime_state_id)
-        {
-            return Err(echo_core::error::RuntimeStateError::NotFound(format!(
-                "runtime state {runtime_state_id} is not owned by scope {scope_id}"
-            ))
-            .into());
-        }
-        conversation_store
-            .delete_conversation(runtime_state_id)
-            .await?;
-    }
-    runtime_state_store
-        .clear_runtime_state(scope_id, runtime_state_id)
-        .await
 }
 
 async fn clear_managed_runtime_incarnation(
@@ -2835,79 +2677,6 @@ fn expected_runtime_state_version(version: &RuntimeStateVersion) -> RuntimeState
         },
         RuntimeStateVersion::Retired { .. } => RuntimeStateExpectedVersion::Absent,
     }
-}
-
-/// Delete a stable user-visible transcript and every runtime checkpoint bound
-/// to the same scope.
-///
-/// This compatibility entry point only operates on legacy unmanaged stores.
-/// Managed stores require [`delete_persisted_conversation_managed`] so retries
-/// retain the original epoch-fenced delete identity.
-pub async fn delete_persisted_conversation(
-    conversation_store: &dyn crate::memory::ConversationStore,
-    runtime_state_store: &dyn RuntimeStateStore,
-    conversation_id: &str,
-) -> crate::error::Result<PersistedConversationDeleteReceipt> {
-    if managed_persistence_pair(conversation_store, runtime_state_store)? {
-        return Err(echo_core::error::RuntimeStateError::ManagedStateRequiresCas(
-            "managed conversation deletion requires delete_persisted_conversation_managed with a stable ManagedConversationDelete request"
-                .to_string(),
-        )
-        .into());
-    }
-    delete_legacy_persisted_conversation(conversation_store, runtime_state_store, conversation_id)
-        .await
-}
-
-/// Context-aware delete compatibility boundary. Managed stores must use the
-/// stable-request API; legacy stores fail closed because their raw delete APIs
-/// cannot fence a blocking write after caller cancellation.
-pub async fn delete_persisted_conversation_with_context(
-    conversation_store: &dyn crate::memory::ConversationStore,
-    runtime_state_store: &dyn RuntimeStateStore,
-    _conversation_id: &str,
-    context: crate::memory::PersistenceCallContext,
-) -> crate::error::Result<PersistedConversationDeleteReceipt> {
-    let _budget = PersistenceOperationDeadline::from_context(context)?;
-    if managed_persistence_pair(conversation_store, runtime_state_store)? {
-        return Err(echo_core::error::RuntimeStateError::ManagedStateRequiresCas(
-            "managed conversation deletion requires delete_persisted_conversation_managed with a stable ManagedConversationDelete request"
-                .to_string(),
-        )
-        .into());
-    }
-    Err(echo_core::error::RuntimeStateError::Unsupported(
-        "context-aware conversation delete is unsupported for legacy stores".to_string(),
-    )
-    .into())
-}
-
-async fn delete_legacy_persisted_conversation(
-    conversation_store: &dyn crate::memory::ConversationStore,
-    runtime_state_store: &dyn RuntimeStateStore,
-    conversation_id: &str,
-) -> crate::error::Result<PersistedConversationDeleteReceipt> {
-    let runtime_state_ids = runtime_state_store
-        .runtime_state_ids(conversation_id)
-        .await?;
-    for runtime_state_id in &runtime_state_ids {
-        if runtime_state_id != conversation_id {
-            conversation_store
-                .delete_conversation(runtime_state_id)
-                .await?;
-        }
-    }
-    let runtime = runtime_state_store
-        .clear_runtime_state_scope(conversation_id)
-        .await?;
-    conversation_store
-        .delete_conversation(conversation_id)
-        .await?;
-    Ok(PersistedConversationDeleteReceipt {
-        conversation_id: conversation_id.to_string(),
-        runtime_state_ids: runtime.runtime_state_ids,
-        retirement: None,
-    })
 }
 
 /// Delete one managed conversation using a caller-retained, retry-stable
@@ -3109,13 +2878,35 @@ mod checkpoint_tests {
 
     fn checkpoint(messages: Vec<Message>) -> crate::error::Result<AgentCheckpoint> {
         let mut checkpoint = AgentCheckpoint::new("conversation-1");
-        checkpoint.messages_json = serde_json::to_string(&messages)
-            .map_err(|error| crate::error::ReactError::Other(error.to_string()))?;
+        checkpoint.messages_json = AgentCheckpoint::serialize_payload(messages, None)?;
         Ok(checkpoint)
     }
 
     #[test]
-    fn context_binding_schema3_roundtrip_legacy_and_corruption() -> crate::error::Result<()> {
+    fn current_payload_rejects_missing_version_old_versions_and_bare_arrays()
+    -> crate::error::Result<()> {
+        let mut checkpoint = AgentCheckpoint::new("current-payload");
+        for payload in [
+            "[]",
+            r#"{"messages":[]}"#,
+            r#"{"schema_version":1,"messages":[]}"#,
+            r#"{"schema_version":2,"messages":[]}"#,
+        ] {
+            checkpoint.messages_json = payload.into();
+            assert!(checkpoint.restore_managed_runtime_payload().is_err());
+        }
+        checkpoint.messages_json = AgentCheckpoint::serialize_payload(Vec::new(), None)?;
+        assert!(
+            checkpoint
+                .restore_managed_runtime_payload()?
+                .messages
+                .is_empty()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn current_schema3_roundtrip_bound_unbound_and_corruption() -> crate::error::Result<()> {
         let messages = vec![
             Message::user("fact user".to_string()),
             Message::user("derived replacement".to_string()),
@@ -3194,22 +2985,33 @@ mod checkpoint_tests {
             serde_json::json!(2);
         checkpoint.messages_json = serde_json::to_string(&downlabel)?;
         assert!(checkpoint.restore_managed_runtime_payload().is_err());
-        let mut legacy = cursor;
-        legacy.context_only = None;
+        let mut unbound = cursor;
+        unbound.context_only = None;
         checkpoint.messages_json =
-            AgentCheckpoint::serialize_payload(messages, Some(legacy.clone()))?;
+            AgentCheckpoint::serialize_payload(messages, Some(unbound.clone()))?;
         let encoded: serde_json::Value = serde_json::from_str(&checkpoint.messages_json)?;
         assert_eq!(
             encoded
                 .get("schema_version")
                 .and_then(serde_json::Value::as_u64),
-            Some(2)
+            Some(3)
         );
         assert_eq!(
             checkpoint
                 .restore_managed_runtime_payload()?
                 .transcript_projection,
-            Some(legacy)
+            Some(unbound)
+        );
+        // 无cursor仍是当前raw/runtime-only能力，不把统一schema误绑managed cursor。
+        checkpoint.messages_json = AgentCheckpoint::serialize_payload(
+            vec![Message::user("当前裸Store内容".into())],
+            None,
+        )?;
+        assert!(
+            checkpoint
+                .restore_managed_runtime_payload()?
+                .transcript_projection
+                .is_none()
         );
         Ok(())
     }
@@ -3293,16 +3095,10 @@ mod checkpoint_tests {
             epoch,
             runtime_state_id,
             0,
-            vec![crate::memory::StoredMessage {
-                id: None,
-                conversation_id: conversation_id.to_string(),
-                role: "user".to_string(),
-                content: Some("pending transcript".to_string()),
-                attachments_json: None,
-                tool_calls_json: None,
-                tool_result_json: None,
-                created_at: "2026-09-17T00:00:00Z".to_string(),
-            }],
+            vec![crate::memory::project_message(
+                conversation_id,
+                &Message::user("pending transcript".to_string()),
+            )?],
         )?;
         let projected_item = batch.items.first().ok_or_else(|| {
             crate::error::ReactError::Other("prepared batch is empty".to_string())
@@ -3827,16 +3623,10 @@ mod checkpoint_tests {
             1,
             "conversation-1",
             0,
-            vec![crate::memory::StoredMessage {
-                id: None,
-                conversation_id: "product-conversation".to_string(),
-                role: "user".to_string(),
-                content: Some("hello".to_string()),
-                attachments_json: None,
-                tool_calls_json: None,
-                tool_result_json: None,
-                created_at: "2026-09-16T00:00:00Z".to_string(),
-            }],
+            vec![crate::memory::project_message(
+                "product-conversation",
+                &Message::user("hello".to_string()),
+            )?],
         )?;
         let projected_item = batch.items.first().ok_or_else(|| {
             crate::error::ReactError::Other("prepared batch is empty".to_string())
@@ -4097,11 +3887,6 @@ mod checkpoint_tests {
             "delete-retry",
             acquired.authority.epoch,
         )?;
-        assert!(
-            delete_persisted_conversation(&conversations, &runtime, "delete-retry")
-                .await
-                .is_err()
-        );
         let deleted =
             delete_persisted_conversation_managed(&conversations, &runtime, delete.clone()).await?;
         let retirement = deleted.retirement.as_ref().ok_or_else(|| {
@@ -4219,16 +4004,6 @@ mod checkpoint_tests {
             .await
             .is_err()
         );
-        assert!(
-            delete_persisted_conversation_with_context(
-                &conversations,
-                &runtime,
-                "expired-managed",
-                expired,
-            )
-            .await
-            .is_err()
-        );
         let after = runtime
             .load_runtime_state("expired-managed", "expired-generation")
             .await?
@@ -4271,16 +4046,6 @@ mod checkpoint_tests {
                 &legacy_runtime,
                 "legacy-scope",
                 "legacy-runtime",
-                legacy_context,
-            )
-            .await
-            .is_err()
-        );
-        assert!(
-            delete_persisted_conversation_with_context(
-                &legacy_conversations,
-                &legacy_runtime,
-                "legacy-scope",
                 legacy_context,
             )
             .await

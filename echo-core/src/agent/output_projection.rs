@@ -5,7 +5,7 @@
 
 use super::{AssistantMessageBlock, AssistantPhase, ExecutionStatus, ExecutionStatusKind};
 use crate::error::{ReactError, Result};
-use crate::llm::types::ReasoningBlock;
+use crate::llm::types::{ProviderOutputSource, ReasoningBlock};
 use std::collections::BTreeMap;
 
 #[derive(Debug)]
@@ -16,12 +16,20 @@ pub struct AssistantTextDelta {
     pub reasoning_finished: bool,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum ReasoningOrigin {
+    CanonicalBlock(String),
+    NativeItem(String),
+}
+
 #[derive(Default)]
 struct BlockProjection {
     reasoning_seen: bool,
     complete: bool,
     phase: Option<AssistantPhase>,
     text: String,
+    source: Option<ProviderOutputSource>,
+    reasoning_coordinate: Option<(ReasoningOrigin, String, usize)>,
 }
 
 /// 只保存本流已观察事实，不从旧事件或缺字段资料补造 owner/phase/成功。
@@ -33,7 +41,7 @@ pub struct AgentOutputProjection {
     blocks: BTreeMap<(String, String), BlockProjection>,
     confirmed_answer: Option<String>,
     final_presentation_taken: bool,
-    reasoning_parts: BTreeMap<(String, String, String, usize), String>,
+    reasoning_parts: BTreeMap<(String, ReasoningOrigin, String, usize), String>,
     terminal: Option<ExecutionStatus>,
 }
 
@@ -42,6 +50,11 @@ fn invalid(message: &str) -> ReactError {
 }
 
 impl AgentOutputProjection {
+    /// Original source identity, exposed only after its Started was validated.
+    pub fn execution_id(&self) -> Option<&str> {
+        self.execution_id.as_deref()
+    }
+
     pub fn observe_status(&mut self, status: &ExecutionStatus) -> Result<bool> {
         if status.adapter_generated {
             return Err(invalid("retired wrapper-generated execution status"));
@@ -115,31 +128,67 @@ impl AgentOutputProjection {
         }
         let reasoning = block.phase == AssistantPhase::Reasoning;
         let mut text = block.delta.clone();
+        let canonical_key = (block.request_id.clone(), block.block_id.clone());
+        let previous_state = self.blocks.get(&canonical_key);
+        let previous_source = previous_state.and_then(|state| state.source.as_ref());
+        if let (Some(previous), Some(current)) = (previous_source, block.provider_source.as_ref())
+            && (previous.protocol != current.protocol
+                || previous.request_id != current.request_id
+                || previous.item_id != current.item_id
+                || previous.output_index != current.output_index
+                || previous.content_index != current.content_index
+                || previous.content_kind != current.content_kind)
+        {
+            return Err(invalid(
+                "canonical block changed its known native coordinates",
+            ));
+        }
+        let effective_source = block.provider_source.as_ref().or(previous_source);
+        let previous_coordinate =
+            previous_state.and_then(|state| state.reasoning_coordinate.clone());
+        let mut reasoning_coordinate = None;
         if reasoning {
-            let item = block
-                .provider_source
-                .as_ref()
-                .map(|source| source.item_id.clone())
-                .unwrap_or_else(|| match block.reasoning.as_ref() {
-                    Some(ReasoningBlock::Opaque { id, .. }) => id.clone(),
-                    _ => block.block_id.clone(),
-                });
-            let kind = if block
-                .provider_source
-                .as_ref()
-                .and_then(|source| source.content_kind.as_deref())
+            let item = effective_source
+                .map(|source| ReasoningOrigin::NativeItem(source.item_id.clone()))
+                // 未知native来源的前缀仅属于此canonical block，不能与同名native item碰撞。
+                .unwrap_or_else(|| ReasoningOrigin::CanonicalBlock(block.block_id.clone()));
+            let kind = if effective_source.and_then(|source| source.content_kind.as_deref())
                 == Some("summary_text")
             {
                 "summary"
             } else {
                 "thinking"
             };
-            let part = block
-                .provider_source
-                .as_ref()
+            let part = effective_source
                 .and_then(|source| source.content_index)
                 .map(|index| index as usize)
                 .unwrap_or(0);
+            let coordinate = (item.clone(), kind.to_string(), part);
+            // 原canonical block先有正文、后有native来源时，只搬移已呈现前缀。
+            // 补全依据同request/block及真实坐标，不按文字相似度跨请求去重。
+            if let Some(previous) = previous_coordinate
+                && previous != coordinate
+                && previous_source.is_none()
+                && block.provider_source.is_some()
+            {
+                let old_key = (block.request_id.clone(), previous.0, previous.1, previous.2);
+                let new_key = (block.request_id.clone(), item.clone(), kind.into(), part);
+                if let Some(prior) = self.reasoning_parts.get(&old_key).cloned() {
+                    let merged = match self.reasoning_parts.get(&new_key) {
+                        Some(existing) if existing.starts_with(&prior) => existing.clone(),
+                        Some(existing) if prior.starts_with(existing) => prior,
+                        Some(_) => {
+                            return Err(invalid(
+                                "native reasoning source conflicts with emitted prefix",
+                            ));
+                        }
+                        None => prior,
+                    };
+                    self.reasoning_parts.remove(&old_key);
+                    self.reasoning_parts.insert(new_key, merged);
+                }
+            }
+            reasoning_coordinate = Some(coordinate);
             if !block.delta.is_empty() {
                 self.reasoning_parts
                     .entry((block.request_id.clone(), item.clone(), kind.into(), part))
@@ -170,8 +219,13 @@ impl AgentOutputProjection {
                 }
             }
         }
-        let key = (block.request_id.clone(), block.block_id.clone());
-        let state = self.blocks.entry(key).or_default();
+        let state = self.blocks.entry(canonical_key).or_default();
+        if let Some(source) = &block.provider_source {
+            state.source = Some(source.clone());
+        }
+        if reasoning_coordinate.is_some() {
+            state.reasoning_coordinate = reasoning_coordinate;
+        }
         let reasoning_started = reasoning && !state.reasoning_seen;
         let reasoning_finished = reasoning && block.complete && !state.complete;
         state.reasoning_seen |= reasoning;
@@ -208,7 +262,9 @@ impl AgentOutputProjection {
         Ok(())
     }
 
-    /// 调用方读完原source EOF后，从真实runtime terminal的request坐标补最终呈现。
+    /// 从已验证的原生 Settled 与其 request 坐标补最终显示；只返回已批准正文的尾文。
+    /// ACP 等逐事件 sink 可在 Settled 时调用用于显示，这不证明物理 EOF 或 Turn receipt。
+    /// 执行 owner 必须继续读同一原 source 到真实 EOF，之后才可调用 `finish`。
     /// final通知没有request_id，因此不能把‘最近Unknown正文’猜作当前最终候选。
     pub fn take_final_presentation(&mut self) -> Result<Option<String>> {
         if self.final_presentation_taken {
@@ -526,6 +582,113 @@ mod tests {
                 .observe_block(&done)?
                 .is_some_and(|delta| delta.text.is_empty())
         );
+        Ok(())
+    }
+
+    #[test]
+    fn late_native_source_keeps_canonical_reasoning_prefix_without_repetition() -> Result<()> {
+        for opaque in [false, true] {
+            let mut output = AgentOutputProjection::default();
+            output.observe_status(&status("execution", 0, ExecutionStatusKind::Started))?;
+            let mut first = block("canonical-request", 0, AssistantPhase::Reasoning, "已显示");
+            first.block_id = "stable-canonical-block".into();
+            assert_eq!(
+                output.observe_block(&first)?.map(|delta| delta.text),
+                Some("已显示".into())
+            );
+            let mut done = first.clone();
+            done.sequence = 1;
+            done.delta.clear();
+            done.complete = true;
+            done.provider_source = Some(crate::llm::types::ProviderOutputSource {
+                protocol: if opaque {
+                    crate::llm::LlmApiProtocol::Responses
+                } else {
+                    crate::llm::LlmApiProtocol::Anthropic
+                },
+                request_id: "actual-native-response".into(),
+                item_id: "actual-native-item".into(),
+                output_index: 5,
+                content_index: opaque.then_some(0),
+                content_kind: Some(if opaque { "summary_text" } else { "thinking" }.into()),
+                phase: None,
+            });
+            done.reasoning = Some(if opaque {
+                ReasoningBlock::Opaque {
+                    provider: "responses".into(),
+                    id: "actual-native-item".into(),
+                    data: "never-display-encrypted".into(),
+                    summary: vec!["已显示新增".into()],
+                }
+            } else {
+                ReasoningBlock::Signed {
+                    thinking: "已显示新增".into(),
+                    signature: "never-display-signature".into(),
+                }
+            });
+            assert_eq!(
+                output.observe_block(&done)?.map(|delta| delta.text),
+                Some("新增".into()),
+                "late provenance must retain the prefix of the same canonical block"
+            );
+            let mut foreign = done;
+            foreign.request_id = "other-canonical-request".into();
+            foreign.sequence = 2;
+            assert_eq!(
+                output.observe_block(&foreign)?.map(|delta| delta.text),
+                Some("已显示新增".into()),
+                "another canonical request has no emitted prefix to reuse"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn late_native_source_does_not_move_another_blocks_same_named_native_prefix() -> Result<()> {
+        let mut output = AgentOutputProjection::default();
+        output.observe_status(&status("execution", 0, ExecutionStatusKind::Started))?;
+        let mut local = block("canonical-request", 0, AssistantPhase::Reasoning, "甲");
+        local.block_id = "same-name".into();
+        output.observe_block(&local)?;
+        let mut other = local.clone();
+        other.block_id = "other-block".into();
+        other.sequence = 1;
+        other.delta = "乙".into();
+        other.provider_source = Some(crate::llm::types::ProviderOutputSource {
+            protocol: crate::llm::LlmApiProtocol::Anthropic,
+            request_id: "actual-request".into(),
+            item_id: "same-name".into(),
+            output_index: 9,
+            content_index: None,
+            content_kind: Some("thinking".into()),
+            phase: None,
+        });
+        output.observe_block(&other)?;
+        let mut done = local;
+        done.sequence = 2;
+        done.delta.clear();
+        done.complete = true;
+        let mut source = other
+            .provider_source
+            .clone()
+            .ok_or_else(|| invalid("fixture source missing"))?;
+        source.item_id = "actual-local-item".into();
+        source.output_index = 5;
+        done.provider_source = Some(source);
+        done.reasoning = Some(ReasoningBlock::Signed {
+            thinking: "甲新增".into(),
+            signature: "private-signature".into(),
+        });
+        assert_eq!(
+            output.observe_block(&done)?.map(|delta| delta.text),
+            Some("新增".into())
+        );
+        let mut changed = done;
+        changed.sequence = 3;
+        if let Some(source) = changed.provider_source.as_mut() {
+            source.request_id = "foreign-native-request".into();
+        }
+        assert!(output.observe_block(&changed).is_err());
         Ok(())
     }
     #[test]

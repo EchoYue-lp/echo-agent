@@ -84,6 +84,7 @@ pub use echo_core::llm::capabilities::{
 pub use echo_core::llm::{
     ChatChunk, ChatRequest, ChatResponse, LlmApiProtocol, LlmClient, LlmTimeouts,
     ModelInputModality, SimpleChatOptions, ThinkingConfig, ThinkingLevel, ThinkingProtocol,
+    ToolChoice,
 };
 
 // Provider implementations and explicit runtime configuration.
@@ -92,4 +93,6 @@ pub use echo_integration::providers::{
     resolve_protocol_endpoint,
 };
 
-pub use types::{JsonSchemaSpec, Message as LlmMessage, ResponseFormat, ToolDefinition};
+pub use types::{
+    JsonSchemaSpec, Message as LlmMessage, ProviderResponseMetadata, ResponseFormat, ToolDefinition,
+};

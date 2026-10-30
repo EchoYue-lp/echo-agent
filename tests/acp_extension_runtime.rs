@@ -20,7 +20,6 @@ use echo_agent::agent::EventIdentity;
 use echo_agent::agent::{CancellationToken, EventEnvelope};
 use echo_agent::error::Result;
 use echo_agent::runtime::{TurnMode, TurnRequest};
-use futures::StreamExt as _;
 use futures::future::BoxFuture;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -245,24 +244,45 @@ impl echo_agent::agent::Agent for NullAgent {
         "fixture"
     }
 
-    fn execute<'a>(&'a self, _task: &'a str) -> BoxFuture<'a, Result<String>> {
-        Box::pin(async { Ok("done".to_string()) })
-    }
-
-    fn execute_stream<'a>(
+    fn chat_stream_message_with_invocation_context<'a>(
         &'a self,
-        _task: &'a str,
+        message: echo_agent::llm::types::Message,
+        _cancel: CancellationToken,
+        invocation: echo_agent::agent::AgentInvocationContext,
     ) -> BoxFuture<'a, Result<futures::stream::BoxStream<'a, Result<echo_agent::agent::AgentEvent>>>>
     {
-        Box::pin(async {
-            let turns = self.turns.clone();
-            Ok(futures::stream::once(async move {
-                turns.fetch_add(1, Ordering::AcqRel);
-                Ok(echo_agent::agent::AgentEvent::FinalAnswer(
-                    "done".to_string(),
-                ))
-            })
-            .boxed())
+        use echo_agent::agent::{AgentEvent, AgentPhase, ExecutionStatus, ExecutionStatusKind};
+        Box::pin(async move {
+            // 此 fixture 的原生执行属于已 admission 的同一 Turn；extension lease 不拥有它。
+            let execution_id = invocation
+                .runtime
+                .as_ref()
+                .and_then(|runtime| runtime.execution_id.as_ref().or(runtime.turn_id.as_ref()))
+                .filter(|value| !value.trim().is_empty())
+                .cloned()
+                .ok_or_else(|| {
+                    echo_agent::error::ReactError::Other(
+                        "extension fixture lacks original execution identity".to_string(),
+                    )
+                })?;
+            let request_id = format!("{execution_id}:extension-fixture-request");
+            let source = async_stream::stream! {
+                let _original_input = message;
+                let _original_invocation = invocation;
+                self.turns.fetch_add(1, Ordering::AcqRel);
+                yield Ok(AgentEvent::ExecutionStatus(ExecutionStatus {
+                    adapter_generated: false, execution_id: execution_id.clone(),
+                    request_id: Some(request_id.clone()), sequence: 0, phase: AgentPhase::Thinking,
+                    status: ExecutionStatusKind::Started, reason: None,
+                }));
+                yield Ok(AgentEvent::FinalAnswer("done".to_string()));
+                yield Ok(AgentEvent::ExecutionStatus(ExecutionStatus {
+                    adapter_generated: false, execution_id, request_id: Some(request_id),
+                    sequence: 1, phase: AgentPhase::Terminal,
+                    status: ExecutionStatusKind::Settled, reason: None,
+                }));
+            };
+            Ok(Box::pin(source) as futures::stream::BoxStream<'a, Result<AgentEvent>>)
         })
     }
 }

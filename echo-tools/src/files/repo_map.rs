@@ -131,7 +131,21 @@ impl Tool for RepoMapTool {
                 .base_dir
                 .clone()
                 .or_else(|| ctx.working_dir.as_ref().map(|path| path.to_path_buf()));
-            let root = resolve_root(effective_base.as_deref(), path_value)?;
+            super::resolve_path(
+                file_system,
+                "repo_map",
+                path_value,
+                &this.base_dir,
+                ctx.working_dir.as_deref(),
+            )?;
+            let requested = Path::new(path_value);
+            let root = if requested.is_absolute() {
+                requested.to_path_buf()
+            } else {
+                effective_base
+                    .map(|base| base.join(requested))
+                    .unwrap_or_else(|| requested.to_path_buf())
+            };
             if !file_system.exists(&root)? {
                 return Ok(ToolResult::invalid_arguments(format!(
                     "Path does not exist: {}",
@@ -139,9 +153,9 @@ impl Tool for RepoMapTool {
                 )));
             }
             let output = if format == "symbols" {
-                build_symbol_map(file_system, cancel, &root, max_depth)?
+                build_symbol_map(file_system, cancel, &root, &this.base_dir, max_depth)?
             } else {
-                build_tree(file_system, cancel, &root, max_depth)?
+                build_tree(file_system, cancel, &root, &this.base_dir, max_depth)?
             };
             let lines = if output.is_empty() {
                 Vec::new()
@@ -169,30 +183,11 @@ impl Tool for RepoMapTool {
     }
 }
 
-fn resolve_root(base: Option<&Path>, path_value: &str) -> Result<PathBuf> {
-    let requested = Path::new(path_value);
-    let Some(base) = base else {
-        return Ok(requested.to_path_buf());
-    };
-    let resolved = if requested.is_absolute() {
-        requested.to_path_buf()
-    } else {
-        base.join(requested)
-    };
-    if !resolved.starts_with(base) {
-        return Err(ToolError::InvalidParameter {
-            name: "path".to_string(),
-            message: format!("Path '{path_value}' is outside the allowed directory scope"),
-        }
-        .into());
-    }
-    Ok(resolved)
-}
-
 fn build_tree(
     file_system: &dyn echo_core::tools::filesystem::FileSystem,
     cancel: Option<&echo_core::agent::CancellationToken>,
     root: &Path,
+    base_dir: &Option<PathBuf>,
     max_depth: usize,
 ) -> Result<String> {
     super::check_file_cancel(cancel, "repo_map")?;
@@ -202,7 +197,15 @@ fn build_tree(
         .and_then(|name| name.to_str())
         .unwrap_or(".");
     lines.push(format!("{root_name}/"));
-    walk_tree(file_system, cancel, root, "", max_depth, 0, &mut lines)?;
+    walk_tree(
+        file_system,
+        cancel,
+        root,
+        base_dir,
+        "",
+        (max_depth, 0),
+        &mut lines,
+    )?;
     Ok(lines.join("\n"))
 }
 
@@ -210,12 +213,13 @@ fn walk_tree(
     file_system: &dyn echo_core::tools::filesystem::FileSystem,
     cancel: Option<&echo_core::agent::CancellationToken>,
     directory: &Path,
+    base_dir: &Option<PathBuf>,
     prefix: &str,
-    max_depth: usize,
-    depth: usize,
+    depth_range: (usize, usize),
     lines: &mut Vec<String>,
 ) -> Result<()> {
     super::check_file_cancel(cancel, "repo_map")?;
+    let (max_depth, depth) = depth_range;
     if depth >= max_depth {
         return Ok(());
     }
@@ -235,6 +239,9 @@ fn walk_tree(
         if should_skip(&name) {
             continue;
         }
+        if base_dir.is_some() {
+            super::resolve_path_buf(file_system, "repo_map", &path, base_dir)?;
+        }
         entries.push((name, path.clone(), file_system.is_dir(&path)?));
     }
     entries.sort_by(|left, right| left.0.cmp(&right.0));
@@ -249,9 +256,9 @@ fn walk_tree(
                 file_system,
                 cancel,
                 &path,
+                base_dir,
                 &format!("{prefix}{child_prefix}"),
-                max_depth,
-                depth.saturating_add(1),
+                (max_depth, depth.saturating_add(1)),
                 lines,
             )?;
         } else {
@@ -276,11 +283,19 @@ fn build_symbol_map(
     file_system: &dyn echo_core::tools::filesystem::FileSystem,
     cancel: Option<&echo_core::agent::CancellationToken>,
     root: &Path,
+    base_dir: &Option<PathBuf>,
     max_depth: usize,
 ) -> Result<String> {
     super::check_file_cancel(cancel, "repo_map")?;
     let mut symbols = BTreeMap::new();
-    collect_symbols(file_system, cancel, root, max_depth, 0, &mut symbols)?;
+    collect_symbols(
+        file_system,
+        cancel,
+        root,
+        base_dir,
+        (max_depth, 0),
+        &mut symbols,
+    )?;
     let mut lines = Vec::new();
     for (file, file_symbols) in symbols {
         if file_symbols.is_empty() {
@@ -297,11 +312,12 @@ fn collect_symbols(
     file_system: &dyn echo_core::tools::filesystem::FileSystem,
     cancel: Option<&echo_core::agent::CancellationToken>,
     directory: &Path,
-    max_depth: usize,
-    depth: usize,
+    base_dir: &Option<PathBuf>,
+    depth_range: (usize, usize),
     symbols: &mut BTreeMap<PathBuf, Vec<String>>,
 ) -> Result<()> {
     super::check_file_cancel(cancel, "repo_map")?;
+    let (max_depth, depth) = depth_range;
     if depth >= max_depth {
         return Ok(());
     }
@@ -320,13 +336,16 @@ fn collect_symbols(
         if should_skip(name) {
             continue;
         }
+        if base_dir.is_some() {
+            super::resolve_path_buf(file_system, "repo_map", &path, base_dir)?;
+        }
         if file_system.is_dir(&path)? {
             collect_symbols(
                 file_system,
                 cancel,
                 &path,
-                max_depth,
-                depth.saturating_add(1),
+                base_dir,
+                (max_depth, depth.saturating_add(1)),
                 symbols,
             )?;
         } else if is_source_file(name) {

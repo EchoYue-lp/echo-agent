@@ -72,7 +72,7 @@ File Journal batches, checkpoints, and segmented retention markers use identity-
 
 ### AgentCheckpoint
 
-`AgentCheckpoint` is a different checkpoint type. It stores messages, active skills, blocked reason, working directory, and capture time for resuming a ReAct execution through `RuntimeStateStore`. Its public `current_plan` field remains in the stored format for legacy readers and writers. ReactAgent ignores a historical value on restore and writes `None` at new safe points; `TaskRevisionService` owns the revisioned task graph and plan artifact.
+`AgentCheckpoint` 保存 ReAct 继续运行所需的消息、激活技能、blocked reason、working directory 和时间戳，由 `RuntimeStateStore` 持久化。它不承载计划副本；版本化任务图与计划 artifact 由 `TaskRevisionService` 持有。当前payload统一显式schema3，合法无cursor的runtime-only/raw用途仍保留；旧裸数组、缺版本与旧迁移恢复义务退出，不能据此删除通用Store或当前CAS/恢复能力。
 
 Restoration validates assistant tool calls and tool results as paired messages. This prevents provider-invalid context and avoids replaying already completed side effects.
 
@@ -93,8 +93,9 @@ keeps the original strictly ordered fact cursor and optional `context_only`
 position/digest bindings for derived occurrences. Full messages and bindings are
 saved in the same runtime CAS; pending checkpoints validate their current view
 against cursor-after. A new same-text turn still gets fresh ordinals, and clearing
-the active view preserves the append frontier. Version 1/2 records remain a legacy
-path without derived-origin proof; older framework readers reject version 3.
+the active view preserves the append frontier.
+当前 reader 只接纳显式 schema version 3；version 1/2、缺版本和旧裸数组明确拒绝，
+不自动迁移或推断来源。合法 runtime-only/raw 保存用途继续保留。
 
 Managed compression releases the Context lock while Store callbacks read its
 coherent pre-view. Candidate observer/cache updates become accepted only after
@@ -123,31 +124,28 @@ One shared Agent may process multiple value-scoped invocations: a change in effe
 `runtime_state_id` forces exact reset/restore before model preparation, while same-ID warm context
 is reused. The runtime records `Hydrating(target)` before cancellable mutation and commits
 `Hydrated(target)` only after restore hooks settle; non-exact states are rebuilt. Runtime switches
-also clear rollback snapshots. Restore and save use the same precedence: explicit invocation
-runtime ID, invocation product conversation, legacy external conversation, then configured
-conversation. Together these rules prevent A -> B -> A from writing A messages into B.
+also clear rollback snapshots.
+restore/save 使用同一优先级：显式 invocation runtime ID、invocation 产品 conversation、
+configured conversation。旧 external setter 入口已退役；A -> B -> A 不会把 A 的消息写入 B。
 
 Rotating `runtime_state_id` starts a clean model context without deleting the stable product
 conversation. `save_checkpoint_for_scope` durably indexes each runtime ID under that product
 scope. After its admission/settlement barrier, reset uses
 `clear_persisted_runtime_incarnation` to settle any durable pending projection and retire the exact
-runtime checkpoint while keeping transcript data. It only removes an incarnation-keyed transcript
-for a legacy unmanaged Store pair; managed cleanup cannot safely infer a stable delete identity
-after recreation. Managed product deletion requires a caller-retained `ManagedConversationDelete`
-request and `delete_persisted_conversation_managed`; the request identity is reused across timeout,
-restart, receipt loss, and later conversation recreation. The convenience
-`delete_persisted_conversation` entry remains for legacy unmanaged Store pairs and fails closed for
-managed pairs because it cannot infer whether a call targets an old delete or a recreated epoch.
+runtime checkpoint while keeping transcript data.
+该协调入口只接纳具备 managed 能力的 Store pair，不顺带删除同名 transcript；合法 raw CRUD
+由调用方显式执行。产品删除要求调用方保留稳定 `ManagedConversationDelete` request，并调用
+`delete_persisted_conversation_managed`，在 timeout、重启、回执丢失和新 epoch 重建后仍复用
+同一 request identity。无稳定 identity 的旧 `delete_persisted_conversation` 入口已退役，
+不能由便捷调用猜测旧删除或重建后的目标。
 Managed generations use revision CAS and retirement tombstones, while product deletion persists a
 complete scope manifest, the full dropped-operation set, and an epoch-fenced ConversationStore
 receipt. See [ADR 0006](../adr/0006-runtime-state-scope-lineage.md) and
 [ADR 0056](../adr/0056-durable-transcript-projection-settlement.md).
 
-Managed clear/delete helpers have context-aware variants that preserve a caller-owned absolute
-deadline through the complete saga. Legacy unmanaged Store traits have no context-bearing raw
-operations, so their compatibility helpers retain the historical unbounded contract and the
-context-aware variants reject them as unsupported rather than claiming a deadline they cannot
-enforce.
+managed clear/delete 的 context-aware 变体贯穿同一 caller-owned absolute deadline，
+便利入口也使用既有有界期限。不具备 managed／deadline 能力的 Store pair 返回 Unsupported；
+不保留无界兼容清理路径，也不影响显式 raw Store CRUD。
 
 ### Other checkpoint domains
 

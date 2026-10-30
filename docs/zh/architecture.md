@@ -103,7 +103,8 @@ Protocol adapter 也是边界而非 owner。ACP、Channels、Headless 和外部 
 
 ## 具名退役与保留owner
 
-A2A／LSP 的生产模块、feature 和出口退出；原 registry／prepare 仅冻结旧声明并给通用诊断，
-不再拥有语言服务进程。ProjectRoot、Instruction、scope、MCP/ACP、Task/Subagent、取消、
+A2A／LSP 的生产模块、feature 和出口退出；旧 `lsp.yaml` 仅保留用户原件，当前 registry／prepare
+不专门读取、冻结、hash、缓存或生成LSP诊断，不将它纳入generation身份，也不启动语言服务。
+当前边界见[ADR0105](../adr/0105-current-config-and-plugin-inputs.md)。ProjectRoot、Instruction、scope、MCP/ACP、Task/Subagent、取消、
 持久化和恢复沿原 owner。没有因 EKO 未使用而扩大删除其它合理公共 API。
 源码结构与文档同步不等于删后构建、锁、SDK正式 Git 来源、native或发布完成。

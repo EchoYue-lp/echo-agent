@@ -925,19 +925,6 @@ impl PluginRegistry {
             ));
         }
 
-        let lsp_file = root.join("lsp.yaml");
-        if lsp_file.is_file() {
-            resolved.diagnostics.push(format!(
-                "LSP component is retired: Plugin '{plugin_id}' declaration '{}'",
-                lsp_file.display()
-            ));
-        } else if lsp_file.exists() {
-            resolved.diagnostics.push(format!(
-                "Plugin '{plugin_id}' LSP path '{}' is not a regular file",
-                lsp_file.display()
-            ));
-        }
-
         // Store resolved components back
         if let Some(entry) = self.plugins.get_mut(plugin_id) {
             entry.resolved_components = Some(resolved.clone());
@@ -1039,22 +1026,6 @@ impl PluginRegistry {
         {
             resolved.mcp_config_file = Some(mcp_file);
         }
-        let lsp_file = root.join("lsp.yaml");
-        if classify_optional_path(
-            &lsp_file,
-            ExpectedPathKind::File,
-            plugin_id,
-            "LSP",
-            &mut resolved.diagnostics,
-        )
-        .await
-        {
-            resolved.diagnostics.push(format!(
-                "LSP component is retired: Plugin '{plugin_id}' declaration '{}'",
-                lsp_file.display()
-            ));
-        }
-
         if let Some(entry) = self.plugins.get_mut(plugin_id) {
             entry.resolved_components = Some(resolved.clone());
         }
@@ -1322,8 +1293,6 @@ mod tests {
         )
         .map_err(|error| error.to_string())?;
         std::fs::write(root.join("hooks/hooks.yaml"), "{}\n").map_err(|error| error.to_string())?;
-        std::fs::write(root.join("lsp.yaml"), "languages: {}\n")
-            .map_err(|error| error.to_string())?;
         std::fs::write(
             root.join("mcp.json"),
             "{\"$schema\":\"https://agent-plugins.org/schemas/1.0.0/mcp.schema.json\",\"mcpServers\":{}}",
@@ -1361,13 +1330,7 @@ mod tests {
         assert_eq!(resolved.mcp_config_file, Some(plugin.join("mcp.json")));
         assert_eq!(resolved.agent_files.len(), 1);
         assert_eq!(resolved.hooks_file, Some(plugin.join("hooks/hooks.yaml")));
-        assert_eq!(
-            resolved.diagnostics,
-            vec![format!(
-                "LSP component is retired: Plugin 'resolve.test' declaration '{}'",
-                plugin.join("lsp.yaml").display()
-            )]
-        );
+        assert!(resolved.diagnostics.is_empty());
         std::fs::remove_dir_all(temporary).map_err(|error| error.to_string())
     }
 
@@ -1386,16 +1349,10 @@ mod tests {
         assert_eq!(resolved.hooks_file, Some(plugin.join("hooks/hooks.yaml")));
         assert_eq!(
             resolved.diagnostics,
-            vec![
-                format!(
-                    "Plugin 'wrong.kind' standard skills path '{}' is not a directory",
-                    plugin.join("skills").display()
-                ),
-                format!(
-                    "LSP component is retired: Plugin 'wrong.kind' declaration '{}'",
-                    plugin.join("lsp.yaml").display()
-                ),
-            ]
+            vec![format!(
+                "Plugin 'wrong.kind' standard skills path '{}' is not a directory",
+                plugin.join("skills").display()
+            ),]
         );
         std::fs::remove_dir_all(temporary).map_err(|error| error.to_string())
     }
@@ -1471,6 +1428,49 @@ mod tests {
             .err()
             .ok_or_else(|| "legacy layout unexpectedly installed".to_string())?;
         assert!(error.contains("plugin.json"));
+        std::fs::remove_dir_all(temporary).map_err(|error| error.to_string())
+    }
+
+    #[tokio::test]
+    async fn current_components_do_not_probe_obsolete_sibling_files() -> Result<(), String> {
+        let temporary = temporary_root("current-inputs");
+        let plugin = create_plugin(&temporary, "current.test", serde_json::json!([]))?;
+        let obsolete = plugin.join("lsp.yaml");
+        std::fs::write(&obsolete, [0xff, 0xfe]).map_err(|error| error.to_string())?;
+        let (_, resolved) =
+            PluginRegistry::validate_plugin_dir(&plugin).map_err(|errors| errors.join("; "))?;
+        assert!(resolved.diagnostics.is_empty());
+        assert_eq!(resolved.agent_files.len(), 1);
+        assert_eq!(resolved.skill_dirs.len(), 1);
+        let mut registry = PluginRegistry::with_paths(
+            temporary.join("registry.json"),
+            temporary.join("data"),
+            Some(temporary.clone()),
+        );
+        let id = registry.install(&InstallSource::Local(plugin.clone()), PluginScope::Local)?;
+        let installed_root = registry
+            .get(&id)
+            .ok_or_else(|| "installed plugin missing".to_string())?
+            .root
+            .clone();
+        let resolved = registry.resolve_components_async(&id).await?;
+        assert!(resolved.diagnostics.is_empty());
+        assert_eq!(
+            resolved.mcp_config_file,
+            Some(installed_root.join("mcp.json"))
+        );
+        assert_eq!(
+            resolved.hooks_file,
+            Some(installed_root.join("hooks/hooks.yaml"))
+        );
+        assert_eq!(
+            std::fs::read(&obsolete).map_err(|error| error.to_string())?,
+            [0xff, 0xfe]
+        );
+        assert_eq!(
+            std::fs::read(installed_root.join("lsp.yaml")).map_err(|error| error.to_string())?,
+            [0xff, 0xfe]
+        );
         std::fs::remove_dir_all(temporary).map_err(|error| error.to_string())
     }
 }

@@ -212,6 +212,8 @@ pub(crate) enum ThinkOutcome {
 
 /// Output of the think phase, fed into the tools or verify branches.
 pub(crate) struct ThinkOutput {
+    /// 同一模型请求最后有效的完整响应观察，沿原Message传递而非事件终态。
+    pub provider_response: Option<crate::llm::types::ProviderResponseMetadata>,
     /// Plain assistant text accumulated from streaming chunks.
     pub content_buffer: String,
     /// 完整响应形成的最终候选；显式进度/部分回答不会进入该分支。
@@ -247,6 +249,8 @@ pub(crate) enum IterOutcome {
         reasoning_content: String,
         reasoning_blocks: Vec<crate::llm::types::ReasoningBlock>,
         assistant_blocks: Vec<echo_core::agent::AssistantMessageBlock>,
+        // 只间接存放内部大载体；最终Message仍用同一原值，不改变任何Serde形状。
+        provider_response: Option<Box<crate::llm::types::ProviderResponseMetadata>>,
     },
     /// LLM produced neither tool calls nor content. Terminal failure.
     NoResponse,
@@ -257,6 +261,33 @@ pub(crate) enum IterOutcome {
     TerminalSettled {
         outcome: crate::agent::AgentSteerTurnOutcome,
     },
+}
+
+/// 失败/未批准请求仅保存观察；正文和未执行工具片段不得进入可重放历史。
+pub(crate) async fn retain_provider_response_observation(
+    context: &std::sync::Arc<tokio::sync::Mutex<crate::compression::ContextManager>>,
+    observation: Option<&crate::llm::types::ProviderResponseMetadata>,
+) {
+    if let Some(observation) = observation {
+        context
+            .lock()
+            .await
+            .push(Message::provider_response_observation(observation.clone()));
+    }
+}
+
+pub(crate) fn incomplete_response_observation(
+    error: &crate::error::ReactError,
+) -> Option<&crate::llm::types::ProviderResponseMetadata> {
+    match error {
+        crate::error::ReactError::Llm(error) => match error.as_ref() {
+            crate::error::LlmError::IncompleteResponse { partial } => {
+                partial.provider_response.as_ref()
+            }
+            _ => None,
+        },
+        _ => None,
+    }
 }
 
 pub(crate) fn with_reasoning_content(

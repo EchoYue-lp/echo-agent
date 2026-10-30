@@ -162,11 +162,14 @@ pub trait Embedder: Send + Sync {
 
 | 方法 | 作用 |
 |------|------|
-| `agent.set_store(store)` | 仅替换自动注入通道（不更新工具）|
+| `agent.set_store(store)?` / `agent.install_store(store).await?` | 仅替换自动注入通道（不更新工具），显式传播身份不符或同步锁忙错误 |
 | `agent.set_memory_store(store)` | 替换自动注入通道并注册已批准记忆的 `recall` / `search_memory`；已安装 manager 时还提供经过 journal 的 `remember` / `forget` |
 
-安装 layer manager 前可用 `set_memory_store()` 更换 Store；安装后由 manager 持有
-Store，传入另一 Store 会返回错误。
+安装 layer manager 前，四个 Store 安装 API 均允许更换 Store；安装后由 manager
+持有 Store，四个入口传入另一 Store 都返回错误。同一 Arc 克隆仍可安装。
+同步入口在 context 锁忙时返回错误，异步入口等待锁期间不发布变化；失败或
+取消等待都保留原有 Store、promoter 和工具。raw setter 不重注册工具，
+`set_memory_store()` / `install_memory_store()` 继续负责 approved-memory 工具安装。
 
 ---
 

@@ -385,9 +385,15 @@ mod tests {
         agent.set_compressor(SlidingWindowCompressor::new(1)).await;
         let store = Arc::new(crate::trace::InMemoryRunStore::new());
         agent.set_run_store(store.clone());
-        let legacy = agent.capture_legacy_external_context();
+
         let trace_run_id = agent
-            .start_legacy_trace_run("compress", &legacy)
+            .start_scoped_trace_run(
+                "compress",
+                None,
+                agent.config().conversation_id.as_deref(),
+                None,
+                None,
+            )
             .await
             .ok_or_else(|| crate::error::ReactError::Other("trace run missing".to_string()))?;
         {
@@ -396,7 +402,8 @@ mod tests {
             context.push(Message::assistant("second message ".repeat(500)));
             context.push(Message::user("continue".to_string()));
         }
-        let snap = AgentRunSnapshot::from_agent(&agent);
+        let mut snap = AgentRunSnapshot::from_agent(&agent);
+        snap.trace_run_id = Some(trace_run_id.clone());
         let (tx, mut rx) = mpsc::channel::<Result<AgentEvent>>(8);
 
         let outcome = run_compact(&snap, &agent.memory.context, &tx, 0).await?;

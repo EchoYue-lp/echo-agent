@@ -956,6 +956,26 @@ pub trait Tool: Send + Sync {
     fn required_input_modalities_owned(&self) -> Vec<crate::llm::ModelInputModality> {
         self.required_input_modalities().to_vec()
     }
+    /// 为read-before-edit提供本工具的真实文件来源与路径；只能在原blocking边界调用。
+    /// parameters/ctx为该次最终调用值，不得从host同名路径或其它工具代次猜目标。
+    /// 读工具接到已确认FileRead路径时仅绑定原source，不能事后重写该事实。
+    /// 缺能力必须明确Unsupported；普通执行与未启用的guard不因此增加权限闸。
+    fn resolve_file_tracking_path(
+        &self,
+        _path: &str,
+        _parameters: &ToolParameters,
+        _ctx: &ToolContext,
+    ) -> Result<(
+        std::sync::Arc<dyn filesystem::FileSystem>,
+        std::path::PathBuf,
+    )> {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "tool does not provide bound read-before-edit target facts",
+        )
+        .into())
+    }
+
     /// Execute the tool with untyped JSON parameters.
     ///
     /// **Default implementation** delegates to [`Self::execute_with_context`]

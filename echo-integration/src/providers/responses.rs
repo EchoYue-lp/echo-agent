@@ -12,10 +12,13 @@ use echo_core::llm::capabilities::{
 };
 use echo_core::llm::types::{
     ChatCompletionResponse, Choice, ContentPart, DeltaFunctionCall, DeltaMessage, DeltaToolCall,
-    FunctionCall, Message, MessageContent, ReasoningBlock, ResponseFormat, Role, TokenUsageDetails,
-    ToolCall, ToolDefinition, Usage,
+    FunctionCall, Message, MessageContent, ProviderResponseMetadata, ReasoningBlock,
+    ResponseFormat, Role, TokenUsageDetails, ToolCall, ToolDefinition, Usage,
 };
-use echo_core::llm::{ChatChunk, ChatRequest, ChatResponse, LlmClient};
+use echo_core::llm::{
+    ChatChunk, ChatRequest, ChatResponse, LlmClient, ThinkingConfig, ThinkingLevel,
+    ThinkingProtocol, ToolChoice,
+};
 use futures::StreamExt;
 use futures::future::BoxFuture;
 use futures::stream::BoxStream;
@@ -41,6 +44,18 @@ pub struct ResponsesClient {
     config: LlmConfig,
     model_profile_resolver: ModelProfileResolver,
     header_map: HeaderMap,
+}
+
+/// Responses-compatible endpoints do not share one response dialect. The
+/// OpenAI endpoint returns encrypted reasoning items, while DeepSeek returns
+/// plaintext reasoning and has a narrower input surface. Keep this decision
+/// tied to the configured vendor/model rather than guessing from payload text.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+enum ResponsesDialect {
+    #[default]
+    OpenAi,
+    DeepSeekFlash,
+    DeepSeekV4Pro,
 }
 
 impl ResponsesClient {
@@ -126,45 +141,130 @@ impl ResponsesClient {
         Client::new()
     }
 
+    fn responses_dialect(&self) -> Result<ResponsesDialect> {
+        let provider = self
+            .config
+            .provider_name
+            .as_deref()
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        let endpoint = reqwest::Url::parse(&self.config.base_url)
+            .map_err(|_| request_error("invalid Responses endpoint URL"))?;
+        let model = self.config.model.to_ascii_lowercase();
+        let deepseek_endpoint =
+            provider == "deepseek" || endpoint.host_str() == Some("api.deepseek.com");
+        if !deepseek_endpoint {
+            return Ok(ResponsesDialect::OpenAi);
+        }
+        match model.as_str() {
+            "deepseek-flash" => Ok(ResponsesDialect::DeepSeekFlash),
+            "deepseek-v4-pro" => Ok(ResponsesDialect::DeepSeekV4Pro),
+            _ => Err(request_error(format!(
+                "DeepSeek Responses model '{}' has no admitted dialect",
+                self.config.model
+            ))),
+        }
+    }
+
     fn request_body(&self, request: &ChatRequest, stream: bool) -> Result<Value> {
+        let dialect = self.responses_dialect()?;
+        self.config.validate_input_modalities(&request.messages)?;
+        validate_response_tools(request.tools.as_deref(), dialect)?;
+        if let Some(choice) = request.tool_choice.as_ref() {
+            validate_response_tool_choice(choice, request.tools.as_deref())?;
+        }
+        let protocol = self.model_profile_resolution().profile.thinking_protocol;
+        validate_responses_thinking(dialect, protocol, &request.thinking)?;
         let thinking = translate_thinking_openai_compat(
             &self.config.model,
             self.config.api_protocol,
-            self.model_profile_resolution().profile.thinking_protocol,
+            protocol,
             &request.thinking,
         );
+        // 显式采样参数不能在thinking转换中静默消失；默认None继续沿模型默认。
+        let deepseek = dialect != ResponsesDialect::OpenAi;
+        let reasoning_enabled = if deepseek {
+            !matches!(
+                request.thinking,
+                Some(ThinkingConfig::Disabled | ThinkingConfig::Level(ThinkingLevel::None))
+            )
+        } else {
+            thinking.drop_temperature
+        };
+        if reasoning_enabled && request.temperature.is_some() {
+            return Err(request_error(
+                "temperature cannot be honored with this reasoning configuration",
+            ));
+        }
+        if request
+            .temperature
+            .is_some_and(|value| !value.is_finite() || !(0.0..=2.0).contains(&value))
+        {
+            return Err(request_error("temperature must be finite and in [0,2]"));
+        }
+        if request.max_tokens == Some(0) {
+            return Err(request_error("max_output_tokens must be greater than zero"));
+        }
         let mut body = json!({
             "model": self.config.model,
-            "input": messages_to_input(&request.messages)?,
+            "input": messages_to_input_for_dialect(&request.messages, dialect)?,
             "store": false,
             "stream": stream,
-            "include": ["reasoning.encrypted_content"],
         });
         let Some(object) = body.as_object_mut() else {
             return Ok(body);
         };
 
-        insert_option(object, "max_output_tokens", request.max_tokens);
-        if !thinking.drop_temperature {
-            insert_option(object, "temperature", request.temperature);
+        if dialect == ResponsesDialect::OpenAi {
+            object.insert(
+                "include".to_string(),
+                json!(["reasoning.encrypted_content"]),
+            );
         }
+
+        insert_option(object, "max_output_tokens", request.max_tokens);
+        insert_option(object, "temperature", request.temperature);
         if let Some(tools) = request.tools.as_ref() {
             object.insert("tools".to_string(), tools_to_responses(tools));
         }
-        if let Some(choice) = request.tool_choice.as_deref() {
+        if let Some(choice) = request.tool_choice.as_ref() {
             object.insert("tool_choice".to_string(), tool_choice_to_responses(choice));
         }
-        if let Some(format) = request.response_format.as_ref() {
+        if let Some(format) = request
+            .response_format
+            .as_ref()
+            .filter(|format| !matches!(format, ResponseFormat::Text))
+        {
             object.insert("text".to_string(), response_format_to_responses(format));
         }
-        if let Some(effort) = thinking.reasoning_effort {
+        // DeepSeek只声明effort；不继承Chat别名clamp，不请求其忽略的summary。
+        let effort = if deepseek {
+            match request.thinking.as_ref() {
+                Some(ThinkingConfig::Disabled | ThinkingConfig::Level(ThinkingLevel::None)) => {
+                    Some("none".to_string())
+                }
+                Some(config) => config.to_reasoning_effort().map(str::to_string),
+                None => None,
+            }
+        } else {
+            thinking.reasoning_effort
+        };
+        if let Some(effort) = effort {
             object.insert(
                 "reasoning".to_string(),
-                json!({"effort": effort, "summary": "auto"}),
+                if deepseek {
+                    json!({"effort":effort})
+                } else {
+                    json!({"effort":effort,"summary":"auto"})
+                },
             );
         }
-        if let Some(cache_key) = request.user_id.as_ref() {
-            object.insert("prompt_cache_key".to_string(), json!(cache_key));
+        if let Some(user_id) = request.user_id.as_ref() {
+            // DeepSeek的user承担已配置的用户隔离语义；不发送被忽略的prompt_cache_key。
+            object.insert(
+                if deepseek { "user" } else { "prompt_cache_key" }.to_string(),
+                json!(user_id),
+            );
         }
         Ok(body)
     }
@@ -187,7 +287,13 @@ impl LlmClient for ResponsesClient {
                     request.cancel_token.clone(),
                 )
                 .await?;
-                let response = response_to_chat(raw)?;
+                let response = response_to_chat_for_provider(
+                    raw,
+                    self.config
+                        .provider_name
+                        .as_deref()
+                        .unwrap_or("openai_responses"),
+                )?;
                 ensure_request_not_cancelled(request.cancel_token.as_ref())?;
                 Ok(response)
             }
@@ -214,7 +320,13 @@ impl LlmClient for ResponsesClient {
                 let raw_stream =
                     stream_json_sse(request, self.config.model.clone(), timeouts, cancel_token)
                         .await?;
-                Ok(adapt_responses_stream(raw_stream))
+                Ok(adapt_responses_stream(
+                    raw_stream,
+                    self.config
+                        .provider_name
+                        .clone()
+                        .unwrap_or_else(|| "openai_responses".into()),
+                ))
             }
             .instrument(info_span!("openai_responses_stream", model = %model)),
         )
@@ -247,12 +359,15 @@ impl LlmClient for ResponsesClient {
     }
 }
 
-fn adapt_responses_stream<S>(raw_stream: S) -> BoxStream<'static, Result<ChatChunk>>
+fn adapt_responses_stream<S>(
+    raw_stream: S,
+    provider: String,
+) -> BoxStream<'static, Result<ChatChunk>>
 where
     S: futures::Stream<Item = Result<JsonSseEvent>> + Send + 'static,
 {
     let stream = async_stream::try_stream! {
-        let mut adapter = ResponsesStreamAdapter::default();
+        let mut adapter = ResponsesStreamAdapter { provider, ..Default::default() };
         futures::pin_mut!(raw_stream);
         while let Some(event) = raw_stream.next().await {
             match event? {
@@ -285,33 +400,71 @@ fn insert_option<T: serde::Serialize>(
     }
 }
 
+#[cfg(test)]
 fn messages_to_input(messages: &[Message]) -> Result<Value> {
+    messages_to_input_for_dialect(messages, ResponsesDialect::OpenAi)
+}
+
+fn messages_to_input_for_dialect(messages: &[Message], dialect: ResponsesDialect) -> Result<Value> {
     let mut input = Vec::new();
     for message in messages {
+        // Frame失败结算只耐久保存这组精确形状；不把它变成空assistant wire。
+        if message.is_provider_response_observation_only() {
+            continue;
+        }
+        if !matches!(message.role, Role::Tool) {
+            validate_message_modalities(message, dialect)?;
+        }
         if matches!(message.role, Role::Assistant) {
             if let Some(native) = native_history_to_responses(message)? {
+                if dialect != ResponsesDialect::OpenAi
+                    && native.iter().any(|item| {
+                        item.get("type").and_then(Value::as_str) == Some("reasoning")
+                            && (item.get("encrypted_content").is_some()
+                                || item
+                                    .get("summary")
+                                    .and_then(Value::as_array)
+                                    .is_some_and(|summary| !summary.is_empty()))
+                    })
+                {
+                    return Err(request_error(
+                        "DeepSeek Responses cannot replay encrypted reasoning or summaries from another dialect",
+                    ));
+                }
                 input.extend(native);
                 continue;
+            }
+            if dialect != ResponsesDialect::OpenAi
+                && message.reasoning_blocks.as_deref().unwrap_or_default().iter().any(|block| matches!(block, ReasoningBlock::Opaque { provider, .. } if provider == "openai_responses"))
+            {
+                return Err(request_error("DeepSeek Responses cannot replay OpenAI encrypted reasoning"));
             }
             append_opaque_reasoning(&mut input, message.reasoning_blocks.as_deref());
         }
 
         if matches!(message.role, Role::Tool) {
-            if let Some(call_id) = message.tool_call_id.as_ref() {
-                input.push(json!({
-                    "type": "function_call_output",
-                    "call_id": call_id,
-                    "output": message.content.as_text().unwrap_or_default(),
-                }));
-            }
+            let call_id = message
+                .tool_call_id
+                .as_deref()
+                .filter(|id| !id.is_empty())
+                .ok_or_else(|| {
+                    request_error("Responses tool result requires a nonempty call_id")
+                })?;
+            input.push(json!({
+                "type":"function_call_output", "call_id":call_id,
+                "output":tool_result_to_responses(&message.content, dialect)?,
+            }));
             continue;
+        }
+        if matches!(&message.role, Role::Custom(role) if role != "developer") {
+            return Err(request_error("Responses message role is unsupported"));
         }
 
         if !matches!(message.content, MessageContent::Empty) {
             input.push(json!({
                 "type": "message",
                 "role": responses_role(&message.role),
-                "content": content_to_responses(&message.content),
+                "content": content_to_responses(&message.content, dialect)?,
             }));
         }
 
@@ -341,44 +494,107 @@ fn native_history_to_responses(message: &Message) -> Result<Option<Vec<Value>>> 
         tool.provider_source
             .as_ref()
             .is_some_and(|source| source.protocol == LlmApiProtocol::Responses)
-    });
+    }) || message
+        .provider_response
+        .as_ref()
+        .is_some_and(|record| record.protocol == LlmApiProtocol::Responses)
+        && (blocks.iter().any(|block| block.provider_source.is_some())
+            || tools.iter().any(|tool| tool.provider_source.is_some()));
     if !native {
+        if blocks
+            .iter()
+            .any(|block| block.provider.as_deref() == Some("openai_responses"))
+        {
+            return Err(invalid_response(
+                "Responses replay lacks actual native response identity",
+            ));
+        }
         return Ok(None);
     }
-    let mut merged: Vec<AssistantMessageBlock> = Vec::new();
-    for block in blocks.iter().filter(|block| {
-        block
-            .provider_source
-            .as_ref()
-            .is_some_and(|source| source.protocol == LlmApiProtocol::Responses)
-    }) {
-        if let Some(previous) = merged.iter_mut().find(|previous| {
-            previous.block_id == block.block_id && previous.request_id == block.request_id
+    let observation = message.provider_response.as_ref();
+    if let Some(record) = observation
+        && (record.protocol != LlmApiProtocol::Responses
+            || record.provider.trim().is_empty()
+            || record
+                .request_id
+                .as_deref()
+                .is_none_or(|id| id.trim().is_empty()))
+    {
+        return Err(invalid_response(
+            "Responses replay observation lacks matching actual protocol/provider/request",
+        ));
+    }
+    let mut groups: Vec<Vec<&AssistantMessageBlock>> = Vec::new();
+    for block in blocks {
+        if let Some(group) = groups.iter_mut().find(|group| {
+            group.first().is_some_and(|previous| {
+                previous.request_id == block.request_id && previous.block_id == block.block_id
+            })
         }) {
-            if previous.provider_source != block.provider_source {
-                let mut before = previous
-                    .provider_source
-                    .clone()
-                    .ok_or_else(|| invalid_response("Responses previous source missing"))?;
-                let mut after = block
-                    .provider_source
-                    .clone()
-                    .ok_or_else(|| invalid_response("Responses next source missing"))?;
-                let before_phase = before.phase.take();
-                let after_phase = after.phase.take();
-                if before != after
-                    || before_phase
-                        .as_ref()
-                        .zip(after_phase.as_ref())
-                        .is_some_and(|(a, b)| a != b)
-                {
+            group.push(block);
+        } else {
+            groups.push(vec![block]);
+        }
+    }
+    let mut merged: Vec<AssistantMessageBlock> = Vec::new();
+    for group in groups {
+        // 未被native来源升级的runtime/approved诊断组从不进入vendor wire。
+        if group.iter().all(|block| block.provider_source.is_none()) {
+            if group
+                .iter()
+                .any(|block| block.provider.as_deref() == Some("openai_responses"))
+            {
+                return Err(invalid_response(
+                    "Responses native block never received actual source",
+                ));
+            }
+            continue;
+        }
+        let mut previous = (*group
+            .first()
+            .ok_or_else(|| invalid_response("Responses replay group missing"))?)
+        .clone();
+        for block in group.into_iter().skip(1) {
+            match (&previous.provider, &block.provider) {
+                (Some(before), Some(after)) if before != after => {
                     return Err(invalid_response(
-                        "Responses canonical source changed during replay",
+                        "Responses replay canonical provider changed",
                     ));
                 }
-                if before_phase.is_none() && after_phase.is_some() {
-                    previous.provider_source = block.provider_source.clone();
+                (Some(_), None) => {
+                    return Err(invalid_response(
+                        "Responses replay canonical provider cleared",
+                    ));
                 }
+                (None, Some(_)) => previous.provider = block.provider.clone(),
+                _ => {}
+            }
+            match (&previous.provider_source, &block.provider_source) {
+                (None, Some(_)) => previous.provider_source = block.provider_source.clone(),
+                (Some(_), None) => {
+                    return Err(invalid_response(
+                        "Responses known native source cannot be cleared during replay",
+                    ));
+                }
+                (Some(before), Some(after)) if before != after => {
+                    let mut before = before.clone();
+                    let mut after = after.clone();
+                    let before_phase = before.phase.take();
+                    let after_phase = after.phase.take();
+                    if before != after
+                        || before_phase
+                            .as_ref()
+                            .is_some_and(|phase| after_phase.as_ref() != Some(phase))
+                    {
+                        return Err(invalid_response(
+                            "Responses canonical source changed during replay",
+                        ));
+                    }
+                    if before_phase.is_none() && after_phase.is_some() {
+                        previous.provider_source = block.provider_source.clone();
+                    }
+                }
+                _ => {}
             }
             if block.phase != AssistantPhase::Unknown {
                 previous.phase = block.phase;
@@ -388,12 +604,56 @@ fn native_history_to_responses(message: &Message) -> Result<Option<Vec<Value>>> 
             if block.reasoning.is_some() {
                 previous.reasoning = block.reasoning.clone();
             }
-        } else {
-            merged.push(block.clone());
         }
+        let source = previous
+            .provider_source
+            .as_ref()
+            .ok_or_else(|| invalid_response("Responses replay native source missing"))?;
+        if source.protocol != LlmApiProtocol::Responses {
+            return Err(invalid_response(
+                "Responses replay contains foreign protocol source",
+            ));
+        }
+        if let Some(provider) = previous.provider.as_deref() {
+            // block.provider是adapter标签或历史实际vendor；不强绑当前client配置的别名。
+            if provider != "openai_responses"
+                && observation.is_none_or(|record| record.provider != provider)
+            {
+                return Err(invalid_response(
+                    "Responses replay contains foreign provider observation",
+                ));
+            }
+        }
+        if observation
+            .is_some_and(|record| record.request_id.as_deref() != Some(source.request_id.as_str()))
+        {
+            return Err(invalid_response(
+                "Responses replay source disagrees with actual observed request",
+            ));
+        }
+        merged.push(previous);
     }
     let mut items: std::collections::BTreeMap<u32, Value> = std::collections::BTreeMap::new();
     let mut parts: std::collections::BTreeMap<(u32, u32), Value> =
+        std::collections::BTreeMap::new();
+    let opaque_summaries: HashMap<_, _> = merged
+        .iter()
+        .filter_map(|block| {
+            let source = block.provider_source.as_ref()?;
+            let Some(ReasoningBlock::Opaque { summary, .. }) = &block.reasoning else {
+                return None;
+            };
+            Some((
+                (
+                    source.request_id.clone(),
+                    source.item_id.clone(),
+                    source.output_index,
+                ),
+                summary.clone(),
+            ))
+        })
+        .collect();
+    let mut reasoning_parts: std::collections::BTreeMap<(u32, String, u32), Value> =
         std::collections::BTreeMap::new();
     let mut owner = None::<String>;
     for block in merged {
@@ -423,15 +683,96 @@ fn native_history_to_responses(message: &Message) -> Result<Option<Vec<Value>>> 
                     "Responses replay reasoning source mismatched",
                 ));
             }
-            let item = json!({"type":"reasoning","id":id,"encrypted_content":data,"summary":summary.iter().map(|text|json!({"type":"summary_text","text":text})).collect::<Vec<_>>()});
-            if items.insert(source.output_index, item).is_some() {
+            // 同一item的明文可能先于encrypted原件到达；合并原字段，不覆盖其content。
+            let item = items
+                .entry(source.output_index)
+                .or_insert_with(|| json!({"type":"reasoning","id":id}));
+            if item.get("type").and_then(Value::as_str) != Some("reasoning")
+                || item.get("id").and_then(Value::as_str) != Some(id.as_str())
+            {
+                return Err(invalid_response(
+                    "Responses replay reasoning item metadata conflicts",
+                ));
+            }
+            let object = item.as_object_mut().ok_or_else(|| {
+                invalid_response("Responses replay reasoning item was not an object")
+            })?;
+            if object.contains_key("encrypted_content") {
                 return Err(invalid_response(
                     "Responses replay has duplicate output index",
                 ));
             }
+            object.insert("encrypted_content".into(), json!(data));
+            object.insert(
+                "summary".into(),
+                json!(
+                    summary
+                        .iter()
+                        .map(|text| json!({"type":"summary_text","text":text}))
+                        .collect::<Vec<_>>()
+                ),
+            );
             continue;
         }
         if block.phase == AssistantPhase::Reasoning {
+            let index = source.content_index.ok_or_else(|| {
+                invalid_response("Responses plaintext reasoning content index missing")
+            })?;
+            let kind = source
+                .content_kind
+                .as_deref()
+                .ok_or_else(|| invalid_response("Responses plaintext reasoning kind missing"))?;
+            let field = match kind {
+                "reasoning_text" => "content",
+                "summary_text" => "summary",
+                _ => {
+                    return Err(invalid_response(
+                        "unsupported Responses plaintext reasoning kind",
+                    ));
+                }
+            };
+            let item = items
+                .entry(source.output_index)
+                .or_insert_with(|| json!({"type":"reasoning","id":source.item_id}));
+            if item.get("type").and_then(Value::as_str) != Some("reasoning")
+                || item.get("id").and_then(Value::as_str) != Some(source.item_id.as_str())
+            {
+                return Err(invalid_response(
+                    "Responses plaintext reasoning item metadata conflicts",
+                ));
+            }
+            // 仅去掉Opaque已携带的同源同索引summary；同文content也是独立原件。
+            if field == "summary"
+                && let Some(carried) = opaque_summaries
+                    .get(&(
+                        source.request_id.clone(),
+                        source.item_id.clone(),
+                        source.output_index,
+                    ))
+                    .and_then(|summary| {
+                        usize::try_from(index)
+                            .ok()
+                            .and_then(|index| summary.get(index))
+                    })
+            {
+                if carried != &block.delta {
+                    return Err(invalid_response(
+                        "Responses replay summary disagreed with opaque summary",
+                    ));
+                }
+                continue;
+            }
+            if reasoning_parts
+                .insert(
+                    (source.output_index, field.to_string(), index),
+                    json!({"type":kind,"text":block.delta}),
+                )
+                .is_some()
+            {
+                return Err(invalid_response(
+                    "Responses plaintext reasoning duplicated content index",
+                ));
+            }
             continue;
         }
         let content_index = source
@@ -481,12 +822,33 @@ fn native_history_to_responses(message: &Message) -> Result<Option<Vec<Value>>> 
             .ok_or_else(|| invalid_response("Responses replay message item missing"))?;
         content.push(part);
     }
+    for ((output_index, field, _), part) in reasoning_parts {
+        let object = items
+            .get_mut(&output_index)
+            .and_then(Value::as_object_mut)
+            .ok_or_else(|| invalid_response("Responses plaintext reasoning item missing"))?;
+        let content = object
+            .entry(field)
+            .or_insert_with(|| json!([]))
+            .as_array_mut()
+            .ok_or_else(|| {
+                invalid_response("Responses plaintext reasoning field was not an array")
+            })?;
+        content.push(part);
+    }
     for tool in tools {
         let source = tool
             .provider_source
             .as_ref()
             .filter(|source| source.protocol == LlmApiProtocol::Responses)
             .ok_or_else(|| invalid_response("Responses replay tool source missing"))?;
+        if observation
+            .is_some_and(|record| record.request_id.as_deref() != Some(source.request_id.as_str()))
+        {
+            return Err(invalid_response(
+                "Responses replay tool source disagrees with observed request",
+            ));
+        }
         if owner
             .as_ref()
             .is_some_and(|owner| owner != &source.request_id)
@@ -496,7 +858,10 @@ fn native_history_to_responses(message: &Message) -> Result<Option<Vec<Value>>> 
             ));
         }
         owner.get_or_insert_with(|| source.request_id.clone());
-        if source.item_id.is_empty() || source.content_kind.as_deref() != Some("function_call") {
+        if source.request_id.is_empty()
+            || source.item_id.is_empty()
+            || source.content_kind.as_deref() != Some("function_call")
+        {
             return Err(invalid_response("Responses replay invalid tool source"));
         }
         let item = json!({"type":"function_call","id":source.item_id,"call_id":tool.id,"name":tool.function.name,"arguments":tool.function.arguments});
@@ -546,35 +911,98 @@ fn responses_role(role: &Role) -> &str {
     }
 }
 
-fn content_to_responses(content: &MessageContent) -> Value {
+fn request_error(message: impl Into<String>) -> echo_core::error::ReactError {
+    LlmError::SerializationError(format!("Responses request: {}", message.into())).into()
+}
+
+fn validate_message_modalities(message: &Message, dialect: ResponsesDialect) -> Result<()> {
+    let (ResponsesDialect::DeepSeekFlash | ResponsesDialect::DeepSeekV4Pro) = dialect else {
+        return Ok(());
+    };
+    let Some(parts) = message.content.parts() else {
+        return Ok(());
+    };
+    let developer_or_user = matches!(message.role, Role::User)
+        || matches!(&message.role, Role::Custom(role) if role == "developer");
+    for part in parts {
+        match part {
+            ContentPart::File { .. } => {
+                return Err(request_error(
+                    "DeepSeek Responses does not support input_file content",
+                ));
+            }
+            ContentPart::ImageUrl { .. }
+                if dialect == ResponsesDialect::DeepSeekV4Pro || !developer_or_user =>
+            {
+                return Err(request_error(
+                    "DeepSeek input_image requires deepseek-flash user/developer content",
+                ));
+            }
+            ContentPart::Text { .. }
+            | ContentPart::ResourceLink { .. }
+            | ContentPart::ImageUrl { .. } => {}
+        }
+    }
+    Ok(())
+}
+
+fn content_to_responses(content: &MessageContent, dialect: ResponsesDialect) -> Result<Value> {
     match content {
-        MessageContent::Text(text) => Value::String(text.clone()),
-        MessageContent::Empty => Value::String(String::new()),
-        MessageContent::Parts(parts) => Value::Array(
-            parts
-                .iter()
-                .map(|part| match part {
+        MessageContent::Text(text) => Ok(json!([{ "type":"input_text", "text":text }])),
+        MessageContent::Empty => Ok(json!([])),
+        MessageContent::Parts(parts) => {
+            let mut values = Vec::with_capacity(parts.len());
+            for part in parts {
+                let value = match part {
                     ContentPart::Text { text } => json!({
                         "type": "input_text",
                         "text": text,
                     }),
-                    ContentPart::ImageUrl { image_url } => json!({
-                        "type": "input_image",
-                        "detail": image_url.detail.as_deref().unwrap_or("auto"),
-                        "image_url": image_url.url,
-                    }),
-                    ContentPart::File { name, content } => json!({
-                        "type": "input_file",
-                        "filename": name,
-                        "file_data": format!("data:application/octet-stream;base64,{content}"),
-                    }),
+                    ContentPart::ImageUrl { image_url } => {
+                        let detail = image_url.detail.as_deref().unwrap_or("auto");
+                        if image_url.url.is_empty()
+                            || !matches!(detail, "auto" | "low" | "high" | "original")
+                        {
+                            return Err(request_error(
+                                "input_image requires image_url and a supported detail value",
+                            ));
+                        }
+                        json!({"type":"input_image", "detail":detail, "image_url":image_url.url})
+                    }
+                    ContentPart::File { .. }
+                        if matches!(
+                            dialect,
+                            ResponsesDialect::DeepSeekFlash | ResponsesDialect::DeepSeekV4Pro
+                        ) =>
+                    {
+                        return Err(request_error(
+                            "DeepSeek Responses does not support input_file content",
+                        ));
+                    }
+                    ContentPart::File { name, content } => {
+                        if name.is_empty() || content.is_empty() {
+                            return Err(request_error(
+                                "input_file requires filename and base64 file data",
+                            ));
+                        }
+                        base64::Engine::decode(&base64::engine::general_purpose::STANDARD, content)
+                            .map_err(|_| request_error("input_file content is not valid base64"))?;
+                        let mime = if name.to_ascii_lowercase().ends_with(".pdf") {
+                            "application/pdf"
+                        } else {
+                            "application/octet-stream"
+                        };
+                        json!({"type":"input_file", "filename":name, "file_data":format!("data:{mime};base64,{content}")})
+                    }
                     ContentPart::ResourceLink { resource } => json!({
                         "type": "input_text",
                         "text": resource.model_text(),
                     }),
-                })
-                .collect(),
-        ),
+                };
+                values.push(value);
+            }
+            Ok(Value::Array(values))
+        }
     }
 }
 
@@ -588,18 +1016,151 @@ fn tools_to_responses(tools: &[ToolDefinition]) -> Value {
                     "name": tool.function.name,
                     "description": tool.function.description,
                     "parameters": tool.function.parameters,
-                    "strict": false,
+                    // Responses uses a flat function tool shape. `None` keeps
+                    // the existing permissive default; an explicit value is
+                    // preserved so strict tool validation is not conflated
+                    // with structured final-output strictness.
+                    "strict": tool.function.strict.unwrap_or(false),
                 })
             })
             .collect(),
     )
 }
 
-fn tool_choice_to_responses(choice: &str) -> Value {
-    if matches!(choice, "auto" | "none" | "required") {
-        return Value::String(choice.to_string());
+fn validate_response_tools(
+    tools: Option<&[ToolDefinition]>,
+    dialect: ResponsesDialect,
+) -> Result<()> {
+    let mut names = HashSet::new();
+    for tool in tools.unwrap_or_default() {
+        if !names.insert(tool.function.name.as_str()) {
+            return Err(request_error(
+                "Responses function tool names must be unique",
+            ));
+        }
+        if dialect != ResponsesDialect::OpenAi && tool.function.strict == Some(true) {
+            return Err(request_error(
+                "DeepSeek Responses function strict=true has no admitted support; text.format support is separate",
+            ));
+        }
+        if tool.tool_type != "function" {
+            return Err(request_error(format!(
+                "Responses does not support tool type '{}'",
+                tool.tool_type
+            )));
+        }
+        if tool.function.name.is_empty() {
+            return Err(request_error("Responses function tool name is empty"));
+        }
+        if !tool.function.parameters.is_object() {
+            return Err(request_error(format!(
+                "Responses function '{}' parameters must be a JSON object",
+                tool.function.name
+            )));
+        }
     }
-    serde_json::from_str(choice).unwrap_or_else(|_| json!({"type": "function", "name": choice}))
+    Ok(())
+}
+
+fn validate_response_tool_choice(
+    choice: &ToolChoice,
+    tools: Option<&[ToolDefinition]>,
+) -> Result<()> {
+    match choice {
+        ToolChoice::Auto | ToolChoice::None => Ok(()),
+        ToolChoice::Required => {
+            if tools.unwrap_or_default().is_empty() {
+                return Err(request_error(
+                    "Responses required tool choice needs at least one function tool",
+                ));
+            }
+            Ok(())
+        }
+        ToolChoice::Function { name } => {
+            if name.is_empty() {
+                return Err(request_error(
+                    "Responses selected function tool name is empty",
+                ));
+            }
+            if tools
+                .unwrap_or_default()
+                .iter()
+                .any(|tool| tool.function.name == *name)
+            {
+                Ok(())
+            } else {
+                Err(request_error(format!(
+                    "Responses selected function '{name}' is not exposed"
+                )))
+            }
+        }
+    }
+}
+
+fn validate_responses_thinking(
+    dialect: ResponsesDialect,
+    protocol: ThinkingProtocol,
+    thinking: &Option<ThinkingConfig>,
+) -> Result<()> {
+    if thinking.is_none() {
+        return Ok(());
+    }
+    if matches!(thinking, Some(ThinkingConfig::BudgetTokens(_))) {
+        return Err(request_error(
+            "Responses supports reasoning.effort, not an exact token budget",
+        ));
+    }
+    if dialect == ResponsesDialect::OpenAi && protocol != ThinkingProtocol::OpenaiReasoningEffort {
+        return Err(request_error(
+            "the resolved model has no Responses reasoning.effort control",
+        ));
+    }
+    if !matches!(
+        dialect,
+        ResponsesDialect::DeepSeekFlash | ResponsesDialect::DeepSeekV4Pro
+    ) {
+        return Ok(());
+    }
+    match thinking {
+        Some(ThinkingConfig::Level(ThinkingLevel::Xhigh)) => Err(request_error(
+            "DeepSeek Responses does not document xhigh reasoning effort; refusing the Chat alias",
+        )),
+        _ => Ok(()),
+    }
+}
+
+fn tool_choice_to_responses(choice: &ToolChoice) -> Value {
+    match choice {
+        ToolChoice::Auto => Value::String("auto".to_string()),
+        ToolChoice::None => Value::String("none".to_string()),
+        ToolChoice::Required => Value::String("required".to_string()),
+        ToolChoice::Function { name } => {
+            json!({"type": "function", "name": name})
+        }
+    }
+}
+
+/// Convert a tool result without routing through `MessageContent::as_text`.
+/// Responses accepts text, image, and file output parts natively; flattening
+/// those parts would silently discard a tool observation needed for replay.
+fn tool_result_to_responses(content: &MessageContent, dialect: ResponsesDialect) -> Result<Value> {
+    // 文本工具输出仍用原生字符串；Parts共用同一映射，维持文字/图片/文件原序。
+    match content {
+        MessageContent::Text(text) => Ok(Value::String(text.clone())),
+        MessageContent::Empty => Ok(Value::String(String::new())),
+        MessageContent::Parts(parts) => {
+            if dialect == ResponsesDialect::DeepSeekV4Pro
+                && parts
+                    .iter()
+                    .any(|part| matches!(part, ContentPart::ImageUrl { .. }))
+            {
+                return Err(request_error(
+                    "DeepSeek v4 Responses does not support image tool output",
+                ));
+            }
+            content_to_responses(content, dialect)
+        }
+    }
 }
 
 fn response_format_to_responses(format: &ResponseFormat) -> Value {
@@ -618,12 +1179,14 @@ fn response_format_to_responses(format: &ResponseFormat) -> Value {
 
 #[derive(Debug, Deserialize)]
 struct ResponsesResponse {
+    #[serde(default)]
     id: String,
     #[serde(default)]
     created_at: Option<u64>,
     #[serde(default)]
     model: Option<String>,
-    status: String,
+    #[serde(default)]
+    status: Option<String>,
     #[serde(default)]
     output: Vec<ResponsesOutputItem>,
     #[serde(default)]
@@ -663,6 +1226,7 @@ enum ResponsesOutputItem {
     },
     Reasoning {
         id: String,
+        #[serde(default)]
         encrypted_content: String,
         #[serde(default)]
         summary: Vec<ReasoningText>,
@@ -715,6 +1279,37 @@ impl From<ResponsesUsage> for Usage {
     }
 }
 
+/// 只从真实response外层选定字段构造唯一Core记录，不接服务伪造的同名扩展。
+fn response_metadata(raw: &Value, provider: &str) -> Result<ProviderResponseMetadata> {
+    let object = raw
+        .as_object()
+        .ok_or_else(|| invalid_response("Responses observation requires a response object"))?;
+    let mut value = json!({"protocol":LlmApiProtocol::Responses,"provider":provider});
+    let target = value
+        .as_object_mut()
+        .ok_or_else(|| invalid_response("observation object missing"))?;
+    if let Some(id) = object.get("id") {
+        match id {
+            Value::String(id) if !id.is_empty() => {
+                target.insert("request_id".into(), json!(id));
+            }
+            Value::Null => {}
+            _ => {
+                return Err(invalid_response(
+                    "Responses observation id must be a nonempty string or null",
+                ));
+            }
+        }
+    }
+    for key in ["model", "status", "incomplete_details", "usage"] {
+        if let Some(raw) = object.get(key) {
+            target.insert(key.into(), raw.clone());
+        }
+    }
+    serde_json::from_value(value)
+        .map_err(|error| invalid_response(format!("invalid Responses observation: {error}")))
+}
+
 fn invalid_response(message: impl Into<String>) -> echo_core::error::ReactError {
     LlmError::InvalidResponse(message.into()).into()
 }
@@ -738,7 +1333,7 @@ fn ensure_completed_response(response: &ResponsesResponse, context: &str) -> Res
             .unwrap_or_default();
         return Err(invalid_response(format!("{code}{}", error.message)));
     }
-    if response.status != "completed" {
+    if response.status.as_deref() != Some("completed") {
         let detail = response
             .incomplete_details
             .as_ref()
@@ -747,7 +1342,8 @@ fn ensure_completed_response(response: &ResponsesResponse, context: &str) -> Res
             .unwrap_or_default();
         return Err(invalid_response(format!(
             "{context} ended with non-completed status '{}'{}",
-            response.status, detail
+            response.status.as_deref().unwrap_or("missing/null"),
+            detail
         )));
     }
     Ok(())
@@ -761,15 +1357,20 @@ fn native_assistant_blocks(raw: &Value, response_id: &str) -> Result<Vec<Assista
         .get("output")
         .and_then(Value::as_array)
         .ok_or_else(|| invalid_response("Responses response omitted output array"))?;
+    let native_request_id = raw
+        .get("id")
+        .and_then(Value::as_str)
+        .filter(|id| !id.is_empty());
     let mut blocks = Vec::new();
     let mut sequence = 0_u64;
     let response_completed = raw.get("status").and_then(Value::as_str) == Some("completed");
     for (output_index, item) in output.iter().enumerate() {
         let item_type = required_non_empty_string(item, "type", "Responses output item")?;
-        if item
-            .get("status")
-            .and_then(Value::as_str)
-            .is_some_and(|status| status != "completed")
+        if response_completed
+            && item
+                .get("status")
+                .and_then(Value::as_str)
+                .is_some_and(|status| status != "completed")
         {
             return Err(invalid_response(
                 "Responses completed response contains unfinished item",
@@ -803,15 +1404,17 @@ fn native_assistant_blocks(raw: &Value, response_id: &str) -> Result<Vec<Assista
                     };
                     let delta = required_string(part, field, "Responses message content part")?;
                     blocks.push(AssistantMessageBlock {
-                        provider_source: Some(output_source(
-                            LlmApiProtocol::Responses,
-                            response_id,
-                            &item_id,
-                            output_index,
-                            Some(content_index),
-                            part_type,
-                            item.get("phase").and_then(Value::as_str),
-                        )),
+                        provider_source: native_request_id.map(|native| {
+                            output_source(
+                                LlmApiProtocol::Responses,
+                                native,
+                                &item_id,
+                                output_index,
+                                Some(content_index),
+                                part_type,
+                                item.get("phase").and_then(Value::as_str),
+                            )
+                        }),
                         block_id: format!("{item_id}:content:{content_index}"),
                         request_id: response_id.to_string(),
                         sequence,
@@ -826,18 +1429,20 @@ fn native_assistant_blocks(raw: &Value, response_id: &str) -> Result<Vec<Assista
             }
             "reasoning" => {
                 let id = required_non_empty_string(item, "id", "Responses reasoning item")?;
-                let data = required_non_empty_string(
-                    item,
-                    "encrypted_content",
-                    "Responses reasoning item",
-                )?;
-                let summary = item
-                    .get("summary")
-                    .and_then(Value::as_array)
-                    .into_iter()
-                    .flatten()
-                    .filter_map(|part| event_string(part, "text"))
-                    .collect::<Vec<_>>();
+                // 同一wire协议可返回encrypted原件或公开明文content；复用item校验，不伪造opaque数据。
+                if !response_completed
+                    && item.get("encrypted_content").is_none()
+                    && !["summary", "content"].iter().any(|field| {
+                        item.get(field)
+                            .and_then(Value::as_array)
+                            .is_some_and(|parts| !parts.is_empty())
+                    })
+                {
+                    continue;
+                }
+                let opaque = reasoning_item_done(item)?
+                    .and_then(|chunk| chunk.delta.reasoning_blocks)
+                    .and_then(|blocks| blocks.into_iter().next());
                 for (field, part_name) in [("summary", "summary"), ("content", "content")] {
                     for (index, part) in item
                         .get(field)
@@ -858,21 +1463,25 @@ fn native_assistant_blocks(raw: &Value, response_id: &str) -> Result<Vec<Assista
                                 },
                             );
                             blocks.push(AssistantMessageBlock {
-                                provider_source: Some(output_source(
-                                    LlmApiProtocol::Responses,
-                                    response_id,
-                                    id,
-                                    output_index,
-                                    Some(content_index),
-                                    kind,
-                                    None,
-                                )),
+                                provider_source: native_request_id.map(|native| {
+                                    output_source(
+                                        LlmApiProtocol::Responses,
+                                        native,
+                                        id,
+                                        output_index,
+                                        Some(content_index),
+                                        kind,
+                                        None,
+                                    )
+                                }),
                                 block_id: format!("{id}:{part_name}:{index}"),
                                 request_id: response_id.to_string(),
                                 sequence,
                                 phase: AssistantPhase::Reasoning,
                                 delta: text.to_string(),
-                                complete: true,
+                                complete: response_completed
+                                    || item.get("status").and_then(Value::as_str)
+                                        == Some("completed"),
                                 provider: Some("openai_responses".into()),
                                 reasoning: None,
                             });
@@ -880,31 +1489,31 @@ fn native_assistant_blocks(raw: &Value, response_id: &str) -> Result<Vec<Assista
                         }
                     }
                 }
-                blocks.push(AssistantMessageBlock {
-                    provider_source: Some(output_source(
-                        LlmApiProtocol::Responses,
-                        response_id,
-                        id,
-                        output_index,
-                        None,
-                        "reasoning",
-                        None,
-                    )),
-                    block_id: id.to_string(),
-                    request_id: response_id.to_string(),
-                    sequence,
-                    phase: AssistantPhase::Reasoning,
-                    delta: String::new(),
-                    complete: true,
-                    provider: Some("openai_responses".to_string()),
-                    reasoning: Some(ReasoningBlock::Opaque {
-                        provider: "openai_responses".to_string(),
-                        id: id.to_string(),
-                        data: data.to_string(),
-                        summary,
-                    }),
-                });
-                sequence = sequence.saturating_add(1);
+                if let Some(reasoning) = opaque {
+                    blocks.push(AssistantMessageBlock {
+                        provider_source: native_request_id.map(|native| {
+                            output_source(
+                                LlmApiProtocol::Responses,
+                                native,
+                                id,
+                                output_index,
+                                None,
+                                "reasoning",
+                                None,
+                            )
+                        }),
+                        block_id: id.to_string(),
+                        request_id: response_id.to_string(),
+                        sequence,
+                        phase: AssistantPhase::Reasoning,
+                        delta: String::new(),
+                        complete: response_completed
+                            || item.get("status").and_then(Value::as_str) == Some("completed"),
+                        provider: Some("openai_responses".to_string()),
+                        reasoning: Some(reasoning),
+                    });
+                    sequence = sequence.saturating_add(1);
+                }
             }
             _ => {}
         }
@@ -921,17 +1530,39 @@ fn assistant_phase(value: Option<&Value>) -> AssistantPhase {
     }
 }
 
+#[cfg(test)]
 fn response_to_chat(raw: Value) -> Result<ChatResponse> {
+    response_to_chat_for_provider(raw, "openai_responses")
+}
+
+fn response_to_chat_for_provider(raw: Value, provider: &str) -> Result<ChatResponse> {
+    // 原error首因先于其它字段解码；复用typed8 helper，原type/code不压成字符串。
+    if let Some(error) = raw.get("error").filter(|error| !error.is_null()) {
+        return Err(super::client::reported_provider_error(provider, error).into());
+    }
     let response: ResponsesResponse = serde_json::from_value(raw.clone()).map_err(|error| {
         LlmError::InvalidResponse(format!("invalid Responses response: {error}"))
     })?;
-    ensure_completed_response(&response, "Responses response")?;
-    if response.output.is_empty() {
+    // 真实服务error仍沿原错误边界；不得被派生的D2 partial覆盖。
+    if response.error.is_some() {
+        ensure_completed_response(&response, "Responses response")?;
+    }
+    let incomplete = response.status.as_deref() != Some("completed");
+    if !incomplete {
+        require_non_empty(&response.id, "response id")?;
+    }
+    let metadata = response_metadata(&raw, provider)?;
+    if !incomplete && response.output.is_empty() {
         return Err(invalid_response(
             "Responses response completed with empty output",
         ));
     }
-    let native_blocks = native_assistant_blocks(&raw, &response.id)?;
+    let canonical_id = if response.id.is_empty() {
+        super::native_message::fallback_request_id("responses")
+    } else {
+        response.id.clone()
+    };
+    let native_blocks = native_assistant_blocks(&raw, &canonical_id)?;
 
     let mut text = String::new();
     let mut tool_calls = Vec::new();
@@ -959,7 +1590,9 @@ fn response_to_chat(raw: Value) -> Result<ChatResponse> {
             } => {
                 require_non_empty(&call_id, "function_call.call_id")?;
                 require_non_empty(&name, "function_call.name")?;
-                require_non_empty(&arguments, "function_call.arguments")?;
+                if !incomplete {
+                    require_non_empty(&arguments, "function_call.arguments")?;
+                }
                 require_non_empty(&id, "function_call.id")?;
                 tool_calls.push(ToolCall {
                     provider_source: Some(output_source(
@@ -996,13 +1629,14 @@ fn response_to_chat(raw: Value) -> Result<ChatResponse> {
                     contents
                 });
                 require_non_empty(&id, "reasoning.id")?;
-                require_non_empty(&encrypted_content, "reasoning.encrypted_content")?;
-                reasoning_blocks.push(ReasoningBlock::Opaque {
-                    provider: "openai_responses".to_string(),
-                    id,
-                    data: encrypted_content,
-                    summary: summaries.clone(),
-                });
+                if !encrypted_content.is_empty() {
+                    reasoning_blocks.push(ReasoningBlock::Opaque {
+                        provider: "openai_responses".to_string(),
+                        id,
+                        data: encrypted_content,
+                        summary: summaries.clone(),
+                    });
+                }
             }
             ResponsesOutputItem::Other => {}
         }
@@ -1020,8 +1654,15 @@ fn response_to_chat(raw: Value) -> Result<ChatResponse> {
         reasoning_content: (!reasoning_text.is_empty()).then(|| reasoning_text.join("")),
         reasoning_blocks: (!reasoning_blocks.is_empty()).then_some(reasoning_blocks),
         assistant_blocks: (!native_blocks.is_empty()).then_some(native_blocks.clone()),
+        provider_response: Some(metadata),
         ..Default::default()
     };
+    if incomplete {
+        return Err(LlmError::IncompleteResponse {
+            partial: Box::new(message),
+        }
+        .into());
+    }
     let usage = response.usage.map(Usage::from);
     let finish_reason = finish_reason(has_tool_calls);
     super::native_message::validate_completion(&message, finish_reason.as_deref())?;
@@ -1086,15 +1727,21 @@ struct StreamFunctionCall {
     arguments: String,
 }
 
+type NativeTextCoordinate = (String, u32, Option<u32>, String);
+type EmittedText = (String, Option<NativeTextCoordinate>);
+
 #[derive(Default)]
 struct ResponsesStreamAdapter {
+    provider: String,
+    partial: Message,
     function_calls: HashMap<u32, StreamFunctionCall>,
     text: HashMap<StreamTextKey, String>,
     completed: bool,
     request_id: String,
     phases: HashMap<String, AssistantPhase>,
     raw_phases: HashMap<String, String>,
-    emitted_text: HashMap<String, String>,
+    // 同一既有block map保文本和原始坐标；坐标不含伪native request ID，不新建记录权威。
+    emitted_text: HashMap<String, EmittedText>,
     closed_blocks: HashSet<String>,
     metadata_completed: HashSet<String>,
     sequence: u64,
@@ -1104,6 +1751,553 @@ struct ResponsesStreamAdapter {
 
 impl ResponsesStreamAdapter {
     fn map_event(&mut self, event: Value) -> Result<Option<ChatChunk>> {
+        let event_type = required_non_empty_string(&event, "type", "Responses stream event")?;
+        // 有效原ProviderError、坏JSON/字段、实际传输失败保持首因，不改成D2。
+        if event_type == "error"
+            || matches!(
+                event_type,
+                "response.failed" | "response.incomplete" | "response.cancelled"
+            ) && event
+                .get("response")
+                .and_then(|raw| raw.get("error"))
+                .is_some_and(|error| !error.is_null())
+        {
+            return self.map_native_event(event);
+        }
+        if self.completed {
+            return self.map_native_event(event);
+        }
+        let native_was_unknown = self.native_request_id().is_none();
+        let observed = if let Some(raw) = event.get("response") {
+            self.observe_response(raw)?;
+            true
+        } else {
+            false
+        };
+        if matches!(
+            event_type,
+            "response.incomplete" | "response.failed" | "response.cancelled"
+        ) || event_type == "response.completed"
+            && event
+                .get("response")
+                .and_then(|response| response.get("status"))
+                .is_none_or(|status| status.as_str() != Some("completed"))
+        {
+            let raw = required_object(&event, "response", "Responses incomplete event")?;
+            let partial = self.partial_from_response(raw)?;
+            return Err(LlmError::IncompleteResponse {
+                partial: Box::new(partial),
+            }
+            .into());
+        }
+        let block_sequence_start = self.sequence;
+        let mut chunk = match self.map_native_event(event) {
+            Err(echo_core::error::ReactError::Llm(error)) => match *error {
+                LlmError::IncompleteResponse { mut partial } => {
+                    partial.provider_response = self.partial.provider_response.clone();
+                    return Err(LlmError::IncompleteResponse { partial }.into());
+                }
+                error => return Err(error.into()),
+            },
+            result => result?,
+        };
+        if observed && chunk.is_none() {
+            chunk = Some(ChatChunk {
+                delta: DeltaMessage::default(),
+                finish_reason: None,
+                usage: None,
+            });
+        }
+        if let Some(chunk) = &mut chunk {
+            if native_was_unknown && self.native_request_id().is_some() {
+                self.bind_late_sources(chunk)?;
+            }
+            // 本chunk尚未公开，可按依赖重排后统一续接原全局sequence；既发观察身份不改。
+            self.sequence = block_sequence_start;
+            for block in chunk.delta.assistant_blocks.iter_mut().flatten() {
+                block.sequence = self.sequence;
+                self.sequence = self.sequence.saturating_add(1);
+            }
+            chunk.delta.provider_response = self.partial.provider_response.clone();
+            self.partial.role = Role::Assistant;
+            if let Some(text) = &chunk.delta.content {
+                let mut content = self.partial.content.as_text().unwrap_or_default();
+                content.push_str(text);
+                self.partial.content = MessageContent::Text(content);
+            }
+            if let Some(text) = &chunk.delta.reasoning_content {
+                self.partial
+                    .reasoning_content
+                    .get_or_insert_with(String::new)
+                    .push_str(text);
+            }
+            if let Some(blocks) = &chunk.delta.assistant_blocks {
+                self.partial
+                    .assistant_blocks
+                    .get_or_insert_with(Vec::new)
+                    .extend(blocks.iter().cloned());
+            }
+            for block in chunk.delta.reasoning_blocks.iter().flatten() {
+                let blocks = self.partial.reasoning_blocks.get_or_insert_with(Vec::new);
+                if !blocks.contains(block) {
+                    blocks.push(block.clone());
+                }
+            }
+        }
+        Ok(chunk)
+    }
+
+    /// 失败full response可以晚到或省略先前已给的reasoning原件；只合并同item真实已观察字段。
+    fn native_request_id(&self) -> Option<&str> {
+        self.partial
+            .provider_response
+            .as_ref()
+            .and_then(|record| record.request_id.as_deref())
+    }
+
+    fn block_source(
+        &mut self,
+        block_id: &str,
+        item_id: &str,
+        index: u32,
+        part: Option<u32>,
+        kind: &str,
+    ) -> Option<echo_core::llm::types::ProviderOutputSource> {
+        self.emitted_text.entry(block_id.to_string()).or_default().1 =
+            Some((item_id.to_string(), index, part, kind.to_string()));
+        self.native_request_id().map(|native| {
+            output_source(
+                LlmApiProtocol::Responses,
+                native,
+                item_id,
+                index,
+                part,
+                kind,
+                self.raw_phases.get(item_id).map(String::as_str),
+            )
+        })
+    }
+
+    /// 晚ID只修正既有来源，不重发正文/参数或修改已发canonical request/block身份。
+    fn bind_late_sources(&mut self, chunk: &mut ChatChunk) -> Result<()> {
+        let native = self
+            .native_request_id()
+            .ok_or_else(|| invalid_response("late source binding omitted native ID"))?
+            .to_string();
+        let mut updates = std::collections::BTreeMap::new();
+        for block in self.partial.assistant_blocks.iter_mut().flatten() {
+            if block.provider_source.is_some() {
+                continue;
+            }
+            let (item, index, part, kind) = self
+                .emitted_text
+                .get(&block.block_id)
+                .and_then(|entry| entry.1.as_ref())
+                .ok_or_else(|| {
+                    invalid_response("late source binding lost original block coordinates")
+                })?;
+            let source = output_source(
+                LlmApiProtocol::Responses,
+                &native,
+                item,
+                *index,
+                *part,
+                kind,
+                self.raw_phases.get(item).map(String::as_str),
+            );
+            block.provider_source = Some(source.clone());
+            let mut update = block.clone();
+            update.provider_source = Some(source);
+            update.delta.clear();
+            update.reasoning = None;
+            update.complete = false;
+            updates.insert((block.request_id.clone(), block.block_id.clone()), update);
+        }
+        let mut prefix_updates = Vec::new();
+        for (_, update) in updates {
+            if chunk.delta.assistant_blocks.as_ref().is_some_and(|blocks| {
+                blocks.iter().any(|block| {
+                    block.request_id == update.request_id
+                        && block.block_id == update.block_id
+                        && block.provider_source.is_some()
+                })
+            }) {
+                continue;
+            }
+            prefix_updates.push(update);
+        }
+        if !prefix_updates.is_empty() {
+            let blocks = chunk.delta.assistant_blocks.get_or_insert_with(Vec::new);
+            // 已呈现child先迁到真实native坐标，依赖该prefix的Opaque parent随后才可投影。
+            prefix_updates.append(blocks);
+            *blocks = prefix_updates;
+        }
+        let mut indexes = self.function_calls.keys().copied().collect::<Vec<_>>();
+        indexes.sort_unstable();
+        for index in indexes {
+            let call = self
+                .function_calls
+                .get(&index)
+                .ok_or_else(|| invalid_response("late source tool disappeared"))?;
+            let calls = chunk.delta.tool_calls.get_or_insert_with(Vec::new);
+            if calls.iter().any(|call| call.index == index) {
+                continue;
+            }
+            calls.push(DeltaToolCall {
+                provider_source: Some(output_source(
+                    LlmApiProtocol::Responses,
+                    &native,
+                    &call.item_id,
+                    index,
+                    None,
+                    "function_call",
+                    None,
+                )),
+                index,
+                id: None,
+                call_type: None,
+                function: None,
+            });
+        }
+        Ok(())
+    }
+
+    fn partial_from_response(&self, raw: &Value) -> Result<Message> {
+        let mut native = raw.clone();
+        // 同请求省略ID不清除已观察真ID；仅partial解码复用，不放宽成功缺ID错误。
+        if native.get("id").is_none_or(Value::is_null)
+            && let Some(actual) = self.native_request_id()
+        {
+            native
+                .as_object_mut()
+                .ok_or_else(|| invalid_response("partial response object missing"))?
+                .insert("id".into(), json!(actual));
+        }
+        let output = native
+            .get_mut("output")
+            .and_then(Value::as_array_mut)
+            .ok_or_else(|| invalid_response("incomplete response output missing"))?;
+        for item in output.iter_mut() {
+            if item.get("type").and_then(Value::as_str) == Some("message")
+                && item.get("phase").is_none()
+                && let Some(phase) = item
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .and_then(|id| self.raw_phases.get(id))
+            {
+                item.as_object_mut()
+                    .ok_or_else(|| invalid_response("incomplete item missing"))?
+                    .insert("phase".into(), json!(phase));
+            }
+        }
+        for block in self.partial.reasoning_blocks.iter().flatten() {
+            let ReasoningBlock::Opaque {
+                id, data, summary, ..
+            } = block
+            else {
+                continue;
+            };
+            let item = output
+                .iter_mut()
+                .find(|item| item.get("id").and_then(Value::as_str) == Some(id.as_str()))
+                .and_then(Value::as_object_mut)
+                .ok_or_else(|| {
+                    invalid_response("incomplete response omitted observed reasoning")
+                })?;
+            match item.get("encrypted_content") {
+                Some(value) if value.as_str() != Some(data.as_str()) => {
+                    return Err(invalid_response(
+                        "incomplete response changed observed encrypted reasoning",
+                    ));
+                }
+                None => {
+                    item.insert("encrypted_content".into(), json!(data));
+                }
+                _ => {}
+            }
+            if let Some(parts) = item.get("summary").and_then(Value::as_array) {
+                if parts.len() < summary.len()
+                    || summary.iter().enumerate().any(|(index, text)| {
+                        parts
+                            .get(index)
+                            .and_then(|part| part.get("text"))
+                            .and_then(Value::as_str)
+                            != Some(text.as_str())
+                    })
+                {
+                    return Err(invalid_response(
+                        "incomplete response changed observed reasoning summary",
+                    ));
+                }
+            } else if item.get("summary").is_none() {
+                item.insert(
+                    "summary".into(),
+                    json!(
+                        summary
+                            .iter()
+                            .map(|text| json!({"type":"summary_text","text":text}))
+                            .collect::<Vec<_>>()
+                    ),
+                );
+            }
+        }
+        self.validate_partial_response(&native)?;
+        let provider = if self.provider.is_empty() {
+            "openai_responses"
+        } else {
+            &self.provider
+        };
+        match response_to_chat_for_provider(native, provider) {
+            Err(echo_core::error::ReactError::Llm(error)) => match *error {
+                LlmError::IncompleteResponse { mut partial } => {
+                    partial.provider_response = self.partial.provider_response.clone();
+                    for block in partial.assistant_blocks.iter_mut().flatten() {
+                        if !self.request_id.is_empty() {
+                            block.request_id = self.request_id.clone();
+                        }
+                    }
+                    Ok(*partial)
+                }
+                error => Err(error.into()),
+            },
+            Err(error) => Err(error),
+            Ok(_) => Err(invalid_response(
+                "incomplete event contains completed response",
+            )),
+        }
+    }
+
+    /// 完整失败响应仍须与已解码片段同源；协议损坏不能被D2包装成可信partial。
+    fn validate_partial_response(&self, raw: &Value) -> Result<()> {
+        let output = required_array(raw, "output", "Responses incomplete response")?;
+        for (index, (id, kind)) in &self.observed_items {
+            let item = usize::try_from(*index)
+                .ok()
+                .and_then(|index| output.get(index))
+                .ok_or_else(|| invalid_response("incomplete response omitted observed item"))?;
+            if item.get("id").and_then(Value::as_str) != Some(id.as_str())
+                || item.get("type").and_then(Value::as_str) != Some(kind.as_str())
+            {
+                return Err(invalid_response(
+                    "incomplete response changed observed item",
+                ));
+            }
+            if self.raw_phases.contains_key(id)
+                && item.get("phase").is_some_and(|phase| !phase.is_string())
+            {
+                return Err(invalid_response(
+                    "incomplete response replaced observed phase with null or invalid value",
+                ));
+            }
+            if let Some(previous) = self.phases.get(id) {
+                let current = assistant_phase(item.get("phase"));
+                if *previous != AssistantPhase::Unknown
+                    && current != AssistantPhase::Unknown
+                    && current != *previous
+                {
+                    return Err(invalid_response(
+                        "incomplete response changed observed phase",
+                    ));
+                }
+            }
+            if let Some(current) = item.get("phase").and_then(Value::as_str)
+                && self
+                    .raw_phases
+                    .get(id)
+                    .is_some_and(|previous| previous != current)
+            {
+                return Err(invalid_response("incomplete response changed raw phase"));
+            }
+        }
+        // item.done也会建立canonical原件而没有text.delta；按同一source坐标核验，不能覆盖。
+        for block in self.partial.assistant_blocks.iter().flatten() {
+            let (output_index, content_index, content_kind) = match block.provider_source.as_ref() {
+                Some(source) => (
+                    source.output_index,
+                    source.content_index,
+                    source.content_kind.as_deref(),
+                ),
+                None => {
+                    let Some((_, index, part, kind)) = self
+                        .emitted_text
+                        .get(&block.block_id)
+                        .and_then(|entry| entry.1.as_ref())
+                    else {
+                        continue;
+                    };
+                    (*index, *part, Some(kind.as_str()))
+                }
+            };
+            let Some(index) = content_index else {
+                continue;
+            };
+            let (field, value_field) = match content_kind {
+                Some("summary_text") => ("summary", "text"),
+                Some("reasoning_text" | "output_text") => ("content", "text"),
+                Some("refusal") => ("content", "refusal"),
+                _ => continue,
+            };
+            let part = usize::try_from(output_index)
+                .ok()
+                .and_then(|index| output.get(index))
+                .and_then(|item| item.get(field))
+                .and_then(Value::as_array)
+                .and_then(|parts| {
+                    usize::try_from(index)
+                        .ok()
+                        .and_then(|index| parts.get(index))
+                })
+                .ok_or_else(|| invalid_response("incomplete response omitted canonical content"))?;
+            if part.get("type").and_then(Value::as_str) != content_kind {
+                return Err(invalid_response(
+                    "incomplete response changed canonical content kind",
+                ));
+            }
+            let completed =
+                required_string(part, value_field, "Responses incomplete canonical content")?;
+            let observed = self
+                .emitted_text
+                .get(&block.block_id)
+                .map(|entry| entry.0.as_str())
+                .unwrap_or_default();
+            if self.closed_blocks.contains(&block.block_id) && observed != completed {
+                return Err(invalid_response(
+                    "incomplete response changed closed canonical content",
+                ));
+            }
+            let mut before = observed.to_string();
+            reconcile_terminal_text(&mut before, completed, "incomplete canonical content")?;
+        }
+        for (key, text) in &self.text {
+            let field = if key.kind == StreamTextKind::ReasoningSummary {
+                "summary"
+            } else {
+                "content"
+            };
+            let value_field = if key.kind == StreamTextKind::Refusal {
+                "refusal"
+            } else {
+                "text"
+            };
+            let part = usize::try_from(key.output_index)
+                .ok()
+                .and_then(|index| output.get(index))
+                .and_then(|item| item.get(field))
+                .and_then(Value::as_array)
+                .and_then(|parts| {
+                    usize::try_from(key.content_index)
+                        .ok()
+                        .and_then(|index| parts.get(index))
+                })
+                .ok_or_else(|| invalid_response("incomplete response omitted observed text"))?;
+            let completed = required_string(part, value_field, "Responses incomplete content")?;
+            let mut seen = text.clone();
+            reconcile_terminal_text(&mut seen, completed, "incomplete content")?;
+        }
+        for (index, call) in &self.function_calls {
+            let item = usize::try_from(*index)
+                .ok()
+                .and_then(|index| output.get(index))
+                .ok_or_else(|| invalid_response("incomplete response omitted observed tool"))?;
+            if item.get("id").and_then(Value::as_str) != Some(call.item_id.as_str())
+                || item.get("call_id").and_then(Value::as_str) != Some(call.call_id.as_str())
+                || item.get("name").and_then(Value::as_str) != Some(call.name.as_str())
+            {
+                return Err(invalid_response(
+                    "incomplete response changed tool identity",
+                ));
+            }
+            let completed = required_string(item, "arguments", "Responses incomplete tool")?;
+            let mut seen = call.arguments.clone();
+            reconcile_terminal_text(&mut seen, completed, "incomplete arguments")?;
+        }
+        Ok(())
+    }
+
+    fn observe_response(&mut self, raw: &Value) -> Result<()> {
+        let provider = if self.provider.is_empty() {
+            "openai_responses"
+        } else {
+            &self.provider
+        };
+        if !["id", "model", "status", "incomplete_details", "usage"]
+            .iter()
+            .any(|field| raw.get(field).is_some())
+        {
+            return Err(invalid_response(
+                "Responses observation contained no native fields",
+            ));
+        }
+        let patch = response_metadata(raw, provider)?;
+        if let Some(previous) = &self.partial.provider_response {
+            if previous
+                .request_id
+                .as_ref()
+                .zip(patch.request_id.as_ref())
+                .is_some_and(|(a, b)| a != b)
+            {
+                return Err(invalid_response(
+                    "Responses observation changed native request id",
+                ));
+            }
+            let mut snapshot = serde_json::to_value(previous)?;
+            let incoming = serde_json::to_value(patch)?;
+            let target = snapshot
+                .as_object_mut()
+                .ok_or_else(|| invalid_response("observation snapshot missing"))?;
+            for (key, value) in incoming
+                .as_object()
+                .ok_or_else(|| invalid_response("observation patch missing"))?
+            {
+                if key != "request_id" || !value.is_null() {
+                    target.insert(key.clone(), value.clone());
+                }
+            }
+            self.partial.provider_response = Some(serde_json::from_value(snapshot)?);
+        } else {
+            self.partial.provider_response = Some(patch);
+        }
+        self.partial.role = Role::Assistant;
+        Ok(())
+    }
+
+    fn incomplete_error(&self) -> echo_core::error::ReactError {
+        let mut partial = self.partial.clone();
+        partial.role = Role::Assistant;
+        partial.execution_status = None;
+        partial.approved_assistant_blocks = None;
+        let mut indexes = self.function_calls.keys().copied().collect::<Vec<_>>();
+        indexes.sort_unstable();
+        let calls = indexes
+            .into_iter()
+            .filter_map(|index| {
+                self.function_calls.get(&index).map(|call| ToolCall {
+                    provider_source: Some(output_source(
+                        LlmApiProtocol::Responses,
+                        self.native_request_id().unwrap_or(""),
+                        &call.item_id,
+                        index,
+                        None,
+                        "function_call",
+                        None,
+                    )),
+                    id: call.call_id.clone(),
+                    call_type: "function".into(),
+                    function: FunctionCall {
+                        name: call.name.clone(),
+                        arguments: call.arguments.clone(),
+                    },
+                })
+            })
+            .collect::<Vec<_>>();
+        partial.tool_calls = (!calls.is_empty()).then_some(calls);
+        LlmError::IncompleteResponse {
+            partial: Box::new(partial),
+        }
+        .into()
+    }
+
+    fn map_native_event(&mut self, event: Value) -> Result<Option<ChatChunk>> {
         let event_type =
             required_non_empty_string(&event, "type", "Responses stream event")?.to_string();
         if event_type.ends_with(".delta")
@@ -1191,19 +2385,6 @@ impl ResponsesStreamAdapter {
                 .map(ToString::to_string)
                 .unwrap_or_else(|| super::native_message::fallback_request_id("responses"));
         }
-        if (event_type == "response.created" || event_type == "response.in_progress")
-            && let Some(id) = event
-                .get("response")
-                .and_then(|response| response.get("id"))
-                .and_then(Value::as_str)
-        {
-            if self.sequence > 0 && self.request_id != id {
-                return Err(invalid_response(
-                    "Responses response identity changed after output",
-                ));
-            }
-            self.request_id = id.to_string();
-        }
         let mut discovered_phase = false;
         if let Some(item) = event.get("item")
             && item.get("type").and_then(Value::as_str) == Some("message")
@@ -1258,7 +2439,14 @@ impl ResponsesStreamAdapter {
                 }
             }
             // Validate the same full response as the non-streaming adapter.
-            let full = response_to_chat(response.clone())?;
+            let full = response_to_chat_for_provider(
+                response.clone(),
+                if self.provider.is_empty() {
+                    "openai_responses"
+                } else {
+                    &self.provider
+                },
+            )?;
             let mut terminal = self
                 .map_legacy_event(event.clone())?
                 .ok_or_else(|| invalid_response("terminal chunk was omitted"))?;
@@ -1268,7 +2456,7 @@ impl ResponsesStreamAdapter {
                     let previous = self
                         .emitted_text
                         .get(&block.block_id)
-                        .map(String::as_str)
+                        .map(|entry| entry.0.as_str())
                         .unwrap_or_default();
                     if previous != block.delta {
                         return Err(invalid_response(
@@ -1277,7 +2465,11 @@ impl ResponsesStreamAdapter {
                     }
                     continue;
                 }
-                let accumulated = self.emitted_text.entry(block.block_id.clone()).or_default();
+                let accumulated = &mut self
+                    .emitted_text
+                    .entry(block.block_id.clone())
+                    .or_default()
+                    .0;
                 let suffix = reconcile_terminal_text(accumulated, &block.delta, "canonical block")?
                     .unwrap_or_default();
                 let mut completed = block;
@@ -1286,11 +2478,13 @@ impl ResponsesStreamAdapter {
                 self.sequence = self.sequence.saturating_add(1);
                 self.closed_blocks.insert(completed.block_id.clone());
                 self.metadata_completed.insert(completed.block_id.clone());
-                if completed.phase != AssistantPhase::Reasoning && !completed.delta.is_empty() {
-                    terminal
-                        .delta
-                        .content
-                        .get_or_insert_with(String::new)
+                if !completed.delta.is_empty() {
+                    let text = if completed.phase == AssistantPhase::Reasoning {
+                        &mut terminal.delta.reasoning_content
+                    } else {
+                        &mut terminal.delta.content
+                    };
+                    text.get_or_insert_with(String::new)
                         .push_str(&completed.delta);
                 }
                 if let Some(reasoning) = completed.reasoning.clone() {
@@ -1382,6 +2576,7 @@ impl ResponsesStreamAdapter {
                 self.emitted_text
                     .entry(block_id.clone())
                     .or_default()
+                    .0
                     .push_str(&text);
                 if text_done {
                     self.closed_blocks.insert(block_id.clone());
@@ -1396,15 +2591,13 @@ impl ResponsesStreamAdapter {
                     "output_text"
                 };
                 native.push(AssistantMessageBlock {
-                    provider_source: Some(output_source(
-                        LlmApiProtocol::Responses,
-                        &self.request_id,
+                    provider_source: self.block_source(
+                        &block_id,
                         item_id,
                         required_u32(&event, "output_index", "Responses text event")?,
                         Some(index),
                         native_kind,
-                        self.raw_phases.get(item_id).map(String::as_str),
-                    )),
+                    ),
                     block_id,
                     request_id: self.request_id.clone(),
                     sequence: self.sequence,
@@ -1438,7 +2631,8 @@ impl ResponsesStreamAdapter {
                             continue;
                         }
                         let text = required_string(part, field, "Responses content")?;
-                        let accumulated = self.emitted_text.entry(block_id.clone()).or_default();
+                        let accumulated =
+                            &mut self.emitted_text.entry(block_id.clone()).or_default().0;
                         let suffix =
                             reconcile_terminal_text(accumulated, text, field)?.unwrap_or_default();
                         // 相同item.done重入没有新正文/阶段时保持幂等；晚到的首次
@@ -1447,9 +2641,8 @@ impl ResponsesStreamAdapter {
                             continue;
                         }
                         native.push(AssistantMessageBlock {
-                            provider_source: Some(output_source(
-                                LlmApiProtocol::Responses,
-                                &self.request_id,
+                            provider_source: self.block_source(
+                                &block_id,
                                 item_id,
                                 required_u32(&event, "output_index", "Responses message done")?,
                                 Some(u32::try_from(index).map_err(|_| {
@@ -1460,8 +2653,7 @@ impl ResponsesStreamAdapter {
                                 } else {
                                     "refusal"
                                 },
-                                item.get("phase").and_then(Value::as_str),
-                            )),
+                            ),
                             block_id,
                             request_id: self.request_id.clone(),
                             sequence: self.sequence,
@@ -1473,31 +2665,101 @@ impl ResponsesStreamAdapter {
                         });
                     }
                 }
-                Some("reasoning") if self.metadata_completed.insert(item_id.to_string()) => {
+                Some("reasoning") if !self.metadata_completed.contains(item_id) => {
                     let reasoning = chunk
                         .as_ref()
                         .and_then(|chunk| chunk.delta.reasoning_blocks.as_ref())
                         .and_then(|blocks| blocks.first())
                         .cloned();
-                    native.push(AssistantMessageBlock {
-                        provider_source: Some(output_source(
-                            LlmApiProtocol::Responses,
-                            &self.request_id,
-                            item_id,
-                            required_u32(&event, "output_index", "Responses reasoning done")?,
-                            None,
-                            "reasoning",
-                            None,
-                        )),
-                        block_id: item_id.to_string(),
-                        request_id: self.request_id.clone(),
-                        sequence: self.sequence,
-                        phase: AssistantPhase::Reasoning,
-                        delta: String::new(),
-                        complete: true,
-                        provider: Some("openai_responses".into()),
-                        reasoning,
-                    });
+                    if reasoning.is_some() {
+                        self.metadata_completed.insert(item_id.to_string());
+                        native.push(AssistantMessageBlock {
+                            provider_source: self.block_source(
+                                item_id,
+                                item_id,
+                                required_u32(&event, "output_index", "Responses reasoning done")?,
+                                None,
+                                "reasoning",
+                            ),
+                            block_id: item_id.to_string(),
+                            request_id: self.request_id.clone(),
+                            sequence: self.sequence,
+                            phase: AssistantPhase::Reasoning,
+                            delta: String::new(),
+                            complete: true,
+                            provider: Some("openai_responses".into()),
+                            reasoning,
+                        });
+                    }
+                    // Opaque与公开parts是同一item的独立原件；item.done先到也不能等completed才记住。
+                    {
+                        let mut unseen_reasoning = String::new();
+                        for field in ["summary", "content"] {
+                            for (index, part) in item
+                                .get(field)
+                                .and_then(Value::as_array)
+                                .into_iter()
+                                .flatten()
+                                .enumerate()
+                            {
+                                let text =
+                                    required_string(part, "text", "Responses reasoning text")?;
+                                let block_id = format!("{item_id}:{field}:{index}");
+                                if self.metadata_completed.contains(&block_id) {
+                                    continue;
+                                }
+                                let accumulated =
+                                    &mut self.emitted_text.entry(block_id.clone()).or_default().0;
+                                let suffix =
+                                    reconcile_terminal_text(accumulated, text, "reasoning text")?
+                                        .unwrap_or_default();
+                                unseen_reasoning.push_str(&suffix);
+                                self.closed_blocks.insert(block_id.clone());
+                                self.metadata_completed.insert(block_id.clone());
+                                native.push(AssistantMessageBlock {
+                                    provider_source: self.block_source(
+                                        &block_id,
+                                        item_id,
+                                        required_u32(
+                                            &event,
+                                            "output_index",
+                                            "Responses reasoning done",
+                                        )?,
+                                        Some(u32::try_from(index).map_err(|_| {
+                                            invalid_response("reasoning content index exceeds u32")
+                                        })?),
+                                        part.get("type").and_then(Value::as_str).unwrap_or(
+                                            if field == "summary" {
+                                                "summary_text"
+                                            } else {
+                                                "reasoning_text"
+                                            },
+                                        ),
+                                    ),
+                                    block_id,
+                                    request_id: self.request_id.clone(),
+                                    sequence: self.sequence,
+                                    phase: AssistantPhase::Reasoning,
+                                    delta: suffix,
+                                    complete: true,
+                                    provider: Some("openai_responses".into()),
+                                    reasoning: None,
+                                });
+                            }
+                        }
+                        if !unseen_reasoning.is_empty() {
+                            let value = chunk.get_or_insert_with(|| ChatChunk {
+                                delta: DeltaMessage::default(),
+                                finish_reason: None,
+                                usage: None,
+                            });
+                            value
+                                .delta
+                                .reasoning_content
+                                .get_or_insert_with(String::new)
+                                .push_str(&unseen_reasoning);
+                        }
+                    }
                 }
                 _ => {}
             }
@@ -1520,15 +2782,17 @@ impl ResponsesStreamAdapter {
     fn attach_tool_sources(&self, chunk: &mut ChatChunk) {
         for tool in chunk.delta.tool_calls.as_mut().into_iter().flatten() {
             if let Some(state) = self.function_calls.get(&tool.index) {
-                tool.provider_source = Some(output_source(
-                    LlmApiProtocol::Responses,
-                    &self.request_id,
-                    &state.item_id,
-                    tool.index,
-                    None,
-                    "function_call",
-                    None,
-                ));
+                tool.provider_source = self.native_request_id().map(|native| {
+                    output_source(
+                        LlmApiProtocol::Responses,
+                        native,
+                        &state.item_id,
+                        tool.index,
+                        None,
+                        "function_call",
+                        None,
+                    )
+                });
             }
         }
     }
@@ -1565,18 +2829,50 @@ impl ResponsesStreamAdapter {
                 Ok(chunk)
             }
             "response.incomplete" | "response.failed" | "response.cancelled" => {
-                Err(stream_failure(&event).into())
+                if let Some(error) = event
+                    .get("response")
+                    .and_then(|response| response.get("error"))
+                    .filter(|error| !error.is_null())
+                {
+                    Err(super::client::reported_provider_error(
+                        if self.provider.is_empty() {
+                            "openai_responses"
+                        } else {
+                            &self.provider
+                        },
+                        error,
+                    )
+                    .into())
+                } else {
+                    Err(stream_failure(&event).into())
+                }
             }
-            "error" => Err(invalid_response(
-                event_string(&event, "message")
-                    .unwrap_or_else(|| "Responses stream error".to_string()),
-            )),
+            "error" => Err(super::client::reported_provider_error(
+                if self.provider.is_empty() {
+                    "openai_responses"
+                } else {
+                    &self.provider
+                },
+                event.get("error").unwrap_or(&event),
+            )
+            .into()),
             _ => Ok(None),
         }
     }
 
     fn validate_transport_end(&self, boundary: &str) -> Result<()> {
         if !self.completed {
+            if self.partial.provider_response.is_some()
+                || self.partial.content.as_text().is_some()
+                || self
+                    .partial
+                    .assistant_blocks
+                    .as_ref()
+                    .is_some_and(|blocks| !blocks.is_empty())
+                || !self.function_calls.is_empty()
+            {
+                return Err(self.incomplete_error());
+            }
             return Err(invalid_response(format!(
                 "Responses stream reached {boundary} before response.completed"
             )));
@@ -1845,7 +3141,33 @@ fn tool_chunk(
 
 fn reasoning_item_done(item: &Value) -> Result<Option<ChatChunk>> {
     let id = required_non_empty_string(item, "id", "Responses reasoning item")?;
-    let data = required_non_empty_string(item, "encrypted_content", "Responses reasoning item")?;
+    let data = match item.get("encrypted_content") {
+        Some(value) => value
+            .as_str()
+            .filter(|data| !data.is_empty())
+            .ok_or_else(|| {
+                invalid_response("Responses reasoning encrypted_content was empty or invalid")
+            })?,
+        None => {
+            let has_public_text = ["summary", "content"].into_iter().any(|field| {
+                item.get(field)
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .any(|part| {
+                        part.get("text")
+                            .and_then(Value::as_str)
+                            .is_some_and(|text| !text.is_empty())
+                    })
+            });
+            if !has_public_text {
+                return Err(invalid_response(
+                    "Responses reasoning omitted both opaque data and public text",
+                ));
+            }
+            return Ok(None);
+        }
+    };
     let summary = item
         .get("summary")
         .and_then(Value::as_array)
@@ -2013,6 +3335,10 @@ mod tests {
         )
     }
 
+    fn is_incomplete_response<T>(result: &Result<T>) -> bool {
+        matches!(result, Err(echo_core::error::ReactError::Llm(error)) if matches!(error.as_ref(), LlmError::IncompleteResponse { .. }))
+    }
+
     fn required_chunk(result: Result<Option<ChatChunk>>, context: &str) -> Result<ChatChunk> {
         result?.ok_or_else(|| invalid_response(format!("{context} was dropped")))
     }
@@ -2073,6 +3399,7 @@ mod tests {
                     name: "lookup".to_string(),
                     description: "Lookup".to_string(),
                     parameters: json!({"type": "object"}),
+                    strict: None,
                 },
             }]),
             response_format: Some(ResponseFormat::json_schema(
@@ -2309,10 +3636,13 @@ mod tests {
                 "status": status,
                 "output": []
             }));
-            assert!(is_invalid_response(&result), "status {status} was accepted");
+            assert!(
+                is_incomplete_response(&result),
+                "status {status} was accepted"
+            );
         }
         let missing_status = response_to_chat(json!({"id": "resp_1", "output": []}));
-        assert!(is_invalid_response(&missing_status));
+        assert!(is_incomplete_response(&missing_status));
     }
 
     #[test]
@@ -2615,7 +3945,10 @@ mod tests {
                 "type":"response.completed",
                 "response":{"id":"resp_1","status":status,"output":[]}
             }));
-            assert!(is_invalid_response(&result), "status {status} was accepted");
+            assert!(
+                is_incomplete_response(&result),
+                "status {status} was accepted"
+            );
         }
         for event_type in [
             "response.failed",
@@ -2626,7 +3959,7 @@ mod tests {
                 "type":event_type,
                 "response":{"id":"resp_1","status":event_type,"output":[]}
             }));
-            assert!(is_invalid_response(&result));
+            assert!(is_incomplete_response(&result));
         }
 
         let terminal = required_chunk(
@@ -2653,7 +3986,7 @@ mod tests {
             }))),
             Ok(JsonSseEvent::Done),
         ]);
-        let mut stream = adapt_responses_stream(raw_stream);
+        let mut stream = adapt_responses_stream(raw_stream, "test-provider".into());
         let first = stream.next().await.ok_or_else(|| {
             invalid_response("adapted stream omitted the text delta before [DONE]")
         })??;
@@ -2661,7 +3994,7 @@ mod tests {
         let terminal = stream.next().await.ok_or_else(|| {
             invalid_response("adapted stream omitted missing-completed error at [DONE]")
         })?;
-        assert!(is_invalid_response(&terminal));
+        assert!(is_incomplete_response(&terminal));
         assert!(stream.next().await.is_none());
         Ok(())
     }
@@ -2675,7 +4008,7 @@ mod tests {
             "content_index":0,
             "delta":"partial"
         })))]);
-        let mut stream = adapt_responses_stream(raw_stream);
+        let mut stream = adapt_responses_stream(raw_stream, "test-provider".into());
         let first = stream.next().await.ok_or_else(|| {
             invalid_response("adapted stream omitted the text delta before EOF")
         })??;
@@ -2683,7 +4016,7 @@ mod tests {
         let terminal = stream.next().await.ok_or_else(|| {
             invalid_response("adapted stream omitted missing-completed error at EOF")
         })?;
-        assert!(is_invalid_response(&terminal));
+        assert!(is_incomplete_response(&terminal));
         assert!(stream.next().await.is_none());
         Ok(())
     }
@@ -2697,7 +4030,9 @@ mod tests {
             }))),
             Ok(JsonSseEvent::Done),
         ]);
-        let items = adapt_responses_stream(raw_stream).collect::<Vec<_>>().await;
+        let items = adapt_responses_stream(raw_stream, "test-provider".into())
+            .collect::<Vec<_>>()
+            .await;
         assert_eq!(items.len(), 1);
         let Some(Ok(terminal)) = items.first() else {
             return Err(invalid_response(
@@ -2800,6 +4135,3025 @@ mod native_phase_tests {
         adapter.map_event(json!({"type":"response.output_item.added","output_index":0,"item":{"id":"msg_1","type":"message","phase":"commentary","content":[]}}))?;
         let changed=adapter.map_event(json!({"type":"response.output_item.done","output_index":0,"item":{"id":"msg_1","type":"message","phase":"final_answer","content":[{"type":"output_text","text":"done"}]}}));
         assert!(changed.is_err());
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod plaintext_reasoning_contract_tests {
+    use super::*;
+    fn response() -> Value {
+        json!({"id":"plain-response","status":"completed","output":[
+        {"id":"plain-reason","type":"reasoning","content":[{"type":"reasoning_text","text":"公开推理🙂"}]},
+        {"id":"plain-answer","type":"message","status":"completed","role":"assistant","content":[{"type":"output_text","text":"answer"}]}]})
+    }
+    #[test]
+    fn plaintext_reasoning_nonstream_preserves_original_content_identity_without_opaque()
+    -> Result<()> {
+        let original = response();
+        let converted = response_to_chat(original.clone())?;
+        assert_eq!(
+            converted.message.reasoning_content.as_deref(),
+            Some("公开推理🙂")
+        );
+        assert!(converted.message.reasoning_blocks.is_none());
+        let blocks = converted
+            .message
+            .assistant_blocks
+            .as_deref()
+            .ok_or_else(|| invalid_response("missing native blocks"))?;
+        assert!(
+            blocks
+                .iter()
+                .any(|block| block.block_id == "plain-reason:content:0"
+                    && block.request_id == "plain-response"
+                    && block.phase == AssistantPhase::Reasoning
+                    && block.delta == "公开推理🙂"
+                    && block.reasoning.is_none())
+        );
+        assert_eq!(converted.raw.extra, Some(original));
+        Ok(())
+    }
+    #[test]
+    fn plaintext_reasoning_delta_item_done_and_response_complete_do_not_duplicate() -> Result<()> {
+        let full = response();
+        let mut adapter = ResponsesStreamAdapter::default();
+        let mut chunks = Vec::new();
+        for event in [
+            json!({"type":"response.created","response":{"id":"plain-response"}}),
+            json!({"type":"response.reasoning_text.delta","item_id":"plain-reason","output_index":0,"content_index":0,"delta":"公开"}),
+            json!({"type":"response.output_item.done","output_index":0,"item":full.pointer("/output/0").cloned().ok_or_else(||invalid_response("missing fixture item"))?}),
+            json!({"type":"response.completed","response":full}),
+        ] {
+            if let Some(chunk) = adapter.map_event(event)? {
+                chunks.push(chunk);
+            }
+        }
+        let text: String = chunks
+            .iter()
+            .flat_map(|chunk| chunk.delta.assistant_blocks.iter().flatten())
+            .filter(|block| block.block_id == "plain-reason:content:0")
+            .map(|block| block.delta.as_str())
+            .collect();
+        assert_eq!(text, "公开推理🙂");
+        assert_eq!(
+            chunks
+                .iter()
+                .filter(|chunk| chunk.finish_reason.is_some())
+                .count(),
+            1
+        );
+        assert!(
+            chunks
+                .iter()
+                .all(|chunk| chunk.delta.reasoning_blocks.is_none())
+        );
+        adapter.validate_transport_end("EOF")?;
+        Ok(())
+    }
+    #[test]
+    fn plaintext_reasoning_terminal_must_not_override_observed_content() -> Result<()> {
+        let mut adapter = ResponsesStreamAdapter::default();
+        adapter.map_event(json!({"type":"response.reasoning_text.delta","item_id":"plain-reason","output_index":0,"content_index":0,"delta":"原始"}))?;
+        let item = json!({"id":"plain-reason","type":"reasoning","content":[{"type":"reasoning_text","text":"冲突"}]});
+        assert!(
+            adapter
+                .map_event(json!({"type":"response.output_item.done","output_index":0,"item":item}))
+                .is_err()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn plaintext_reasoning_full_terminal_and_prefix_have_both_public_fields_in_parity() -> Result<()>
+    {
+        for prefix in [None, Some("公开")] {
+            let mut adapter = ResponsesStreamAdapter::default();
+            let mut chunks = Vec::new();
+            adapter
+                .map_event(json!({"type":"response.created","response":{"id":"plain-response"}}))?;
+            if let Some(prefix) = prefix
+                && let Some(chunk)=adapter.map_event(json!({"type":"response.reasoning_text.delta","item_id":"plain-reason","output_index":0,"content_index":0,"delta":prefix}))? {
+                chunks.push(chunk);
+            }
+            if let Some(chunk) =
+                adapter.map_event(json!({"type":"response.completed","response":response()}))?
+            {
+                chunks.push(chunk);
+            }
+            let compat: String = chunks
+                .iter()
+                .filter_map(|chunk| chunk.delta.reasoning_content.as_deref())
+                .collect();
+            let canonical: String = chunks
+                .iter()
+                .flat_map(|chunk| chunk.delta.assistant_blocks.iter().flatten())
+                .filter(|block| block.phase == AssistantPhase::Reasoning)
+                .map(|block| block.delta.as_str())
+                .collect();
+            assert_eq!(compat, "公开推理🙂");
+            assert_eq!(canonical, compat);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn plaintext_reasoning_original_items_roundtrip_to_next_request_in_stream_and_nonstream()
+    -> Result<()> {
+        let full = response();
+        let response = response_to_chat(full.clone())?;
+        let restored: Message = serde_json::from_value(serde_json::to_value(response.message)?)?;
+        let input = messages_to_input(&[restored])?;
+        assert_eq!(
+            input.pointer("/0/id").and_then(Value::as_str),
+            Some("plain-reason")
+        );
+        assert_eq!(
+            input.pointer("/0/type").and_then(Value::as_str),
+            Some("reasoning")
+        );
+        assert_eq!(
+            input.pointer("/0/content/0/type").and_then(Value::as_str),
+            Some("reasoning_text")
+        );
+        assert_eq!(
+            input.pointer("/0/content/0/text").and_then(Value::as_str),
+            Some("公开推理🙂")
+        );
+        assert!(input.pointer("/0/encrypted_content").is_none());
+        assert_eq!(
+            input.pointer("/1/id").and_then(Value::as_str),
+            Some("plain-answer")
+        );
+        let mut adapter = ResponsesStreamAdapter::default();
+        let mut blocks = Vec::new();
+        for event in [
+            json!({"type":"response.created","response":{"id":"plain-response"}}),
+            json!({"type":"response.reasoning_text.delta","item_id":"plain-reason","output_index":0,"content_index":0,"delta":"公开"}),
+            json!({"type":"response.completed","response":full}),
+        ] {
+            if let Some(chunk) = adapter.map_event(event)? {
+                blocks.extend(chunk.delta.assistant_blocks.unwrap_or_default());
+            }
+        }
+        let mut accumulated = Message::assistant("answer".to_string());
+        accumulated.assistant_blocks = Some(blocks);
+        let restored: Message = serde_json::from_value(serde_json::to_value(accumulated)?)?;
+        let replay = messages_to_input(&[restored])?;
+        assert_eq!(
+            replay, input,
+            "流/非流都必须保同一原item/content类型、文字与顺序"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn terminal_can_supply_original_encrypted_payload_after_public_reasoning_item() -> Result<()> {
+        let mut adapter = ResponsesStreamAdapter::default();
+        adapter.map_event(json!({"type":"response.created","response":{"id":"plain-response"}}))?;
+        let mut full = response();
+        adapter.map_event(json!({"type":"response.output_item.done","output_index":0,"item":full.pointer("/output/0").cloned().ok_or_else(||invalid_response("missing fixture item"))?}))?;
+        full.pointer_mut("/output/0")
+            .and_then(Value::as_object_mut)
+            .ok_or_else(|| invalid_response("missing reasoning object"))?
+            .insert("encrypted_content".into(), json!("original-encrypted"));
+        let terminal = adapter
+            .map_event(json!({"type":"response.completed","response":full}))?
+            .ok_or_else(|| invalid_response("missing terminal"))?;
+        assert!(terminal.delta.reasoning_blocks.as_deref().unwrap_or_default().iter().any(|block|matches!(block,ReasoningBlock::Opaque {data,..}if data=="original-encrypted")));
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod mixed_reasoning_replay_contract_tests {
+    use super::*;
+
+    fn original_input() -> Value {
+        json!([
+            {"type":"message","id":"before","role":"assistant","phase":"commentary",
+             "content":[{"type":"output_text","text":"before","annotations":[]}]},
+            {"type":"reasoning","id":"mixed-reasoning","encrypted_content":"sealed-original",
+             "summary":[{"type":"summary_text","text":"同文🙂"},{"type":"summary_text","text":"摘要二"}],
+             "content":[{"type":"reasoning_text","text":"同文🙂"},{"type":"reasoning_text","text":"公开二"}]},
+            {"type":"message","id":"after","role":"assistant","phase":"final_answer",
+             "content":[{"type":"output_text","text":"after","annotations":[]}]}
+        ])
+    }
+
+    fn full_response() -> Value {
+        json!({"id":"mixed-response","status":"completed","output":original_input()})
+    }
+
+    fn next_request(message: Message, stream: bool) -> Result<Value> {
+        // 同一Message先经持久化格式往返，再走真实request_body；不调用HTTP。
+        let restored = serde_json::from_value(serde_json::to_value(message)?)?;
+        let client = ResponsesClient::new(LlmConfig {
+            provider_name: Some("test-provider".into()),
+            api_protocol: LlmApiProtocol::Responses,
+            base_url: "https://api.example.test/v1/responses".into(),
+            api_key: "fixture-key".into(),
+            model: "gpt-test".into(),
+            input_modalities: echo_core::llm::ModelInputModality::all_supported(),
+            thinking_protocol: echo_core::llm::ThinkingProtocol::OpenaiReasoningEffort,
+            timeouts: echo_core::llm::LlmTimeouts::default(),
+        })?;
+        client.request_body(
+            &ChatRequest {
+                messages: vec![restored, Message::user("继续".into())],
+                ..Default::default()
+            },
+            stream,
+        )
+    }
+
+    fn assert_next_request(message: Message) -> Result<()> {
+        let mut expected = original_input();
+        expected
+            .as_array_mut()
+            .ok_or_else(|| invalid_response("fixture input must be an array"))?
+            .push(json!({"type":"message","role":"user","content":[{"type":"input_text","text":"继续"}]}));
+        for stream in [false, true] {
+            let body = next_request(message.clone(), stream)?;
+            assert_eq!(body.get("input"), Some(&expected));
+            assert_eq!(body.get("stream").and_then(Value::as_bool), Some(stream));
+        }
+        Ok(())
+    }
+
+    fn streamed_message(item_done: Option<Value>, prefix: bool) -> Result<Message> {
+        let mut events =
+            vec![json!({"type":"response.created","response":{"id":"mixed-response"}})];
+        if prefix {
+            events.extend([
+                json!({"type":"response.reasoning_summary_text.delta","item_id":"mixed-reasoning","output_index":1,"summary_index":0,"delta":"同文"}),
+                // 不同content索引可以交错到达；下一请求必须按原坐标排回0、1。
+                json!({"type":"response.reasoning_text.delta","item_id":"mixed-reasoning","output_index":1,"content_index":1,"delta":"公开"}),
+                json!({"type":"response.reasoning_text.delta","item_id":"mixed-reasoning","output_index":1,"content_index":0,"delta":"同文"}),
+            ]);
+        }
+        if let Some(item) = item_done {
+            events.push(json!({"type":"response.output_item.done","output_index":1,"item":item}));
+        }
+        events.push(json!({"type":"response.completed","response":full_response()}));
+        let mut adapter = ResponsesStreamAdapter::default();
+        let mut blocks = Vec::new();
+        let mut terminals = 0usize;
+        for event in events {
+            if let Some(chunk) = adapter.map_event(event)? {
+                terminals = terminals.saturating_add(usize::from(chunk.finish_reason.is_some()));
+                blocks.extend(chunk.delta.assistant_blocks.unwrap_or_default());
+            }
+        }
+        adapter.validate_transport_end("EOF")?;
+        assert_eq!(terminals, 1);
+        assert_eq!(
+            blocks
+                .iter()
+                .filter(|block| matches!(block.reasoning, Some(ReasoningBlock::Opaque { .. })))
+                .count(),
+            1,
+        );
+        // 累积原canonical块，而非用公开正文重新合成provider原件。
+        let mut message = Message::assistant("beforeafter".into());
+        message.assistant_blocks = Some(blocks);
+        Ok(message)
+    }
+
+    #[test]
+    fn mixed_reasoning_nonstream_next_request_keeps_encrypted_summary_and_content_in_order()
+    -> Result<()> {
+        let message = response_to_chat(full_response())?.message;
+        assert_next_request(message.clone())?;
+        let mut reversed = message;
+        reversed
+            .assistant_blocks
+            .as_mut()
+            .ok_or_else(|| invalid_response("fixture native blocks missing"))?
+            .reverse();
+        // 同源Opaque可以先于或晚于明文入表；不能覆盖content，也不能误判重复item。
+        assert_next_request(reversed)
+    }
+
+    #[test]
+    fn mixed_reasoning_stream_next_request_deduplicates_only_carried_summary() -> Result<()> {
+        let original = full_response();
+        let item = original
+            .pointer("/output/1")
+            .cloned()
+            .ok_or_else(|| invalid_response("fixture reasoning item missing"))?;
+        for prefix in [false, true] {
+            assert_next_request(streamed_message(Some(item.clone()), prefix)?)?;
+            assert_next_request(streamed_message(None, prefix)?)?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn late_encrypted_after_plaintext_item_done_survives_persistence_and_next_request() -> Result<()>
+    {
+        let mut original = full_response();
+        let item = original
+            .pointer_mut("/output/1")
+            .and_then(Value::as_object_mut)
+            .ok_or_else(|| invalid_response("fixture reasoning item missing"))?;
+        item.remove("encrypted_content");
+        let public_item = Value::Object(item.clone());
+        for prefix in [false, true] {
+            assert_next_request(streamed_message(Some(public_item.clone()), prefix)?)?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn summary_not_carried_by_opaque_remains_once_with_original_content() -> Result<()> {
+        for carried in [0, 1] {
+            let mut message = response_to_chat(full_response())?.message;
+            let opaque = message
+                .assistant_blocks
+                .as_mut()
+                .and_then(|blocks| {
+                    blocks
+                        .iter_mut()
+                        .find_map(|block| match &mut block.reasoning {
+                            Some(ReasoningBlock::Opaque { summary, .. }) => Some(summary),
+                            _ => None,
+                        })
+                })
+                .ok_or_else(|| invalid_response("fixture opaque block missing"))?;
+            opaque.truncate(carried);
+            assert_next_request(message)?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn mixed_reasoning_replay_rejects_item_owner_and_summary_conflicts() -> Result<()> {
+        for conflict in ["item", "owner", "summary"] {
+            let mut message = response_to_chat(full_response())?.message;
+            let target = if conflict == "summary" {
+                "mixed-reasoning:summary:0"
+            } else {
+                "mixed-reasoning:content:0"
+            };
+            let block = message
+                .assistant_blocks
+                .as_mut()
+                .and_then(|blocks| blocks.iter_mut().find(|block| block.block_id == target))
+                .ok_or_else(|| invalid_response("fixture plaintext block missing"))?;
+            if conflict == "summary" {
+                block.delta = "冲突摘要".into();
+            } else {
+                let source = block
+                    .provider_source
+                    .as_mut()
+                    .ok_or_else(|| invalid_response("fixture provider source missing"))?;
+                if conflict == "item" {
+                    source.item_id = "different-item".into();
+                } else {
+                    source.request_id = "different-request".into();
+                    block.request_id = "different-request".into();
+                }
+            }
+            assert!(
+                next_request(message, false).is_err(),
+                "冲突原件不得被Opaque去重吞掉：{conflict}"
+            );
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod responses_compatibility_legacy_api_tests {
+    use super::*;
+    use echo_core::llm::types::ImageUrl;
+
+    #[test]
+    fn direct_tool_parts_survive_message_serde_without_text_flattening() -> Result<()> {
+        let mut tool = Message::tool_result("call_1".into(), "inspect".into(), "".into());
+        tool.content = MessageContent::Parts(vec![
+            ContentPart::Text {
+                text: "截图🙂".into(),
+            },
+            ContentPart::ImageUrl {
+                image_url: ImageUrl {
+                    url: "data:image/png;base64,AAAA".into(),
+                    detail: Some("low".into()),
+                },
+            },
+            ContentPart::File {
+                name: "报告.pdf".into(),
+                content: "JVBERi0=".into(),
+            },
+        ]);
+        let restored: Message = serde_json::from_value(serde_json::to_value(tool)?)?;
+        let input = messages_to_input(&[restored])?;
+        assert_eq!(
+            input.pointer("/0/call_id").and_then(Value::as_str),
+            Some("call_1")
+        );
+        let output = input
+            .pointer("/0/output")
+            .and_then(Value::as_array)
+            .ok_or_else(|| invalid_response("tool Parts must remain an array"))?;
+        assert_eq!(
+            output
+                .iter()
+                .filter_map(|part| part.get("type").and_then(Value::as_str))
+                .collect::<Vec<_>>(),
+            vec!["input_text", "input_image", "input_file"]
+        );
+        assert_eq!(
+            input
+                .pointer("/0/output/1/image_url")
+                .and_then(Value::as_str),
+            Some("data:image/png;base64,AAAA")
+        );
+        assert_eq!(
+            input
+                .pointer("/0/output/2/file_data")
+                .and_then(Value::as_str),
+            Some("data:application/pdf;base64,JVBERi0=")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn orphan_tool_result_and_unknown_role_are_rejected_before_wire() {
+        let orphan = Message {
+            role: Role::Tool,
+            content: MessageContent::Text("result".into()),
+            ..Default::default()
+        };
+        assert!(messages_to_input(&[orphan]).is_err());
+        let custom = Message {
+            role: Role::Custom("unknown-role".into()),
+            content: MessageContent::Text("text".into()),
+            ..Default::default()
+        };
+        assert!(messages_to_input(&[custom]).is_err());
+    }
+
+    #[test]
+    fn early_final_text_does_not_drop_later_tool_or_unknown_phase() -> Result<()> {
+        let full = json!({"id":"interleaved","status":"completed","output":[
+            {"type":"message","id":"early","phase":"final_answer","role":"assistant","content":[{"type":"output_text","text":"早候选","annotations":[]}]},
+            {"type":"function_call","id":"fc_late","call_id":"late_call","name":"inspect","arguments":"{}","status":"completed"},
+            {"type":"message","id":"last","phase":"future-phase","role":"assistant","content":[{"type":"refusal","refusal":"仍为原种类"}]}
+        ]});
+        let response = response_to_chat(full.clone())?;
+        assert_eq!(response.finish_reason.as_deref(), Some("tool_calls"));
+        let mut adapter = ResponsesStreamAdapter::default();
+        let chunk = adapter
+            .map_event(json!({"type":"response.completed","response":full}))?
+            .ok_or_else(|| invalid_response("missing terminal"))?;
+        assert_eq!(chunk.finish_reason.as_deref(), Some("tool_calls"));
+        assert_eq!(
+            messages_to_input(&[response.message])?
+                .pointer("/2/phase")
+                .and_then(Value::as_str),
+            Some("future-phase")
+        );
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod responses_compatibility_contract_tests {
+    use super::*;
+    use echo_core::llm::types::{FunctionSpec, ImageUrl};
+
+    fn config(provider: &str, model: &str) -> LlmConfig {
+        LlmConfig {
+            provider_name: Some(provider.into()),
+            model: model.into(),
+            api_protocol: LlmApiProtocol::Responses,
+            base_url: "https://api.example.test/v1/responses".into(),
+            api_key: "fixture-key".into(),
+            input_modalities: echo_core::llm::ModelInputModality::all_supported(),
+            thinking_protocol: ThinkingProtocol::OpenaiReasoningEffort,
+            timeouts: echo_core::llm::LlmTimeouts::default(),
+        }
+    }
+
+    fn tool(strict: Option<bool>) -> ToolDefinition {
+        ToolDefinition {
+            tool_type: "function".into(),
+            function: FunctionSpec {
+                name: "inspect".into(),
+                description: "Inspect".into(),
+                parameters: json!({"type":"object","properties":{},"additionalProperties":false}),
+                strict,
+            },
+        }
+    }
+
+    #[test]
+    fn typed_choice_and_strict_are_separate_from_final_schema() -> Result<()> {
+        let client = ResponsesClient::new(config("openai", "gpt-test"))?;
+        for strict in [None, Some(false), Some(true)] {
+            for choice in [
+                ToolChoice::Auto,
+                ToolChoice::None,
+                ToolChoice::Required,
+                ToolChoice::function("inspect"),
+            ] {
+                for stream in [false, true] {
+                    let body = client.request_body(
+                        &ChatRequest {
+                            tools: Some(vec![tool(strict)]),
+                            tool_choice: Some(choice.clone()),
+                            response_format: Some(ResponseFormat::json_schema(
+                                "answer",
+                                json!({"type":"object"}),
+                            )),
+                            max_tokens: Some(512),
+                            ..Default::default()
+                        },
+                        stream,
+                    )?;
+                    assert_eq!(
+                        body.pointer("/tools/0/strict").and_then(Value::as_bool),
+                        Some(strict.unwrap_or(false))
+                    );
+                    assert_eq!(
+                        body.pointer("/text/format/strict").and_then(Value::as_bool),
+                        Some(true)
+                    );
+                    let expected = match choice {
+                        ToolChoice::Function { .. } => json!({"type":"function","name":"inspect"}),
+                        _ => choice.to_openai_value(),
+                    };
+                    assert_eq!(body.get("tool_choice"), Some(&expected));
+                    assert_eq!(body.get("max_output_tokens"), Some(&json!(512)));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn explicit_invalid_tool_choices_fail_but_none_without_tools_is_valid() -> Result<()> {
+        let client = ResponsesClient::new(config("openai", "gpt-test"))?;
+        for choice in [
+            ToolChoice::Required,
+            ToolChoice::function(""),
+            ToolChoice::function("missing"),
+        ] {
+            assert!(
+                client
+                    .request_body(
+                        &ChatRequest {
+                            tool_choice: Some(choice),
+                            ..Default::default()
+                        },
+                        false
+                    )
+                    .is_err()
+            );
+        }
+        assert_eq!(
+            client
+                .request_body(
+                    &ChatRequest {
+                        tool_choice: Some(ToolChoice::None),
+                        ..Default::default()
+                    },
+                    false
+                )?
+                .get("tool_choice"),
+            Some(&json!("none"))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn deepseek_dialect_keeps_native_parts_and_rejects_unsupported_combinations() -> Result<()> {
+        let flash = ResponsesClient::new(config("deepseek", "deepseek-flash"))?;
+        let pro = ResponsesClient::new(config("deepseek", "deepseek-v4-pro"))?;
+        let image = Message::user_with_image_url("图片", "https://example.test/a.png");
+        let mut result = Message::tool_result("call".into(), "inspect".into(), "".into());
+        result.content = image.content.clone();
+        for message in [image.clone(), result.clone()] {
+            let body = flash.request_body(&ChatRequest::new(vec![message.clone()]), false)?;
+            assert!(body.get("include").is_none());
+            assert!(
+                pro.request_body(&ChatRequest::new(vec![message]), false)
+                    .is_err()
+            );
+        }
+        for role in [Role::User, Role::Tool] {
+            let message = Message {
+                role,
+                tool_call_id: Some("call".into()),
+                content: MessageContent::Parts(vec![ContentPart::File {
+                    name: "report.pdf".into(),
+                    content: "JVBERi0=".into(),
+                }]),
+                ..Default::default()
+            };
+            assert!(
+                flash
+                    .request_body(&ChatRequest::new(vec![message]), false)
+                    .is_err()
+            );
+        }
+        assert!(
+            flash
+                .request_body(
+                    &ChatRequest {
+                        tools: Some(vec![tool(Some(true))]),
+                        ..Default::default()
+                    },
+                    false
+                )
+                .is_err()
+        );
+        let mut system_image = image;
+        system_image.role = Role::System;
+        assert!(
+            flash
+                .request_body(&ChatRequest::new(vec![system_image]), false)
+                .is_err()
+        );
+        assert!(
+            ResponsesClient::new(config("deepseek", "unknown"))?
+                .request_body(&ChatRequest::default(), false)
+                .is_err()
+        );
+        let body = flash.request_body(
+            &ChatRequest {
+                user_id: Some("original-user".into()),
+                response_format: Some(ResponseFormat::JsonObject),
+                ..Default::default()
+            },
+            false,
+        )?;
+        assert_eq!(body.get("user"), Some(&json!("original-user")));
+        assert!(body.get("prompt_cache_key").is_none());
+        assert_eq!(
+            body.pointer("/text/format/type"),
+            Some(&json!("json_object"))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn explicit_thinking_temperature_and_budget_never_silently_drop() -> Result<()> {
+        let flash = ResponsesClient::new(config("deepseek", "deepseek-flash"))?;
+        for thinking in [
+            ThinkingConfig::Level(ThinkingLevel::Xhigh),
+            ThinkingConfig::BudgetTokens(1000),
+        ] {
+            assert!(
+                flash
+                    .request_body(
+                        &ChatRequest {
+                            thinking: Some(thinking),
+                            ..Default::default()
+                        },
+                        false
+                    )
+                    .is_err()
+            );
+        }
+        assert!(
+            flash
+                .request_body(
+                    &ChatRequest {
+                        temperature: Some(0.5),
+                        ..Default::default()
+                    },
+                    false
+                )
+                .is_err()
+        );
+        let body = flash.request_body(
+            &ChatRequest {
+                thinking: Some(ThinkingConfig::Disabled),
+                temperature: Some(0.5),
+                ..Default::default()
+            },
+            false,
+        )?;
+        assert_eq!(body.pointer("/reasoning/effort"), Some(&json!("none")));
+        assert_eq!(body.get("temperature"), Some(&json!(0.5)));
+        assert!(body.pointer("/reasoning/summary").is_none());
+        let body = flash.request_body(
+            &ChatRequest {
+                thinking: Some(ThinkingConfig::Level(ThinkingLevel::Medium)),
+                ..Default::default()
+            },
+            false,
+        )?;
+        assert_eq!(
+            body.pointer("/reasoning/effort"),
+            Some(&json!("medium")),
+            "不继承Chat clamp到high"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn canonical_error_observation_survives_storage_without_vendor_pseudo_field() -> Result<()> {
+        let message = Message::tool_result("call".into(), "inspect".into(), "error body".into())
+            .with_tool_result_is_error(true);
+        let restored: Message = serde_json::from_value(serde_json::to_value(message)?)?;
+        assert_eq!(restored.tool_result_is_error, Some(true));
+        let native = messages_to_input(&[restored])?;
+        assert_eq!(native.pointer("/0/output"), Some(&json!("error body")));
+        assert!(native.pointer("/0/tool_result_is_error").is_none());
+        assert!(native.pointer("/0/is_error").is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn malformed_media_and_default_text_are_explicit() -> Result<()> {
+        let client = ResponsesClient::new(config("openai", "gpt-test"))?;
+        let body = client.request_body(
+            &ChatRequest {
+                response_format: Some(ResponseFormat::Text),
+                temperature: Some(0.25),
+                ..Default::default()
+            },
+            false,
+        )?;
+        assert!(body.get("text").is_none());
+        assert_eq!(body.get("temperature"), Some(&json!(0.25)));
+        let message = Message::user_multimodal(vec![ContentPart::ImageUrl {
+            image_url: ImageUrl {
+                url: "https://example.test/a".into(),
+                detail: Some("invented".into()),
+            },
+        }]);
+        assert!(
+            client
+                .request_body(&ChatRequest::new(vec![message]), false)
+                .is_err()
+        );
+        let message = Message::user_multimodal(vec![ContentPart::File {
+            name: "a.pdf".into(),
+            content: "%%%".into(),
+        }]);
+        assert!(
+            client
+                .request_body(&ChatRequest::new(vec![message]), false)
+                .is_err()
+        );
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod responses_compatibility_http_tests {
+    use super::*;
+    use echo_core::llm::types::ImageUrl;
+    use std::time::Duration;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    fn response(round: usize) -> Value {
+        let output = match round {
+            0 => json!([
+                {"id":"early","type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"仍需工具","annotations":[]}]},
+                {"id":"reason","type":"reasoning","encrypted_content":"sealed-original","summary":[{"type":"summary_text","text":"同文🙂"}],"content":[{"type":"reasoning_text","text":"同文🙂"}]},
+                {"id":"fc","type":"function_call","call_id":"call","name":"inspect","arguments":"{}"}
+            ]),
+            1 => {
+                json!([{"id":"progress","type":"message","role":"assistant","phase":"commentary","content":[{"type":"output_text","text":"已读取图片","annotations":[]}]}])
+            }
+            _ => {
+                json!([{"id":"final","type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"最终回答","annotations":[]}]}])
+            }
+        };
+        json!({"id":format!("response-{round}"),"status":"completed","output":output,"usage":{"input_tokens":9,"output_tokens":4,"total_tokens":13}})
+    }
+
+    async fn read_request(socket: &mut tokio::net::TcpStream) -> Result<Value> {
+        let mut bytes = Vec::new();
+        loop {
+            if socket.read_buf(&mut bytes).await? == 0 {
+                return Err(invalid_response("HTTP fixture request truncated"));
+            }
+            let text = match std::str::from_utf8(&bytes) {
+                Ok(text) => text,
+                Err(error) if error.error_len().is_none() => continue,
+                Err(error) => return Err(invalid_response(error.to_string())),
+            };
+            if let Some((headers, payload)) = text.split_once("\r\n\r\n") {
+                let length = headers
+                    .lines()
+                    .find_map(|line| {
+                        line.split_once(':')
+                            .filter(|(name, _)| name.eq_ignore_ascii_case("content-length"))
+                            .map(|(_, value)| value.trim().parse::<usize>())
+                    })
+                    .transpose()
+                    .map_err(|error| invalid_response(error.to_string()))?
+                    .ok_or_else(|| invalid_response("missing HTTP Content-Length"))?;
+                // HTTP长度是字节数，不以此截断任何文本。
+                if payload.len() >= length {
+                    return serde_json::from_str(payload).map_err(Into::into);
+                }
+            }
+        }
+    }
+
+    async fn exchange(
+        client: &ResponsesClient,
+        request: ChatRequest,
+        stream: bool,
+    ) -> Result<(Message, String)> {
+        if !stream {
+            let response = client.chat(request).await?;
+            return Ok((response.message, response.finish_reason.unwrap_or_default()));
+        }
+        let mut stream = client.chat_stream(request).await?;
+        let mut blocks = Vec::new();
+        let mut calls = Vec::new();
+        let mut text = String::new();
+        let mut finish = Vec::new();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk?;
+            if let Some(reason) = chunk.finish_reason {
+                finish.push(reason);
+            }
+            text.push_str(chunk.delta.content.as_deref().unwrap_or_default());
+            blocks.extend(chunk.delta.assistant_blocks.unwrap_or_default());
+            // 本HTTP夹具仅在completed携带完整tool；断言完整性，不从预期JSON补原件。
+            for call in chunk.delta.tool_calls.unwrap_or_default() {
+                let function = call
+                    .function
+                    .ok_or_else(|| invalid_response("fixture tool function missing"))?;
+                calls.push(ToolCall {
+                    provider_source: call.provider_source,
+                    id: call
+                        .id
+                        .ok_or_else(|| invalid_response("fixture tool call id missing"))?,
+                    call_type: "function".into(),
+                    function: FunctionCall {
+                        name: function
+                            .name
+                            .ok_or_else(|| invalid_response("fixture tool name missing"))?,
+                        arguments: function
+                            .arguments
+                            .ok_or_else(|| invalid_response("fixture arguments missing"))?,
+                    },
+                });
+            }
+        }
+        assert_eq!(finish.len(), 1);
+        let mut message = Message::assistant(text);
+        message.assistant_blocks = Some(blocks);
+        message.tool_calls = (!calls.is_empty()).then_some(calls);
+        Ok((
+            message,
+            finish
+                .into_iter()
+                .next()
+                .ok_or_else(|| invalid_response("fixture finish missing"))?,
+        ))
+    }
+
+    async fn roundtrip(stream: bool) -> Result<()> {
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let address = listener.local_addr()?;
+        let server = tokio::spawn(async move {
+            let mut requests = Vec::new();
+            for round in 0..3 {
+                let (mut socket, _) = listener.accept().await?;
+                requests.push(read_request(&mut socket).await?);
+                let raw = response(round);
+                let body = if stream {
+                    let mut events = vec![
+                        json!({"type":"response.created","response":{"id":format!("response-{round}")}}),
+                    ];
+                    if round == 0 {
+                        // plaintext先闭合，encrypted原件仅在completed晚到。
+                        events.push(json!({"type":"response.output_item.done","output_index":1,"item":{"id":"reason","type":"reasoning","content":[{"type":"reasoning_text","text":"同文🙂"}]}}));
+                    }
+                    events.push(json!({"type":"response.completed","response":raw}));
+                    events
+                        .iter()
+                        .map(|event| {
+                            format!(
+                                "event: {}\ndata: {event}\n\n",
+                                event
+                                    .get("type")
+                                    .and_then(Value::as_str)
+                                    .unwrap_or_default()
+                            )
+                        })
+                        .collect::<String>()
+                } else {
+                    raw.to_string()
+                };
+                let content_type = if stream {
+                    "text/event-stream"
+                } else {
+                    "application/json"
+                };
+                // Content-Length使用完整UTF-8 body字节数。
+                socket.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",body.len()).as_bytes()).await?;
+                socket.write_all(body.as_bytes()).await?;
+                socket.flush().await?;
+            }
+            Ok::<_, echo_core::error::ReactError>(requests)
+        });
+        let result = async {
+            let client = ResponsesClient::new(LlmConfig {
+                provider_name: Some("test-provider".into()),
+                api_protocol: LlmApiProtocol::Responses,
+                base_url: format!("http://{address}"),
+                api_key: "fixture-key".into(),
+                model: "gpt-test".into(),
+                input_modalities: echo_core::llm::ModelInputModality::all_supported(),
+                thinking_protocol: ThinkingProtocol::OpenaiReasoningEffort,
+                timeouts: echo_core::llm::LlmTimeouts::default(),
+            })?;
+            let mut history = vec![Message::user("检查".into())];
+            let (first, finish) =
+                exchange(&client, ChatRequest::new(history.clone()), stream).await?;
+            assert_eq!(finish, "tool_calls", "early final文字不能覆盖其后tool");
+            let restored: Message = serde_json::from_value(serde_json::to_value(first)?)?;
+            history.push(restored);
+            let mut tool = Message::tool_result("call".into(), "inspect".into(), "".into())
+                .with_tool_result_is_error(false);
+            tool.content = MessageContent::Parts(vec![
+                ContentPart::Text {
+                    text: "截图🙂".into(),
+                },
+                ContentPart::ImageUrl {
+                    image_url: ImageUrl {
+                        url: "data:image/png;base64,AAAA".into(),
+                        detail: Some("low".into()),
+                    },
+                },
+            ]);
+            history.push(serde_json::from_value(serde_json::to_value(tool)?)?);
+            let (progress, finish) =
+                exchange(&client, ChatRequest::new(history.clone()), stream).await?;
+            assert_eq!(finish, "stop");
+            assert!(
+                progress
+                    .assistant_blocks
+                    .as_deref()
+                    .unwrap_or_default()
+                    .iter()
+                    .any(|block| block.phase == AssistantPhase::Commentary)
+            );
+            history.push(progress);
+            let (final_message, _) = exchange(&client, ChatRequest::new(history), stream).await?;
+            assert_eq!(final_message.content.as_text().as_deref(), Some("最终回答"));
+            Ok::<_, echo_core::error::ReactError>(())
+        }
+        .await;
+        if let Err(error) = result {
+            server.abort();
+            return Err(error);
+        }
+        let requests = server
+            .await
+            .map_err(|error| invalid_response(error.to_string()))??;
+        let second = requests
+            .get(1)
+            .ok_or_else(|| invalid_response("second request missing"))?;
+        let replay = second
+            .get("input")
+            .and_then(Value::as_array)
+            .ok_or_else(|| invalid_response("request input missing"))?;
+        let original = response(0);
+        let original = original
+            .get("output")
+            .and_then(Value::as_array)
+            .ok_or_else(|| invalid_response("fixture output missing"))?;
+        assert_eq!(
+            replay.iter().skip(1).take(3).cloned().collect::<Vec<_>>(),
+            *original
+        );
+        assert_eq!(
+            replay
+                .get(4)
+                .and_then(|item| item.pointer("/output/1/type")),
+            Some(&json!("input_image"))
+        );
+        assert!(
+            replay
+                .iter()
+                .all(|item| item.get("tool_result_is_error").is_none()
+                    && item.get("is_error").is_none()
+                    && item.get("execution_status").is_none())
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn http_dual_mode_late_opaque_tool_parts_and_progress_next_request() -> Result<()> {
+        for stream in [false, true] {
+            tokio::time::timeout(Duration::from_secs(10), roundtrip(stream))
+                .await
+                .map_err(|_| invalid_response("HTTP fixture deadline"))??;
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod responses_metadata_legacy_api_tests {
+    use super::*;
+
+    fn full_response() -> Value {
+        json!({"id":"meta-response-A","model":"model-native-未知🙂","status":"completed","incomplete_details":null,
+            "output":[
+                {"type":"reasoning","id":"reason-A","encrypted_content":"sealed-original","summary":[{"type":"summary_text","text":"同文🙂"}],"content":[{"type":"reasoning_text","text":"同文🙂"}]},
+                {"type":"message","id":"message-A","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"完成🙂","annotations":[]}]}
+            ],
+            "usage":{"input_tokens":5,"output_tokens":10,"total_tokens":15,"input_tokens_details":{"cached_tokens":2,"native_unknown":{"counter":9007199254740993_u64}},"output_tokens_details":{"reasoning_tokens":7,"native_array":[null,"未知",{"count":3}]}},
+            "provider_response":{"status":"forged","request_id":"other"}})
+    }
+
+    #[test]
+    fn nonstream_native_observation_reaches_message_serde_without_vendor_spoof() -> Result<()> {
+        let raw = full_response();
+        let message = response_to_chat(raw.clone())?.message;
+        let saved = serde_json::to_value(&message)?;
+        let observed = saved
+            .get("provider_response")
+            .ok_or_else(|| invalid_response("native response observation missing from Message"))?;
+        for field in ["model", "status", "incomplete_details", "usage"] {
+            assert_eq!(
+                observed.get(field),
+                raw.get(field),
+                "原字段{field}保留，不能从服务同名扩展读取"
+            );
+        }
+        let restored: Message = serde_json::from_value(saved.clone())?;
+        assert_eq!(
+            serde_json::to_value(restored)?.get("provider_response"),
+            Some(observed)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn message_observation_keeps_missing_and_explicit_null_distinct() -> Result<()> {
+        for present in [false, true] {
+            let mut raw = full_response();
+            let object = raw
+                .as_object_mut()
+                .ok_or_else(|| invalid_response("fixture object missing"))?;
+            object.remove("model");
+            object.remove("incomplete_details");
+            if present {
+                object.insert("model".into(), Value::Null);
+                object.insert("incomplete_details".into(), Value::Null);
+            }
+            let saved = serde_json::to_value(response_to_chat(raw)?.message)?;
+            let observed = saved
+                .get("provider_response")
+                .ok_or_else(|| invalid_response("native response observation missing"))?;
+            assert_eq!(observed.get("model").is_some(), present);
+            assert_eq!(observed.get("incomplete_details").is_some(), present);
+            if present {
+                assert_eq!(observed.get("model"), Some(&Value::Null));
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn native_metadata_only_event_is_transport_observation_without_success() -> Result<()> {
+        let mut adapter = ResponsesStreamAdapter::default();
+        let chunk=adapter.map_event(json!({"type":"response.created","response":{"id":"meta-A","status":"in_progress","model":"native-model"}}))?
+            .ok_or_else(||invalid_response("metadata-only native boundary disappeared"))?;
+        assert!(chunk.finish_reason.is_none());
+        assert!(chunk.delta.content.is_none());
+        assert!(chunk.delta.reasoning_content.is_none());
+        assert!(
+            adapter.validate_transport_end("EOF").is_err(),
+            "观察本身不授完成"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn request_identity_cannot_change_between_observations_without_text() -> Result<()> {
+        let mut adapter = ResponsesStreamAdapter::default();
+        adapter.map_event(json!({"type":"response.created","response":{"id":"meta-A","model":"A","status":"in_progress"}}))?;
+        assert!(adapter.map_event(json!({"type":"response.created","response":{"id":"meta-B","model":"B","status":"in_progress"}})).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn stored_observation_is_not_model_history_and_reasoning_is_replayed() -> Result<()> {
+        let raw = full_response();
+        let message = response_to_chat(raw.clone())?.message;
+        let stored = serde_json::to_value(message)?;
+        assert!(
+            stored.get("provider_response").is_some(),
+            "先证存储保真，避免剥除断言空过"
+        );
+        let restored: Message = serde_json::from_value(stored)?;
+        let input = messages_to_input(&[restored])?;
+        assert_eq!(
+            input,
+            raw.get("output")
+                .cloned()
+                .ok_or_else(|| invalid_response("fixture output missing"))?
+        );
+        assert!(input.as_array().is_some_and(|items| {
+            items
+                .iter()
+                .all(|item| item.get("provider_response").is_none())
+        }));
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod responses_metadata_contract_tests {
+    use super::*;
+    use echo_core::error::{AgentFailure, ReactError};
+
+    fn raw(status: &str) -> Value {
+        json!({"id":"meta-A","model":"未知模型🙂","status":status,"incomplete_details":null,
+            "output":[{"id":"message-A","type":"message","role":"assistant","content":[{"type":"output_text","text":"不可发布的局部正文🙂","annotations":[]}]}],
+            "usage":{"input_tokens":5,"output_tokens":10,"total_tokens":15,"input_tokens_details":{"cached_tokens":2,"unknown":{"counter":9007199254740993_u64}},"output_tokens_details":{"reasoning_tokens":7,"future":[null,"x",{"v":2}]}},
+            "provider_response":{"provider":"forged","status":"settled"},"execution_status":{"status":"settled"}})
+    }
+
+    fn partial(error: ReactError) -> Result<Message> {
+        let failure = AgentFailure::try_from(&error)?;
+        assert!(!failure.retryable);
+        assert_eq!(failure.code, "llm_incomplete_response");
+        assert!(failure.http_status.is_none());
+        assert!(!error.to_string().contains("不可发布"));
+        assert!(!failure.message.contains("不可发布"));
+        match error {
+            ReactError::Llm(error) => match *error {
+                LlmError::IncompleteResponse { partial } => Ok(*partial),
+                other => Err(invalid_response(format!(
+                    "expected IncompleteResponse, got {other}"
+                ))),
+            },
+            other => Err(other),
+        }
+    }
+
+    #[test]
+    fn success_metadata_uses_configured_identity_and_preserves_nested_usage() -> Result<()> {
+        let native = raw("completed");
+        let response = response_to_chat_for_provider(native.clone(), "actual-alias")?;
+        let observation = response
+            .message
+            .provider_response
+            .as_ref()
+            .ok_or_else(|| invalid_response("metadata missing"))?;
+        assert_eq!(observation.provider, "actual-alias");
+        assert_eq!(observation.protocol, LlmApiProtocol::Responses);
+        assert_eq!(observation.request_id.as_deref(), Some("meta-A"));
+        assert_eq!(observation.model, native.get("model").cloned());
+        assert_eq!(observation.status, Some(json!("completed")));
+        assert_eq!(observation.incomplete_details, Some(Value::Null));
+        assert_eq!(observation.usage, native.get("usage").cloned());
+        assert!(response.message.execution_status.is_none());
+        assert!(response.message.approved_assistant_blocks.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn stream_usage_only_snapshots_replace_and_keep_unknown_native_values() -> Result<()> {
+        let mut adapter = ResponsesStreamAdapter {
+            provider: "actual-alias".into(),
+            ..Default::default()
+        };
+        let first=adapter.map_event(json!({"type":"response.created","response":{"id":"meta-A","model":"native","status":"in_progress","incomplete_details":null}}))?
+            .ok_or_else(||invalid_response("created observation missing"))?;
+        assert!(first.finish_reason.is_none());
+        assert!(first.usage.is_none());
+        let first = first
+            .delta
+            .provider_response
+            .ok_or_else(|| invalid_response("record missing"))?;
+        assert_eq!(first.usage, None);
+        for output in [2, 10] {
+            let chunk=adapter.map_event(json!({"type":"response.in_progress","response":{"id":"meta-A","usage":{"input_tokens":5,"output_tokens":output,"total_tokens":5+output,"future":{"unknown":[null,9007199254740993_u64]}}}}))?
+                .ok_or_else(||invalid_response("usage-only observation missing"))?;
+            assert!(chunk.finish_reason.is_none());
+            assert!(chunk.usage.is_none(), "中间快照不重复计入归一usage");
+            let observation = chunk
+                .delta
+                .provider_response
+                .ok_or_else(|| invalid_response("record missing"))?;
+            assert_eq!(observation.model, Some(json!("native")));
+            assert_eq!(observation.status, Some(json!("in_progress")));
+            assert_eq!(
+                observation
+                    .usage
+                    .as_ref()
+                    .and_then(|usage| usage.get("output_tokens")),
+                Some(&json!(output))
+            );
+        }
+        let terminal = adapter
+            .map_event(json!({"type":"response.completed","response":raw("completed")}))?
+            .ok_or_else(|| invalid_response("terminal missing"))?;
+        assert_eq!(
+            terminal.usage.and_then(|usage| usage.total_tokens),
+            Some(15)
+        );
+        assert_eq!(
+            terminal
+                .delta
+                .provider_response
+                .as_ref()
+                .and_then(|record| record.usage.as_ref())
+                .and_then(|usage| usage.get("output_tokens")),
+            Some(&json!(10))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn native_missing_id_is_not_canonical_fallback_and_cross_request_is_rejected() -> Result<()> {
+        let mut adapter = ResponsesStreamAdapter::default();
+        let first = adapter
+            .map_event(
+                json!({"type":"response.created","response":{"model":null,"status":"in_progress"}}),
+            )?
+            .ok_or_else(|| invalid_response("record-only chunk missing"))?;
+        assert_eq!(
+            first
+                .delta
+                .provider_response
+                .as_ref()
+                .and_then(|record| record.request_id.as_ref()),
+            None
+        );
+        assert_eq!(
+            first
+                .delta
+                .provider_response
+                .and_then(|record| record.model),
+            Some(Value::Null)
+        );
+        let mut adapter = ResponsesStreamAdapter::default();
+        adapter.map_event(json!({"type":"response.created","response":{"id":"meta-A","model":"A","status":"in_progress"}}))?;
+        assert!(
+            adapter
+                .map_event(
+                    json!({"type":"response.in_progress","response":{"id":"meta-B","usage":null}})
+                )
+                .is_err()
+        );
+        let mut independent = ResponsesStreamAdapter::default();
+        let chunk=independent.map_event(json!({"type":"response.created","response":{"id":"meta-B","status":"in_progress"}}))?
+            .ok_or_else(||invalid_response("independent record missing"))?;
+        assert_eq!(
+            chunk
+                .delta
+                .provider_response
+                .and_then(|record| record.model),
+            None
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn unknown_status_and_incomplete_details_remain_typed_nonretryable_partial() -> Result<()> {
+        for status in ["incomplete", "future-paused"] {
+            let mut native = raw(status);
+            native
+                .as_object_mut()
+                .ok_or_else(|| invalid_response("fixture missing"))?
+                .insert(
+                    "incomplete_details".into(),
+                    json!({"reason":"max_output_tokens","future":{"detail":"未知🙂"}}),
+                );
+            let error = response_to_chat_for_provider(native.clone(), "actual-alias")
+                .err()
+                .ok_or_else(|| invalid_response("incomplete accepted"))?;
+            let message = partial(error)?;
+            assert_eq!(
+                message.content.as_text().as_deref(),
+                Some("不可发布的局部正文🙂")
+            );
+            assert!(message.execution_status.is_none());
+            assert!(message.approved_assistant_blocks.is_none());
+            let observation = message
+                .provider_response
+                .ok_or_else(|| invalid_response("partial observation missing"))?;
+            assert_eq!(observation.status, Some(json!(status)));
+            assert_eq!(
+                observation.incomplete_details,
+                native.get("incomplete_details").cloned()
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn incomplete_event_keeps_tool_fragment_and_never_emits_success() -> Result<()> {
+        let mut adapter = ResponsesStreamAdapter {
+            provider: "actual-alias".into(),
+            ..Default::default()
+        };
+        let events = [
+            json!({"type":"response.created","response":{"id":"meta-A","model":"native","status":"in_progress"}}),
+            json!({"type":"response.output_text.delta","item_id":"message-A","output_index":0,"content_index":0,"delta":"不可发布"}),
+            json!({"type":"response.output_item.added","output_index":1,"item":{"id":"fc-A","type":"function_call","call_id":"call-A","name":"inspect","arguments":""}}),
+            json!({"type":"response.function_call_arguments.delta","output_index":1,"item_id":"fc-A","delta":"{\"x\":"}),
+        ];
+        for event in events {
+            if let Some(chunk) = adapter.map_event(event)? {
+                assert!(chunk.finish_reason.is_none());
+            }
+        }
+        let native = json!({"id":"meta-A","status":"incomplete","incomplete_details":{"reason":"max_output_tokens"},"usage":{"input_tokens":5,"output_tokens":10,"total_tokens":15},"output":[
+            {"id":"message-A","type":"message","role":"assistant","status":"incomplete","content":[{"type":"output_text","text":"不可发布的局部正文🙂"}]},
+            {"id":"fc-A","type":"function_call","call_id":"call-A","name":"inspect","arguments":"{\"x\":","status":"incomplete"}
+        ]});
+        let error = adapter
+            .map_event(json!({"type":"response.incomplete","response":native}))
+            .err()
+            .ok_or_else(|| invalid_response("incomplete event accepted"))?;
+        let message = partial(error)?;
+        assert_eq!(
+            message
+                .tool_calls
+                .as_ref()
+                .and_then(|calls| calls.first())
+                .map(|call| call.function.arguments.as_str()),
+            Some("{\"x\":")
+        );
+        assert_eq!(
+            message
+                .provider_response
+                .as_ref()
+                .and_then(|record| record.model.as_ref()),
+            Some(&json!("native"))
+        );
+        assert!(!adapter.completed);
+        Ok(())
+    }
+
+    #[test]
+    fn normal_eof_keeps_decoded_partial_but_real_network_and_provider_errors_win() -> Result<()> {
+        let mut adapter = ResponsesStreamAdapter::default();
+        adapter.map_event(
+            json!({"type":"response.created","response":{"id":"meta-A","status":"in_progress"}}),
+        )?;
+        adapter.map_event(json!({"type":"response.output_text.delta","item_id":"message-A","output_index":0,"content_index":0,"delta":"不可发布"}))?;
+        let error = adapter
+            .validate_transport_end("EOF")
+            .err()
+            .ok_or_else(|| invalid_response("EOF accepted"))?;
+        assert_eq!(
+            partial(error)?.content.as_text().as_deref(),
+            Some("不可发布")
+        );
+        let mut adapter = ResponsesStreamAdapter {
+            provider: "actual-alias".into(),
+            ..Default::default()
+        };
+        adapter.map_event(
+            json!({"type":"response.created","response":{"id":"meta-A","status":"in_progress"}}),
+        )?;
+        let error=adapter.map_event(json!({"type":"response.failed","response":{"id":"meta-A","error":{"type":"overloaded","message":"service failed","code":null},"model":42}})).err().ok_or_else(||invalid_response("error accepted"))?;
+        assert!(
+            matches!(error,ReactError::Llm(ref error)if matches!(error.as_ref(),LlmError::ProviderError {provider,retryable:false,code:Some(Value::Null),..}if provider=="actual-alias"))
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn transport_error_is_not_replaced_by_eof_derived_partial() -> Result<()> {
+        let events = futures::stream::iter(vec![
+            Ok(JsonSseEvent::Data(
+                json!({"type":"response.created","response":{"id":"meta-A","status":"in_progress"}}),
+            )),
+            Err(LlmError::NetworkError("actual transport failure".into()).into()),
+        ]);
+        let mut stream = adapt_responses_stream(events, "actual-alias".into());
+        assert!(
+            stream
+                .next()
+                .await
+                .ok_or_else(|| invalid_response("metadata chunk missing"))?
+                .is_ok()
+        );
+        let error = stream
+            .next()
+            .await
+            .ok_or_else(|| invalid_response("transport error missing"))?
+            .err()
+            .ok_or_else(|| invalid_response("transport accepted"))?;
+        assert!(
+            matches!(error,ReactError::Llm(ref error)if matches!(error.as_ref(),LlmError::NetworkError(message)if message=="actual transport failure"))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn observation_only_failure_record_is_skipped_but_native_reasoning_is_retained() -> Result<()> {
+        let observation = response_metadata(&raw("completed"), "actual-alias")?;
+        let only = Message::provider_response_observation(observation.clone());
+        let restored: Message = serde_json::from_value(serde_json::to_value(only)?)?;
+        assert_eq!(messages_to_input(&[restored])?, json!([]));
+        let native = json!({"id":"reason-response","status":"completed","output":[{"type":"reasoning","id":"reason-A","encrypted_content":"sealed-original","summary":[{"type":"summary_text","text":"摘要"}],"content":[{"type":"reasoning_text","text":"明文"}]},{"type":"function_call","id":"fc-A","call_id":"call-A","name":"inspect","arguments":"{}"}]});
+        let message = response_to_chat_for_provider(native.clone(), "actual-alias")?.message;
+        let restored: Message = serde_json::from_value(serde_json::to_value(message)?)?;
+        assert_eq!(
+            messages_to_input(&[restored])?,
+            native
+                .get("output")
+                .cloned()
+                .ok_or_else(|| invalid_response("fixture output missing"))?
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn malformed_native_fields_are_protocol_errors_not_trusted_partial() -> Result<()> {
+        for (field, value) in [
+            ("model", json!(42)),
+            ("status", json!({})),
+            ("usage", json!([])),
+            ("incomplete_details", json!("wrong")),
+        ] {
+            let mut adapter = ResponsesStreamAdapter::default();
+            let mut native = json!({"id":"meta-A","status":"in_progress"});
+            native
+                .as_object_mut()
+                .ok_or_else(|| invalid_response("fixture missing"))?
+                .insert(field.into(), value);
+            let error = adapter
+                .map_event(json!({"type":"response.created","response":native}))
+                .err()
+                .ok_or_else(|| invalid_response("bad shape accepted"))?;
+            assert!(
+                matches!(error,ReactError::Llm(ref error)if matches!(error.as_ref(),LlmError::InvalidResponse(_)))
+            );
+        }
+        Ok(())
+    }
+    #[test]
+    fn nonstream_real_provider_error_precedes_unrelated_projection_damage() -> Result<()> {
+        let raw = json!({"id":"meta-A","status":"failed","model":42,"usage":[],"error":{"type":"rate_limit_error","code":{"original":429},"message":"native failure"}});
+        let error = response_to_chat_for_provider(raw, "actual-alias")
+            .err()
+            .ok_or_else(|| invalid_response("provider failure accepted"))?;
+        assert!(
+            matches!(error,ReactError::Llm(ref error)if matches!(error.as_ref(),LlmError::ProviderError {provider,error_type:Some(kind),code:Some(code),message,retryable:false}if provider=="actual-alias" && kind=="rate_limit_error" && code==&json!({"original":429}) && message=="native failure"))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn incomplete_retains_prior_opaque_and_rejects_phase_or_reasoning_conflicts() -> Result<()> {
+        for conflict in ["none", "encrypted", "phase", "null-phase", "number-phase"] {
+            let mut adapter = ResponsesStreamAdapter {
+                provider: "actual-alias".into(),
+                ..Default::default()
+            };
+            adapter.map_event(json!({"type":"response.created","response":{"id":"meta-A","model":"native","status":"in_progress"}}))?;
+            adapter.map_event(json!({"type":"response.output_item.done","output_index":0,"item":{"id":"reason-A","type":"reasoning","encrypted_content":"sealed-A","summary":[{"type":"summary_text","text":"摘要🙂"}]}}))?;
+            adapter.map_event(json!({"type":"response.output_item.added","output_index":1,"item":{"id":"message-A","type":"message","phase":"commentary","content":[]}}))?;
+            let mut native = json!({"id":"meta-A","status":"incomplete","incomplete_details":{"reason":"max_output_tokens"},"output":[{"id":"reason-A","type":"reasoning","content":[{"type":"reasoning_text","text":"公开明文"}]},{"id":"message-A","type":"message","content":[{"type":"output_text","text":"不可发布的局部正文🙂"}]}]});
+            if conflict == "encrypted" {
+                native
+                    .pointer_mut("/output/0")
+                    .and_then(Value::as_object_mut)
+                    .ok_or_else(|| invalid_response("reason fixture missing"))?
+                    .insert("encrypted_content".into(), json!("changed"));
+            }
+            if conflict == "phase" {
+                native
+                    .pointer_mut("/output/1")
+                    .and_then(Value::as_object_mut)
+                    .ok_or_else(|| invalid_response("message fixture missing"))?
+                    .insert("phase".into(), json!("final_answer"));
+            }
+            if conflict == "null-phase" || conflict == "number-phase" {
+                native
+                    .pointer_mut("/output/1")
+                    .and_then(Value::as_object_mut)
+                    .ok_or_else(|| invalid_response("message fixture missing"))?
+                    .insert(
+                        "phase".into(),
+                        if conflict == "null-phase" {
+                            Value::Null
+                        } else {
+                            json!(42)
+                        },
+                    );
+            }
+            let error = adapter
+                .map_event(json!({"type":"response.incomplete","response":native}))
+                .err()
+                .ok_or_else(|| invalid_response("incomplete accepted"))?;
+            if conflict == "none" {
+                let partial = partial(error)?;
+                assert!(partial.reasoning_blocks.as_deref().unwrap_or_default().iter().any(|block|matches!(block,ReasoningBlock::Opaque {data,..}if data=="sealed-A")));
+                assert!(
+                    partial
+                        .assistant_blocks
+                        .as_deref()
+                        .unwrap_or_default()
+                        .iter()
+                        .any(|block| block.phase == AssistantPhase::Commentary)
+                );
+            } else {
+                assert!(
+                    matches!(error,ReactError::Llm(ref error)if matches!(error.as_ref(),LlmError::InvalidResponse(_)))
+                );
+            }
+        }
+        Ok(())
+    }
+    #[test]
+    fn plaintext_item_done_without_delta_cannot_be_replaced_by_incomplete() -> Result<()> {
+        for field in ["content", "summary"] {
+            let mut adapter = ResponsesStreamAdapter::default();
+            adapter.map_event(json!({"type":"response.created","response":{"id":"meta-A","status":"in_progress"}}))?;
+            let kind = if field == "content" {
+                "reasoning_text"
+            } else {
+                "summary_text"
+            };
+            let mut original = json!({"id":"reason-A","type":"reasoning"});
+            original
+                .as_object_mut()
+                .ok_or_else(|| invalid_response("fixture object missing"))?
+                .insert(field.into(), json!([{"type":kind,"text":"原件🙂"}]));
+            adapter.map_event(
+                json!({"type":"response.output_item.done","output_index":0,"item":original}),
+            )?;
+            let mut changed = json!({"id":"reason-A","type":"reasoning"});
+            changed
+                .as_object_mut()
+                .ok_or_else(|| invalid_response("fixture object missing"))?
+                .insert(field.into(), json!([{"type":kind,"text":"冲突原件"}]));
+            let native = json!({"id":"meta-A","status":"incomplete","output":[changed],"incomplete_details":{"reason":"max_output_tokens"}});
+            let error = adapter
+                .map_event(json!({"type":"response.incomplete","response":native}))
+                .err()
+                .ok_or_else(|| invalid_response("conflict accepted"))?;
+            assert!(
+                matches!(error,ReactError::Llm(ref error)if matches!(error.as_ref(),LlmError::InvalidResponse(_)))
+            );
+        }
+        Ok(())
+    }
+    #[test]
+    fn opaque_item_done_with_public_parts_has_full_partial_at_normal_eof() -> Result<()> {
+        let mut adapter = ResponsesStreamAdapter::default();
+        adapter.map_event(
+            json!({"type":"response.created","response":{"id":"meta-A","status":"in_progress"}}),
+        )?;
+        adapter.map_event(json!({"type":"response.output_item.done","output_index":0,"item":{"id":"reason-A","type":"reasoning","encrypted_content":"sealed-A","summary":[{"type":"summary_text","text":"摘要🙂"}],"content":[{"type":"reasoning_text","text":"公开明文"}]}}))?;
+        let error = adapter
+            .validate_transport_end("EOF")
+            .err()
+            .ok_or_else(|| invalid_response("EOF accepted"))?;
+        let partial = partial(error)?;
+        let blocks = partial.assistant_blocks.as_deref().unwrap_or_default();
+        assert!(blocks.iter().any(|block| block.delta == "公开明文"));
+        assert!(blocks.iter().any(|block| block.delta == "摘要🙂"));
+        assert!(
+            partial
+                .reasoning_blocks
+                .as_deref()
+                .unwrap_or_default()
+                .iter()
+                .any(|block| matches!(block,ReasoningBlock::Opaque {data,..}if data=="sealed-A"))
+        );
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod responses_native_id_provenance_tests {
+    use super::*;
+    use echo_core::error::ReactError;
+
+    fn partial(error: ReactError) -> Result<Message> {
+        match error {
+            ReactError::Llm(error) => match *error {
+                LlmError::IncompleteResponse { partial } => Ok(*partial),
+                other => Err(invalid_response(format!("expected partial, got {other}"))),
+            },
+            other => Err(other),
+        }
+    }
+
+    fn response() -> Value {
+        json!({"id":"real-response","status":"completed","output":[
+            {"type":"message","id":"message-A","role":"assistant","phase":"commentary","content":[{"type":"output_text","text":"正文🙂","annotations":[]}]},
+            {"type":"reasoning","id":"reason-A","encrypted_content":"sealed-A","summary":[{"type":"summary_text","text":"摘要🙂"}],"content":[{"type":"reasoning_text","text":"公开原文"}]},
+            {"type":"function_call","id":"fc-A","call_id":"call-A","name":"inspect","arguments":"{\"x\":1}"}
+        ]})
+    }
+
+    fn before_created() -> [Value; 3] {
+        [
+            json!({"type":"response.output_text.delta","item_id":"message-A","output_index":0,"content_index":0,"delta":"正文"}),
+            json!({"type":"response.output_item.added","output_index":2,"item":{"type":"function_call","id":"fc-A","call_id":"call-A","name":"inspect","arguments":""}}),
+            json!({"type":"response.function_call_arguments.delta","item_id":"fc-A","output_index":2,"delta":"{\"x\":"}),
+        ]
+    }
+
+    #[test]
+    fn before_created_eof_keeps_unknown_native_source_without_generated_id() -> Result<()> {
+        let mut adapter = ResponsesStreamAdapter::default();
+        for event in before_created() {
+            if let Some(chunk) = adapter.map_event(event)? {
+                for block in chunk.delta.assistant_blocks.as_deref().unwrap_or_default() {
+                    assert!(block.provider_source.is_none(), "内部fallback不是服务原ID");
+                    assert!(!block.request_id.is_empty(), "canonical内部身份仍稳定");
+                }
+                assert!(chunk.finish_reason.is_none());
+            }
+        }
+        let message = partial(
+            adapter
+                .validate_transport_end("EOF")
+                .err()
+                .ok_or_else(|| invalid_response("EOF accepted"))?,
+        )?;
+        assert!(
+            message
+                .provider_response
+                .as_ref()
+                .and_then(|record| record.request_id.as_ref())
+                .is_none()
+        );
+        assert!(
+            message
+                .assistant_blocks
+                .as_deref()
+                .unwrap_or_default()
+                .iter()
+                .all(|block| block.provider_source.is_none())
+        );
+        let tool = message
+            .tool_calls
+            .as_ref()
+            .and_then(|tools| tools.first())
+            .ok_or_else(|| invalid_response("partial tool missing"))?;
+        let source = tool
+            .provider_source
+            .as_ref()
+            .ok_or_else(|| invalid_response("partial tool coordinates missing"))?;
+        assert!(source.request_id.is_empty());
+        assert_eq!(source.output_index, 2);
+        assert_eq!(tool.id, "call-A");
+        assert_eq!(tool.function.arguments, "{\"x\":");
+        Ok(())
+    }
+
+    fn replay_late_id(boundary: &str) -> Result<()> {
+        let mut adapter = ResponsesStreamAdapter::default();
+        let mut blocks = Vec::new();
+        let mut deltas = Vec::new();
+        let mut text = String::new();
+        let mut finishes = 0;
+        for event in before_created() {
+            if let Some(chunk) = adapter.map_event(event)? {
+                text.push_str(chunk.delta.content.as_deref().unwrap_or_default());
+                blocks.extend(chunk.delta.assistant_blocks.unwrap_or_default());
+                deltas.extend(chunk.delta.tool_calls.unwrap_or_default());
+            }
+        }
+        let canonical = blocks
+            .first()
+            .map(|block| block.request_id.clone())
+            .ok_or_else(|| invalid_response("early block missing"))?;
+        if boundary != "completed"
+            && let Some(chunk) = adapter.map_event(
+                json!({"type":boundary,"response":{"id":"real-response","status":"in_progress"}}),
+            )?
+        {
+            assert!(chunk.finish_reason.is_none());
+            assert!(chunk.delta.content.is_none());
+            blocks.extend(chunk.delta.assistant_blocks.unwrap_or_default());
+            deltas.extend(chunk.delta.tool_calls.unwrap_or_default());
+        }
+        if let Some(chunk) =
+            adapter.map_event(json!({"type":"response.completed","response":response()}))?
+        {
+            finishes += usize::from(chunk.finish_reason.is_some());
+            text.push_str(chunk.delta.content.as_deref().unwrap_or_default());
+            blocks.extend(chunk.delta.assistant_blocks.unwrap_or_default());
+            deltas.extend(chunk.delta.tool_calls.unwrap_or_default());
+        }
+        adapter.validate_transport_end("EOF")?;
+        assert_eq!(finishes, 1);
+        assert_eq!(text, "正文🙂");
+        assert!(
+            blocks.iter().all(|block| block.request_id == canonical),
+            "late nativeID不能改既发canonical身份"
+        );
+        assert!(
+            blocks
+                .iter()
+                .filter_map(|block| block.provider_source.as_ref())
+                .all(|source| source.request_id == "real-response")
+        );
+        let names = deltas
+            .iter()
+            .filter_map(|delta| delta.function.as_ref().and_then(|f| f.name.as_deref()))
+            .collect::<Vec<_>>();
+        assert_eq!(names, vec!["inspect"]);
+        let args = deltas
+            .iter()
+            .filter_map(|delta| delta.function.as_ref().and_then(|f| f.arguments.as_deref()))
+            .collect::<String>();
+        assert_eq!(args, "{\"x\":1}");
+        let tool_source = deltas
+            .iter()
+            .filter_map(|delta| delta.provider_source.as_ref())
+            .next_back()
+            .cloned()
+            .ok_or_else(|| invalid_response("bound tool source missing"))?;
+        assert_eq!(tool_source.request_id, "real-response");
+        let mut message = Message::assistant(text);
+        message.assistant_blocks = Some(blocks);
+        message.tool_calls = Some(vec![ToolCall {
+            provider_source: Some(tool_source),
+            id: "call-A".into(),
+            call_type: "function".into(),
+            function: FunctionCall {
+                name: "inspect".into(),
+                arguments: args,
+            },
+        }]);
+        let restored: Message = serde_json::from_value(serde_json::to_value(message)?)?;
+        // 原生ID绑定与replay前缀是独立因果；完整下一请求由单列replay组覆盖。
+        assert!(
+            restored
+                .assistant_blocks
+                .as_deref()
+                .unwrap_or_default()
+                .iter()
+                .any(|block| block
+                    .provider_source
+                    .as_ref()
+                    .is_some_and(|source| source.request_id == "real-response"))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn late_created_inprogress_or_completed_binds_all_coordinates_without_repeating_payload()
+    -> Result<()> {
+        for boundary in ["response.created", "response.in_progress", "completed"] {
+            replay_late_id(boundary)?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn missing_native_id_success_is_protocol_error_in_both_modes() -> Result<()> {
+        for id in [None, Some(json!(""))] {
+            let mut raw = response();
+            let object = raw
+                .as_object_mut()
+                .ok_or_else(|| invalid_response("fixture missing"))?;
+            object.remove("id");
+            if let Some(id) = id {
+                object.insert("id".into(), id);
+            }
+            let error = response_to_chat(raw.clone())
+                .err()
+                .ok_or_else(|| invalid_response("missing native ID accepted"))?;
+            assert!(
+                matches!(error,ReactError::Llm(ref error)if matches!(error.as_ref(),LlmError::InvalidResponse(_))),
+                "完整成功缺ID应是协议损坏，不是D2"
+            );
+            let mut adapter = ResponsesStreamAdapter::default();
+            let error = adapter
+                .map_event(json!({"type":"response.completed","response":raw}))
+                .err()
+                .ok_or_else(|| invalid_response("missing native ID accepted"))?;
+            assert!(
+                matches!(error,ReactError::Llm(ref error)if matches!(error.as_ref(),LlmError::InvalidResponse(_))),
+                "流式成功缺ID保持协议错误"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn metadata_only_eof_stays_incomplete_with_no_generated_native_identity() -> Result<()> {
+        let mut adapter = ResponsesStreamAdapter::default();
+        let chunk=adapter.map_event(json!({"type":"response.created","response":{"model":"native","status":"in_progress"}}))?.ok_or_else(||invalid_response("metadata chunk missing"))?;
+        assert!(chunk.finish_reason.is_none());
+        assert_eq!(
+            chunk
+                .delta
+                .provider_response
+                .as_ref()
+                .and_then(|record| record.request_id.as_ref()),
+            None
+        );
+        let message = partial(
+            adapter
+                .validate_transport_end("EOF")
+                .err()
+                .ok_or_else(|| invalid_response("EOF accepted"))?,
+        )?;
+        assert_eq!(
+            message
+                .provider_response
+                .and_then(|record| record.request_id),
+            None
+        );
+        assert!(message.tool_calls.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn late_id_then_eof_backfills_partial_assistant_and_tool_coordinates() -> Result<()> {
+        let mut adapter = ResponsesStreamAdapter::default();
+        for event in before_created() {
+            adapter.map_event(event)?;
+        }
+        adapter.map_event(json!({"type":"response.in_progress","response":{"id":"real-response","status":"in_progress"}}))?;
+        let message = partial(
+            adapter
+                .validate_transport_end("EOF")
+                .err()
+                .ok_or_else(|| invalid_response("EOF accepted"))?,
+        )?;
+        assert_eq!(message.content.as_text().as_deref(), Some("正文"));
+        let blocks = message
+            .assistant_blocks
+            .as_deref()
+            .ok_or_else(|| invalid_response("partial blocks missing"))?;
+        assert!(!blocks.is_empty(), "不能以空集合all()冒充Source回填通过");
+        let tools = message
+            .tool_calls
+            .as_deref()
+            .ok_or_else(|| invalid_response("partial tools missing"))?;
+        assert_eq!(tools.len(), 1);
+        let tool = tools
+            .first()
+            .ok_or_else(|| invalid_response("partial tool missing"))?;
+        assert_eq!(tool.id, "call-A");
+        assert_eq!(tool.function.name, "inspect");
+        assert_eq!(tool.function.arguments, "{\"x\":");
+        assert_eq!(
+            tool.provider_source
+                .as_ref()
+                .map(|source| source.output_index),
+            Some(2)
+        );
+        assert!(
+            message
+                .assistant_blocks
+                .as_deref()
+                .unwrap_or_default()
+                .iter()
+                .all(|block| block
+                    .provider_source
+                    .as_ref()
+                    .is_some_and(|source| source.request_id == "real-response"))
+        );
+        assert!(
+            message
+                .tool_calls
+                .as_deref()
+                .unwrap_or_default()
+                .iter()
+                .all(|tool| tool
+                    .provider_source
+                    .as_ref()
+                    .is_some_and(|source| source.request_id == "real-response"))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn known_native_id_change_rejects_without_overwriting_first_identity() -> Result<()> {
+        let mut adapter = ResponsesStreamAdapter::default();
+        adapter.map_event(
+            json!({"type":"response.created","response":{"id":"first","status":"in_progress"}}),
+        )?;
+        adapter.map_event(json!({"type":"response.output_text.delta","item_id":"message-A","output_index":0,"content_index":0,"delta":"正文"}))?;
+        let mut next = response();
+        next.as_object_mut()
+            .ok_or_else(|| invalid_response("fixture missing"))?
+            .insert("id".into(), json!("other"));
+        assert!(
+            adapter
+                .map_event(json!({"type":"response.completed","response":next}))
+                .is_err()
+        );
+        let message = partial(
+            adapter
+                .validate_transport_end("EOF")
+                .err()
+                .ok_or_else(|| invalid_response("EOF accepted"))?,
+        )?;
+        assert_eq!(
+            message
+                .provider_response
+                .and_then(|record| record.request_id),
+            Some("first".into())
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn nonstream_incomplete_without_native_id_keeps_only_existing_tool_unknown_exception()
+    -> Result<()> {
+        let mut native = response();
+        let object = native
+            .as_object_mut()
+            .ok_or_else(|| invalid_response("fixture missing"))?;
+        object.remove("id");
+        object.insert("status".into(), json!("incomplete"));
+        let error = response_to_chat(native)
+            .err()
+            .ok_or_else(|| invalid_response("incomplete accepted"))?;
+        let message = partial(error)?;
+        assert_eq!(
+            message
+                .provider_response
+                .as_ref()
+                .and_then(|record| record.request_id.as_ref()),
+            None
+        );
+        assert!(
+            message
+                .assistant_blocks
+                .as_deref()
+                .unwrap_or_default()
+                .iter()
+                .all(|block| block.provider_source.is_none())
+        );
+        assert!(
+            message
+                .tool_calls
+                .as_deref()
+                .unwrap_or_default()
+                .iter()
+                .all(|tool| tool
+                    .provider_source
+                    .as_ref()
+                    .is_some_and(|source| source.request_id.is_empty()))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn known_native_id_keeps_opaque_public_parts_and_tool_replay_order() -> Result<()> {
+        let raw = response();
+        let message = response_to_chat(raw.clone())?.message;
+        assert!(
+            message
+                .assistant_blocks
+                .as_deref()
+                .unwrap_or_default()
+                .iter()
+                .all(|block| block
+                    .provider_source
+                    .as_ref()
+                    .is_some_and(|source| source.request_id == "real-response"))
+        );
+        let restored: Message = serde_json::from_value(serde_json::to_value(message)?)?;
+        assert_eq!(
+            messages_to_input(&[restored])?,
+            raw.get("output")
+                .cloned()
+                .ok_or_else(|| invalid_response("fixture output missing"))?
+        );
+        Ok(())
+    }
+    #[test]
+    fn before_created_item_done_late_incomplete_id_validates_original_text() -> Result<()> {
+        for text in ["原文🙂", "冲突"] {
+            let mut adapter = ResponsesStreamAdapter::default();
+            adapter.map_event(json!({"type":"response.output_item.done","output_index":0,"item":{"type":"reasoning","id":"reason-A","content":[{"type":"reasoning_text","text":"原文🙂"}]}}))?;
+            let raw = json!({"id":"late-real","status":"incomplete","output":[{"type":"reasoning","id":"reason-A","content":[{"type":"reasoning_text","text":text}]}]});
+            let error = adapter
+                .map_event(json!({"type":"response.incomplete","response":raw}))
+                .err()
+                .ok_or_else(|| invalid_response("incomplete accepted"))?;
+            if text == "原文🙂" {
+                let message = partial(error)?;
+                assert_eq!(
+                    message
+                        .provider_response
+                        .and_then(|record| record.request_id),
+                    Some("late-real".into())
+                );
+            } else {
+                assert!(
+                    matches!(error,ReactError::Llm(ref error)if matches!(error.as_ref(),LlmError::InvalidResponse(_)))
+                );
+            }
+        }
+        Ok(())
+    }
+    #[test]
+    fn known_native_id_is_retained_when_incomplete_omits_outer_id() -> Result<()> {
+        let mut adapter = ResponsesStreamAdapter::default();
+        adapter.map_event(json!({"type":"response.created","response":{"id":"known-real","status":"in_progress"}}))?;
+        let native = json!({"status":"incomplete","output":[{"type":"message","id":"message-A","role":"assistant","content":[{"type":"output_text","text":"已收正文🙂","annotations":[]}]},{"type":"function_call","id":"fc-A","call_id":"call-A","name":"inspect","arguments":"{\"x\":"}]});
+        let error = adapter
+            .map_event(json!({"type":"response.incomplete","response":native}))
+            .err()
+            .ok_or_else(|| invalid_response("incomplete accepted"))?;
+        let message = partial(error)?;
+        assert_eq!(message.content.as_text().as_deref(), Some("已收正文🙂"));
+        assert_eq!(
+            message
+                .provider_response
+                .as_ref()
+                .and_then(|record| record.request_id.as_deref()),
+            Some("known-real")
+        );
+        let blocks = message
+            .assistant_blocks
+            .as_deref()
+            .ok_or_else(|| invalid_response("partial blocks missing"))?;
+        assert!(!blocks.is_empty());
+        assert!(blocks.iter().all(|block| {
+            block
+                .provider_source
+                .as_ref()
+                .is_some_and(|source| source.request_id == "known-real")
+        }));
+        let tool = message
+            .tool_calls
+            .as_ref()
+            .and_then(|calls| calls.first())
+            .ok_or_else(|| invalid_response("partial tool missing"))?;
+        assert_eq!(
+            tool.provider_source
+                .as_ref()
+                .map(|source| source.request_id.as_str()),
+            Some("known-real")
+        );
+        assert_eq!(tool.id, "call-A");
+        assert_eq!(tool.function.arguments, "{\"x\":");
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod responses_nullable_status_tests {
+    use super::*;
+    use echo_core::error::ReactError;
+
+    fn native(status: Option<Value>) -> Value {
+        let mut response = json!({"id":"status-response","model":"native-model","incomplete_details":{"reason":"limit","future":{"raw":null}},"usage":{"input_tokens":2,"output_tokens":3,"total_tokens":5,"future":{"nested":[null,"未知🙂"]}},"output":[{"type":"message","id":"message-A","role":"assistant","content":[{"type":"output_text","text":"局部原文🙂","annotations":[]}]}]});
+        if let Some(value) = status
+            && let Some(object) = response.as_object_mut()
+        {
+            object.insert("status".into(), value);
+        }
+        response
+    }
+
+    fn assert_partial(error: ReactError, raw: &Value) -> Result<()> {
+        let message = match error {
+            ReactError::Llm(error) => match *error {
+                LlmError::IncompleteResponse { partial } => *partial,
+                other => return Err(invalid_response(format!("expected D2, got {other}"))),
+            },
+            other => return Err(other),
+        };
+        let saved = serde_json::to_value(&message)?;
+        let observation = saved
+            .get("provider_response")
+            .ok_or_else(|| invalid_response("observation missing"))?;
+        for key in ["model", "status", "incomplete_details", "usage"] {
+            assert_eq!(
+                observation.get(key),
+                raw.get(key),
+                "原字段presence/value保持:{key}"
+            );
+        }
+        assert_eq!(message.content.as_text().as_deref(), Some("局部原文🙂"));
+        assert!(message.execution_status.is_none());
+        assert!(message.approved_assistant_blocks.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn nullable_or_absent_status_is_nonstream_incomplete_with_original_presence() -> Result<()> {
+        for status in [None, Some(Value::Null)] {
+            let raw = native(status);
+            let error = response_to_chat_for_provider(raw.clone(), "actual-provider")
+                .err()
+                .ok_or_else(|| invalid_response("nullable status became success"))?;
+            assert_partial(error, &raw)?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn nullable_status_in_incomplete_or_completed_event_never_produces_success() -> Result<()> {
+        for status in [None, Some(Value::Null)] {
+            for event_type in ["response.incomplete", "response.completed"] {
+                let raw = native(status.clone());
+                let mut adapter = ResponsesStreamAdapter::default();
+                let error = adapter
+                    .map_event(json!({"type":event_type,"response":raw.clone()}))
+                    .err()
+                    .ok_or_else(|| invalid_response("nullable stream status became success"))?;
+                assert!(!adapter.completed);
+                assert_partial(error, &raw)?;
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn status_wrong_types_remain_protocol_damage_and_real_error_keeps_priority() -> Result<()> {
+        for status in [json!(42), json!({}), json!([])] {
+            let raw = native(Some(status));
+            let error = response_to_chat_for_provider(raw.clone(), "actual-provider")
+                .err()
+                .ok_or_else(|| invalid_response("bad status accepted"))?;
+            assert!(
+                matches!(error,ReactError::Llm(ref error)if matches!(error.as_ref(),LlmError::InvalidResponse(_)))
+            );
+            let mut with_error = raw;
+            with_error
+                .as_object_mut()
+                .ok_or_else(|| invalid_response("fixture missing"))?
+                .insert(
+                    "error".into(),
+                    json!({"type":"native_error","message":"first error","code":null}),
+                );
+            let error = response_to_chat_for_provider(with_error, "actual-provider")
+                .err()
+                .ok_or_else(|| invalid_response("provider error accepted"))?;
+            assert!(
+                matches!(error,ReactError::Llm(ref error)if matches!(error.as_ref(),LlmError::ProviderError {retryable:false,error_type:Some(kind),code:Some(Value::Null),..}if kind=="native_error"))
+            );
+        }
+        Ok(())
+    }
+    #[test]
+    fn nullable_completed_with_prior_opaque_or_closed_text_uses_same_partial_validation()
+    -> Result<()> {
+        for present in [false, true] {
+            let mut adapter = ResponsesStreamAdapter::default();
+            adapter.map_event(json!({"type":"response.created","response":{"id":"status-response","status":"in_progress"}}))?;
+            adapter.map_event(json!({"type":"response.output_item.done","output_index":0,"item":{"type":"reasoning","id":"reason-A","encrypted_content":"sealed-original","summary":[],"content":[{"type":"reasoning_text","text":"原文🙂"}]}}))?;
+            let mut raw = json!({"id":"status-response","output":[{"type":"reasoning","id":"reason-A","content":[{"type":"reasoning_text","text":"原文🙂"}]}]});
+            if present {
+                raw.as_object_mut()
+                    .ok_or_else(|| invalid_response("fixture missing"))?
+                    .insert("status".into(), Value::Null);
+            }
+            let error = adapter
+                .map_event(json!({"type":"response.completed","response":raw}))
+                .err()
+                .ok_or_else(|| invalid_response("nullable accepted"))?;
+            let message = match error {
+                ReactError::Llm(error) => match *error {
+                    LlmError::IncompleteResponse { partial } => *partial,
+                    other => return Err(invalid_response(format!("expected D2 got {other}"))),
+                },
+                other => return Err(other),
+            };
+            assert!(message.reasoning_blocks.as_deref().unwrap_or_default().iter().any(|block|matches!(block,ReasoningBlock::Opaque {data,..}if data=="sealed-original")));
+            let mut adapter = ResponsesStreamAdapter::default();
+            adapter.map_event(json!({"type":"response.created","response":{"id":"status-response","status":"in_progress"}}))?;
+            adapter.map_event(json!({"type":"response.output_text.done","item_id":"message-A","output_index":0,"content_index":0,"text":"原文🙂"}))?;
+            let mut raw = native(None);
+            if present {
+                raw.as_object_mut()
+                    .ok_or_else(|| invalid_response("fixture missing"))?
+                    .insert("status".into(), Value::Null);
+            }
+            let error = adapter
+                .map_event(json!({"type":"response.completed","response":raw}))
+                .err()
+                .ok_or_else(|| invalid_response("text conflict accepted"))?;
+            assert!(
+                matches!(error,ReactError::Llm(ref error)if matches!(error.as_ref(),LlmError::InvalidResponse(_)))
+            );
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod responses_native_identity_http_tests {
+    use super::*;
+    use echo_core::error::ReactError;
+    use std::time::Duration;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    async fn serve_once(
+        body: String,
+        stream: bool,
+    ) -> Result<(String, tokio::task::JoinHandle<Result<()>>)> {
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let address = listener.local_addr()?;
+        let task = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await?;
+            let mut bytes = Vec::new();
+            loop {
+                if socket.read_buf(&mut bytes).await? == 0 {
+                    return Err(invalid_response("HTTP request ended early"));
+                }
+                let text = match std::str::from_utf8(&bytes) {
+                    Ok(text) => text,
+                    Err(error) if error.error_len().is_none() => continue,
+                    Err(error) => return Err(invalid_response(error.to_string())),
+                };
+                if let Some((headers, payload)) = text.split_once("\r\n\r\n") {
+                    let length = headers
+                        .lines()
+                        .find_map(|line| {
+                            line.split_once(':')
+                                .filter(|(key, _)| key.eq_ignore_ascii_case("content-length"))
+                                .map(|(_, value)| value.trim().parse::<usize>())
+                        })
+                        .transpose()
+                        .map_err(|error| invalid_response(error.to_string()))?
+                        .ok_or_else(|| invalid_response("request Content-Length missing"))?;
+                    if payload.len() >= length {
+                        break;
+                    }
+                }
+            }
+            let kind = if stream {
+                "text/event-stream"
+            } else {
+                "application/json"
+            };
+            socket.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: {kind}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",body.len()).as_bytes()).await?;
+            socket.write_all(body.as_bytes()).await?;
+            socket.flush().await?;
+            Ok(())
+        });
+        Ok((format!("http://{address}"), task))
+    }
+
+    fn client(url: String) -> Result<ResponsesClient> {
+        ResponsesClient::new(LlmConfig {
+            provider_name: Some("actual-fixture".into()),
+            api_protocol: LlmApiProtocol::Responses,
+            base_url: url,
+            api_key: "fixture-key".into(),
+            model: "gpt-test".into(),
+            input_modalities: echo_core::llm::ModelInputModality::all_supported(),
+            thinking_protocol: echo_core::llm::ThinkingProtocol::OpenaiReasoningEffort,
+            timeouts: echo_core::llm::LlmTimeouts::default(),
+        })
+    }
+
+    async fn nullable_roundtrip(stream: bool, present: bool) -> Result<()> {
+        let mut raw = json!({"id":"status-response","model":"native","incomplete_details":null,"usage":{"input_tokens":2,"output_tokens":3,"total_tokens":5,"future":{"nested":[null,9007199254740993_u64]}},"output":[{"type":"message","id":"message-A","role":"assistant","content":[{"type":"output_text","text":"HTTP局部原文🙂","annotations":[]}]}]});
+        if present {
+            raw.as_object_mut()
+                .ok_or_else(|| invalid_response("fixture missing"))?
+                .insert("status".into(), Value::Null);
+        }
+        let body = if stream {
+            format!(
+                "event: response.incomplete\ndata: {}\n\n",
+                json!({"type":"response.incomplete","response":raw.clone()})
+            )
+        } else {
+            raw.to_string()
+        };
+        let (url, server) = serve_once(body, stream).await?;
+        let request = ChatRequest::new(vec![Message::user("request".into())]);
+        let client = client(url)?;
+        let result = async {
+            let error = if stream {
+                let mut chunks = client.chat_stream(request).await?;
+                let mut failure = None;
+                while let Some(chunk) = chunks.next().await {
+                    match chunk {
+                        Ok(chunk) => assert!(chunk.finish_reason.is_none()),
+                        Err(error) => {
+                            failure = Some(error);
+                            break;
+                        }
+                    }
+                }
+                failure
+                    .ok_or_else(|| invalid_response("nullable stream completed without failure"))?
+            } else {
+                client
+                    .chat(request)
+                    .await
+                    .err()
+                    .ok_or_else(|| invalid_response("nullable nonstream accepted"))?
+            };
+            let partial = match error {
+                ReactError::Llm(error) => match *error {
+                    LlmError::IncompleteResponse { partial } => *partial,
+                    other => return Err(invalid_response(format!("expected D2 got {other}"))),
+                },
+                other => return Err(other),
+            };
+            assert_eq!(partial.content.as_text().as_deref(), Some("HTTP局部原文🙂"));
+            let observation = serde_json::to_value(partial.provider_response)?;
+            assert_eq!(observation.get("status").is_some(), present);
+            assert_eq!(observation.get("usage"), raw.get("usage"));
+            assert_eq!(observation.get("incomplete_details"), Some(&Value::Null));
+            Ok::<_, ReactError>(())
+        }
+        .await;
+        if result.is_err() {
+            server.abort();
+            return result;
+        }
+        server
+            .await
+            .map_err(|error| invalid_response(error.to_string()))??;
+        result
+    }
+
+    #[tokio::test]
+    async fn real_http_nullable_status_stream_and_nonstream_keep_partial_presence() -> Result<()> {
+        for stream in [false, true] {
+            for present in [false, true] {
+                tokio::time::timeout(Duration::from_secs(10), nullable_roundtrip(stream, present))
+                    .await
+                    .map_err(|_| invalid_response("HTTP fixture timeout"))??;
+            }
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn real_http_before_created_eof_has_no_fabricated_native_source() -> Result<()> {
+        let body = format!(
+            "event: response.output_text.delta\ndata: {}\n\n",
+            json!({"type":"response.output_text.delta","item_id":"message-A","output_index":0,"content_index":0,"delta":"已收正文🙂"})
+        );
+        tokio::time::timeout(Duration::from_secs(10),async {
+            let (url,server)=serve_once(body,true).await?;let result=async {
+                let mut chunks=client(url)?.chat_stream(ChatRequest::new(vec![Message::user("request".into())])).await?;
+                let mut failure=None;while let Some(chunk)=chunks.next().await {match chunk{Ok(chunk)=>{assert!(chunk.finish_reason.is_none());assert!(chunk.delta.assistant_blocks.as_deref().unwrap_or_default().iter().all(|block|block.provider_source.is_none()));},Err(error)=>{failure=Some(error);break;}}}
+                let error=failure.ok_or_else(||invalid_response("EOF failure missing"))?;
+                assert!(matches!(error,ReactError::Llm(ref error)if matches!(error.as_ref(),LlmError::IncompleteResponse {partial}if partial.assistant_blocks.as_deref().unwrap_or_default().iter().all(|block|block.provider_source.is_none()))));Ok::<_,ReactError>(())
+            }.await;if result.is_err(){server.abort();return result;}server.await.map_err(|error|invalid_response(error.to_string()))??;result
+        }).await.map_err(|_|invalid_response("HTTP fixture timeout"))??;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod responses_late_source_replay_tests {
+    use super::*;
+    use echo_core::error::ReactError;
+    use std::time::Duration;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    fn full() -> Value {
+        json!({"id":"actual-native","status":"completed","output":[
+            {"type":"message","id":"message-A","role":"assistant","phase":"commentary","content":[{"type":"output_text","text":"前缀终🙂","annotations":[]}]},
+            {"type":"reasoning","id":"reason-A","encrypted_content":"opaque-original","summary":[{"type":"summary_text","text":"摘要🙂"}],"content":[{"type":"reasoning_text","text":"公开原文"}]},
+            {"type":"function_call","id":"fc-A","call_id":"call-A","name":"inspect","arguments":"{}"}
+        ]})
+    }
+
+    fn message_with_late_source() -> Result<Message> {
+        let response = response_to_chat(full())?;
+        let mut message = response.message;
+        let blocks = message
+            .assistant_blocks
+            .take()
+            .ok_or_else(|| invalid_response("blocks missing"))?;
+        let mut split = Vec::new();
+        for block in blocks {
+            let mut early = block.clone();
+            early.provider_source = None;
+            early.complete = false;
+            let mut closure = block;
+            closure.delta.clear();
+            closure.reasoning = None;
+            split.extend([early, closure]);
+        }
+        message.assistant_blocks = Some(split);
+        Ok(message)
+    }
+
+    #[test]
+    fn local_message_none_prefix_then_some_empty_closure_preserves_all_native_items() -> Result<()>
+    {
+        let restored: Message =
+            serde_json::from_value(serde_json::to_value(message_with_late_source()?)?)?;
+        assert_eq!(
+            messages_to_input(&[restored])?,
+            full()
+                .get("output")
+                .cloned()
+                .ok_or_else(|| invalid_response("fixture output missing"))?
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn runtime_or_foreign_unbound_blocks_do_not_enter_provider_history_and_known_source_conflicts_reject()
+    -> Result<()> {
+        let mut message = message_with_late_source()?;
+        let runtime = AssistantMessageBlock {
+            provider_source: None,
+            block_id: "runtime-diagnostic".into(),
+            request_id: "runtime-request".into(),
+            sequence: 99,
+            phase: AssistantPhase::Commentary,
+            delta: "NOT_NATIVE".into(),
+            complete: true,
+            provider: Some("runtime".into()),
+            reasoning: None,
+        };
+        message
+            .assistant_blocks
+            .as_mut()
+            .ok_or_else(|| invalid_response("blocks missing"))?
+            .push(runtime.clone());
+        message.approved_assistant_blocks = Some(vec![runtime]);
+        assert_eq!(
+            messages_to_input(&[message])?,
+            full()
+                .get("output")
+                .cloned()
+                .ok_or_else(|| invalid_response("fixture output missing"))?
+        );
+        let mut conflict = message_with_late_source()?;
+        let mut changed = conflict
+            .assistant_blocks
+            .as_ref()
+            .and_then(|blocks| blocks.iter().find(|block| block.provider_source.is_some()))
+            .cloned()
+            .ok_or_else(|| invalid_response("source block missing"))?;
+        changed
+            .provider_source
+            .as_mut()
+            .ok_or_else(|| invalid_response("source missing"))?
+            .item_id = "foreign-item".into();
+        changed.delta.clear();
+        changed.reasoning = None;
+        conflict
+            .assistant_blocks
+            .as_mut()
+            .ok_or_else(|| invalid_response("blocks missing"))?
+            .push(changed);
+        assert!(messages_to_input(&[conflict]).is_err());
+        Ok(())
+    }
+
+    async fn read_http_request(socket: &mut tokio::net::TcpStream) -> Result<Value> {
+        let mut bytes = Vec::new();
+        loop {
+            if socket.read_buf(&mut bytes).await? == 0 {
+                return Err(invalid_response("HTTP request truncated"));
+            }
+            let text = match std::str::from_utf8(&bytes) {
+                Ok(text) => text,
+                Err(error) if error.error_len().is_none() => continue,
+                Err(error) => return Err(invalid_response(error.to_string())),
+            };
+            if let Some((headers, body)) = text.split_once("\r\n\r\n") {
+                let length = headers
+                    .lines()
+                    .find_map(|line| {
+                        line.split_once(':')
+                            .filter(|(key, _)| key.eq_ignore_ascii_case("content-length"))
+                            .map(|(_, value)| value.trim().parse::<usize>())
+                    })
+                    .transpose()
+                    .map_err(|error| invalid_response(error.to_string()))?
+                    .ok_or_else(|| invalid_response("Content-Length missing"))?;
+                if body.len() >= length {
+                    return serde_json::from_str(body).map_err(Into::into);
+                }
+            }
+        }
+    }
+
+    async fn replay_http() -> Result<()> {
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let address = listener.local_addr()?;
+        let server = tokio::spawn(async move {
+            let mut requests = Vec::new();
+            for turn in 0..2 {
+                let (mut socket, _) = listener.accept().await?;
+                requests.push(read_http_request(&mut socket).await?);
+                let (kind, body) = if turn == 0 {
+                    let mut events = vec![
+                        json!({"type":"response.output_text.delta","item_id":"message-A","output_index":0,"content_index":0,"delta":"前缀"}),
+                        json!({"type":"response.output_item.done","output_index":1,"item":{"type":"reasoning","id":"reason-A","encrypted_content":"opaque-original","summary":[{"type":"summary_text","text":"摘要🙂"}],"content":[{"type":"reasoning_text","text":"公开原文"}]}}),
+                        json!({"type":"response.created","response":{"id":"actual-native","status":"in_progress"}}),
+                    ];
+                    events.push(json!({"type":"response.completed","response":full()}));
+                    (
+                        "text/event-stream",
+                        events
+                            .iter()
+                            .map(|event| {
+                                format!(
+                                    "event: {}\ndata: {event}\n\n",
+                                    event
+                                        .get("type")
+                                        .and_then(Value::as_str)
+                                        .unwrap_or_default()
+                                )
+                            })
+                            .collect::<String>(),
+                    )
+                } else {
+                    ("application/json",json!({"id":"second-native","status":"completed","output":[{"type":"message","id":"final","role":"assistant","content":[{"type":"output_text","text":"second","annotations":[]}]}]}).to_string())
+                };
+                socket.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: {kind}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",body.len()).as_bytes()).await?;
+                socket.write_all(body.as_bytes()).await?;
+                socket.flush().await?;
+            }
+            Ok::<_, ReactError>(requests)
+        });
+        let client = ResponsesClient::new(LlmConfig {
+            provider_name: Some("actual-provider".into()),
+            api_protocol: LlmApiProtocol::Responses,
+            base_url: format!("http://{address}"),
+            api_key: "fixture-key".into(),
+            model: "gpt-test".into(),
+            input_modalities: echo_core::llm::ModelInputModality::all_supported(),
+            thinking_protocol: echo_core::llm::ThinkingProtocol::OpenaiReasoningEffort,
+            timeouts: echo_core::llm::LlmTimeouts::default(),
+        })?;
+        let result = async {
+            let mut stream = client
+                .chat_stream(ChatRequest::new(vec![Message::user("first".into())]))
+                .await?;
+            let mut blocks = Vec::new();
+            let mut content = String::new();
+            let mut tools = Vec::new();
+            let mut finishes = 0;
+            while let Some(chunk) = stream.next().await {
+                let chunk = chunk?;
+                finishes += usize::from(chunk.finish_reason.is_some());
+                content.push_str(chunk.delta.content.as_deref().unwrap_or_default());
+                blocks.extend(chunk.delta.assistant_blocks.unwrap_or_default());
+                for tool in chunk.delta.tool_calls.unwrap_or_default() {
+                    let function = tool
+                        .function
+                        .ok_or_else(|| invalid_response("tool function missing"))?;
+                    tools.push(ToolCall {
+                        provider_source: tool.provider_source,
+                        id: tool.id.ok_or_else(|| invalid_response("tool id missing"))?,
+                        call_type: "function".into(),
+                        function: FunctionCall {
+                            name: function
+                                .name
+                                .ok_or_else(|| invalid_response("tool name missing"))?,
+                            arguments: function
+                                .arguments
+                                .ok_or_else(|| invalid_response("tool args missing"))?,
+                        },
+                    });
+                }
+            }
+            assert_eq!(finishes, 1);
+            assert_eq!(content, "前缀终🙂");
+            let mut message = Message::assistant(content);
+            message.assistant_blocks = Some(blocks);
+            message.tool_calls = Some(tools);
+            let restored: Message = serde_json::from_value(serde_json::to_value(message)?)?;
+            client
+                .chat(ChatRequest::new(vec![
+                    restored,
+                    Message::tool_result("call-A".into(), "inspect".into(), "result".into()),
+                ]))
+                .await?;
+            Ok::<_, ReactError>(())
+        }
+        .await;
+        if result.is_err() {
+            server.abort();
+            return result;
+        }
+        let requests = server
+            .await
+            .map_err(|error| invalid_response(error.to_string()))??;
+        let input = requests
+            .get(1)
+            .and_then(|request| request.get("input"))
+            .and_then(Value::as_array)
+            .ok_or_else(|| invalid_response("next HTTP input missing"))?;
+        assert_eq!(
+            input.iter().take(3).cloned().collect::<Vec<_>>(),
+            full()
+                .get("output")
+                .and_then(Value::as_array)
+                .cloned()
+                .ok_or_else(|| invalid_response("fixture output missing"))?
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn real_http_late_actual_id_empty_source_closure_next_request_keeps_full_opaque_and_text()
+    -> Result<()> {
+        tokio::time::timeout(Duration::from_secs(10), replay_http())
+            .await
+            .map_err(|_| invalid_response("HTTP fixture timeout"))??;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod responses_replay_owner_r03_tests {
+    use super::*;
+    use echo_core::error::ReactError;
+    use std::time::Duration;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    fn full() -> Value {
+        json!({"id":"history-native","status":"completed","model":"native-history-model","output":[
+            {"type":"message","id":"history-message","role":"assistant","phase":"commentary","content":[{"type":"output_text","text":"原文🙂","annotations":[]}]},
+            {"type":"reasoning","id":"history-reason","encrypted_content":"opaque-history","summary":[{"type":"summary_text","text":"摘要🙂"}],"content":[{"type":"reasoning_text","text":"公开原文"}]},
+            {"type":"function_call","id":"history-fc","call_id":"history-call","name":"inspect","arguments":"{}"}
+        ]})
+    }
+
+    fn split_message() -> Result<Message> {
+        let mut message = response_to_chat_for_provider(full(), "historical-vendor")?.message;
+        let blocks = message
+            .assistant_blocks
+            .take()
+            .ok_or_else(|| invalid_response("blocks missing"))?;
+        let mut observed = Vec::new();
+        for block in blocks {
+            let mut prefix = block.clone();
+            prefix.provider_source = None;
+            prefix.complete = false;
+            let mut closure = block;
+            closure.delta.clear();
+            closure.reasoning = None;
+            observed.extend([prefix, closure]);
+        }
+        message.assistant_blocks = Some(observed);
+        Ok(message)
+    }
+
+    fn altered(case: &str) -> Result<Message> {
+        let mut message = split_message()?;
+        if case == "foreign-middle-source" {
+            let blocks = message
+                .assistant_blocks
+                .as_mut()
+                .ok_or_else(|| invalid_response("blocks missing"))?;
+            let mut middle = blocks
+                .get(1)
+                .cloned()
+                .ok_or_else(|| invalid_response("closure missing"))?;
+            middle
+                .provider_source
+                .as_mut()
+                .ok_or_else(|| invalid_response("source missing"))?
+                .protocol = LlmApiProtocol::Anthropic;
+            blocks.insert(1, middle);
+        } else if case == "foreign-provider-then-cleared" {
+            let blocks = message
+                .assistant_blocks
+                .as_mut()
+                .ok_or_else(|| invalid_response("blocks missing"))?;
+            blocks
+                .get_mut(0)
+                .ok_or_else(|| invalid_response("prefix missing"))?
+                .provider = Some("foreign-provider".into());
+            blocks
+                .get_mut(1)
+                .ok_or_else(|| invalid_response("closure missing"))?
+                .provider = None;
+        } else if case == "whole-group-owner-swapped" {
+            for block in message.assistant_blocks.iter_mut().flatten() {
+                if let Some(source) = block.provider_source.as_mut() {
+                    source.request_id = "foreign-native-owner".into();
+                }
+            }
+            for tool in message.tool_calls.iter_mut().flatten() {
+                if let Some(source) = tool.provider_source.as_mut() {
+                    source.request_id = "foreign-native-owner".into();
+                }
+            }
+        } else if case == "observation-protocol-conflict" {
+            message
+                .provider_response
+                .as_mut()
+                .ok_or_else(|| invalid_response("observation missing"))?
+                .protocol = LlmApiProtocol::Anthropic;
+        } else if case == "whole-group-provider-swapped" {
+            for block in message.assistant_blocks.iter_mut().flatten() {
+                if block.block_id == "history-message:content:0" {
+                    block.provider = Some("foreign-provider".into());
+                }
+            }
+        } else {
+            return Err(invalid_response("unknown case"));
+        }
+        serde_json::from_value(serde_json::to_value(message)?).map_err(Into::into)
+    }
+
+    #[test]
+    fn canonical_group_collects_foreign_middle_and_provider_rollback_before_filtering() -> Result<()>
+    {
+        for case in ["foreign-middle-source", "foreign-provider-then-cleared"] {
+            assert!(
+                messages_to_input(&[altered(case)?]).is_err(),
+                "中间观察不能被protocol/provider过滤吞掉:{case}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn replay_requires_same_d1_native_owner_protocol_and_recorded_vendor() -> Result<()> {
+        for case in [
+            "whole-group-owner-swapped",
+            "observation-protocol-conflict",
+            "whole-group-provider-swapped",
+        ] {
+            assert!(
+                messages_to_input(&[altered(case)?]).is_err(),
+                "DTO观察与source冲突不得进入历史:{case}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn runtime_never_upgraded_groups_are_excluded_and_none_to_some_keeps_original_payload()
+    -> Result<()> {
+        let mut message = split_message()?;
+        let diagnostic = AssistantMessageBlock {
+            provider_source: None,
+            block_id: "runtime-diagnostic".into(),
+            request_id: "runtime-owner".into(),
+            sequence: 99,
+            phase: AssistantPhase::Commentary,
+            delta: "MUST_NOT_ENTER_WIRE".into(),
+            complete: true,
+            provider: Some("runtime".into()),
+            reasoning: None,
+        };
+        message
+            .assistant_blocks
+            .as_mut()
+            .ok_or_else(|| invalid_response("blocks missing"))?
+            .push(diagnostic.clone());
+        message.approved_assistant_blocks = Some(vec![diagnostic]);
+        let restored: Message = serde_json::from_value(serde_json::to_value(message)?)?;
+        assert_eq!(
+            messages_to_input(&[restored])?,
+            full()
+                .get("output")
+                .cloned()
+                .ok_or_else(|| invalid_response("fixture output missing"))?
+        );
+        Ok(())
+    }
+
+    pub(super) fn client(url: String) -> Result<ResponsesClient> {
+        ResponsesClient::new(LlmConfig {
+            provider_name: Some("current-client-alias".into()),
+            api_protocol: LlmApiProtocol::Responses,
+            base_url: url,
+            api_key: "fixture-key".into(),
+            model: "gpt-test".into(),
+            input_modalities: echo_core::llm::ModelInputModality::all_supported(),
+            thinking_protocol: echo_core::llm::ThinkingProtocol::OpenaiReasoningEffort,
+            timeouts: echo_core::llm::LlmTimeouts::default(),
+        })
+    }
+
+    pub(super) async fn read_request(socket: &mut tokio::net::TcpStream) -> Result<Value> {
+        let mut bytes = Vec::new();
+        loop {
+            if socket.read_buf(&mut bytes).await? == 0 {
+                return Err(invalid_response("HTTP request truncated"));
+            }
+            let text = match std::str::from_utf8(&bytes) {
+                Ok(text) => text,
+                Err(error) if error.error_len().is_none() => continue,
+                Err(error) => return Err(invalid_response(error.to_string())),
+            };
+            if let Some((headers, body)) = text.split_once("\r\n\r\n") {
+                let length = headers
+                    .lines()
+                    .find_map(|line| {
+                        line.split_once(':')
+                            .filter(|(key, _)| key.eq_ignore_ascii_case("content-length"))
+                            .map(|(_, value)| value.trim().parse::<usize>())
+                    })
+                    .transpose()
+                    .map_err(|error| invalid_response(error.to_string()))?
+                    .ok_or_else(|| invalid_response("Content-Length missing"))?;
+                if body.len() >= length {
+                    return serde_json::from_str(body).map_err(Into::into);
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn cold_dto_foreign_source_and_d1_conflicts_never_send_real_http() -> Result<()> {
+        for case in [
+            "foreign-middle-source",
+            "foreign-provider-then-cleared",
+            "whole-group-owner-swapped",
+            "observation-protocol-conflict",
+            "whole-group-provider-swapped",
+        ] {
+            let listener = TcpListener::bind("127.0.0.1:0").await?;
+            let address = listener.local_addr()?;
+            let server = tokio::spawn(async move {
+                match tokio::time::timeout(Duration::from_millis(150), listener.accept()).await {
+                    Err(_) => Ok::<_, ReactError>(false),
+                    Ok(accept) => {
+                        let (mut socket, _) = accept?;
+                        read_request(&mut socket).await?;
+                        let body=json!({"id":"negative-control-response","status":"completed","output":[{"type":"message","id":"negative-control-message","role":"assistant","content":[{"type":"output_text","text":"done","annotations":[]}]}]}).to_string();
+                        socket.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",body.len()).as_bytes()).await?;
+                        socket.write_all(body.as_bytes()).await?;
+                        socket.flush().await?;
+                        Ok(true)
+                    }
+                }
+            });
+            let result = client(format!("http://{address}"))?
+                .chat(ChatRequest::new(vec![altered(case)?]))
+                .await;
+            let connected = server
+                .await
+                .map_err(|error| invalid_response(error.to_string()))??;
+            assert!(
+                matches!(result,Err(ReactError::Llm(ref error))if matches!(error.as_ref(),LlmError::InvalidResponse(_))),
+                "cold DTO冲突必须在请求构造时拒绝:{case}"
+            );
+            assert!(!connected, "冲突不得实际连HTTP:{case}");
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn cold_dto_real_http_keeps_history_vendor_without_binding_current_client_alias()
+    -> Result<()> {
+        tokio::time::timeout(Duration::from_secs(10),async {
+            let listener=TcpListener::bind("127.0.0.1:0").await?;let address=listener.local_addr()?;
+            let server=tokio::spawn(async move {
+                let (mut socket,_)=listener.accept().await?;let request=read_request(&mut socket).await?;
+                let body=json!({"id":"new-native","status":"completed","output":[{"type":"message","id":"new-message","role":"assistant","content":[{"type":"output_text","text":"done","annotations":[]}]}]}).to_string();
+                socket.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",body.len()).as_bytes()).await?;socket.write_all(body.as_bytes()).await?;socket.flush().await?;Ok::<_,ReactError>(request)
+            });
+            let restored:Message=serde_json::from_value(serde_json::to_value(split_message()?)?)?;
+            let result=client(format!("http://{address}"))?.chat(ChatRequest::new(vec![restored])).await;
+            if let Err(error)=result{server.abort();return Err(error);}
+            let request=server.await.map_err(|error|invalid_response(error.to_string()))??;
+            assert_eq!(request.get("input"),full().get("output"));
+            assert!(request.get("input").and_then(Value::as_array).is_some_and(|items|items.iter().all(|item|item.get("provider_response").is_none())));Ok(())
+        }).await.map_err(|_|invalid_response("HTTP fixture timeout"))?
+    }
+}
+
+#[cfg(test)]
+mod responses_late_source_projection_r03_tests {
+    use super::responses_replay_owner_r03_tests::{client, read_request};
+    use super::*;
+    use echo_core::agent::{
+        AgentOutputProjection, AgentPhase, ExecutionStatus, ExecutionStatusKind,
+    };
+    use echo_core::error::ReactError;
+    use std::time::Duration;
+    use tokio::io::AsyncWriteExt;
+    use tokio::net::TcpListener;
+
+    async fn provider_to_core(known_first: bool) -> Result<()> {
+        let mut events = Vec::new();
+        if known_first {
+            events.push(json!({"type":"response.created","response":{"id":"actual-r03","status":"in_progress"}}));
+        }
+        events.extend([
+            json!({"type":"response.reasoning_summary_text.delta","item_id":"reason-r03","output_index":0,"summary_index":0,"delta":"摘要"}),
+            json!({"type":"response.output_item.done","output_index":0,"item":{"type":"reasoning","id":"reason-r03","summary":[{"type":"summary_text","text":"摘要🙂"}]}}),
+            json!({"type":"response.output_item.added","output_index":2,"item":{"type":"function_call","id":"fc-r03","call_id":"call-r03","name":"inspect","arguments":"{}"}}),
+            json!({"type":"response.completed","response":{"id":"actual-r03","status":"completed","output":[{"type":"reasoning","id":"reason-r03","encrypted_content":"opaque-r03","summary":[{"type":"summary_text","text":"摘要🙂"}]},{"type":"message","id":"message-r03","role":"assistant","content":[{"type":"output_text","text":"正文","annotations":[]}]},{"type":"function_call","id":"fc-r03","call_id":"call-r03","name":"inspect","arguments":"{}"}]}}),
+        ]);
+        let payload = events
+            .iter()
+            .map(|event| {
+                format!(
+                    "event: {}\ndata: {event}\n\n",
+                    event
+                        .get("type")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                )
+            })
+            .collect::<String>();
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let address = listener.local_addr()?;
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await?;
+            read_request(&mut socket).await?;
+            socket.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",payload.len()).as_bytes()).await?;
+            socket.write_all(payload.as_bytes()).await?;
+            socket.flush().await?;
+            Ok::<_, ReactError>(())
+        });
+        let result = async {
+            let mut projection = AgentOutputProjection::default();
+            projection.observe_status(&ExecutionStatus {
+                adapter_generated: false,
+                execution_id: "actual-test-execution".into(),
+                request_id: None,
+                sequence: 0,
+                phase: AgentPhase::Thinking,
+                status: ExecutionStatusKind::Started,
+                reason: None,
+            })?;
+            let mut stream = client(format!("http://{address}"))?
+                .chat_stream(ChatRequest::new(vec![Message::user("request".into())]))
+                .await?;
+            let mut displayed = String::new();
+            let mut body = String::new();
+            let mut sequences = Vec::new();
+            let mut names = Vec::new();
+            let mut arguments = String::new();
+            let mut terminals = 0;
+            while let Some(chunk) = stream.next().await {
+                let chunk = chunk?;
+                terminals += usize::from(chunk.finish_reason.is_some());
+                body.push_str(chunk.delta.content.as_deref().unwrap_or_default());
+                for block in chunk.delta.assistant_blocks.as_deref().unwrap_or_default() {
+                    sequences.push(block.sequence);
+                    if let Some(delta) = projection.observe_block(block)?
+                        && block.phase == AssistantPhase::Reasoning
+                    {
+                        displayed.push_str(&delta.text);
+                    }
+                }
+                for call in chunk.delta.tool_calls.as_deref().unwrap_or_default() {
+                    if let Some(function) = call.function.as_ref() {
+                        if let Some(name) = function.name.as_deref() {
+                            names.push(name.to_string());
+                        }
+                        arguments.push_str(function.arguments.as_deref().unwrap_or_default());
+                    }
+                }
+            }
+            assert_eq!(terminals, 1);
+            assert_eq!(
+                displayed, "摘要🙂",
+                "真实provider→当前Core7be投影不能parent先显示全摘要后才搬childprefix"
+            );
+            assert_eq!(body, "正文");
+            assert_eq!(names, vec!["inspect"]);
+            assert_eq!(arguments, "{}");
+            assert!(
+                sequences
+                    .windows(2)
+                    .all(|pair| pair.first().zip(pair.get(1)).is_none_or(|(a, b)| a < b)),
+                "重排后global sequence仍严格递增"
+            );
+            Ok::<_, ReactError>(())
+        }
+        .await;
+        if result.is_err() {
+            server.abort();
+            return result;
+        }
+        server
+            .await
+            .map_err(|error| invalid_response(error.to_string()))??;
+        result
+    }
+
+    #[tokio::test]
+    async fn real_provider_late_id_child_source_update_precedes_dependent_opaque_parent_in_public_core_projection()
+    -> Result<()> {
+        tokio::time::timeout(Duration::from_secs(10), provider_to_core(false))
+            .await
+            .map_err(|_| invalid_response("HTTP fixture timeout"))??;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn known_id_provider_sequence_keeps_public_core_reasoning_and_tool_output_once()
+    -> Result<()> {
+        tokio::time::timeout(Duration::from_secs(10), provider_to_core(true))
+            .await
+            .map_err(|_| invalid_response("HTTP fixture timeout"))??;
         Ok(())
     }
 }
