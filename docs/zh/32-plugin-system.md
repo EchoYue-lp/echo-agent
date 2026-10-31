@@ -225,3 +225,19 @@ coordinator.enable(&mut agent, &id).await?;
 ## 设计依据
 
 本设计复用 Agent Plugins 1.0 官方的 [manifest](https://agent-plugins.org/plugin-authors/manifest)、[Skills](https://agent-plugins.org/plugin-authors/skills)、[MCP](https://agent-plugins.org/plugin-authors/mcp-servers) 和 [loading](https://agent-plugins.org/client-implementers/loading-and-discovery) 约定。embedding application 作为本地个人助理，额外组件有意采用固定根位置，不引入客户端扩展 namespace。
+
+## Stage0：未启用 LSP 时的冻结声明诊断
+
+在未启用 `lsp` feature 的 Framework 构建中，`PluginIntegrator::prepare` 仍冻结插件的
+`lsp.yaml` 声明，并沿既有 `PreparedPluginSet`、identity、generation、cache 和 rollback
+owner 保存这份输入。声明存在且来源是普通文件时，准备结果保留原文并记录组件级 Warning，
+明确说明该组件已冻结但当前构建不能应用它；目录、断链、循环链接、非法 UTF-8、来源消失
+和不可读输入记录带插件身份、组件名与路径的 Error。真正没有声明时继续保持可适用且不产生
+LSP 诊断。
+
+这条路径复用 `PluginPreparationDiagnostic`，不新增 decoder、执行器、状态权威、wire mapper
+或第二份 prepared cache。健康的 Skill、Hook、MCP 和 Subagent 组件继续独立准备；启用
+`lsp` feature 的原有冻结与应用路径不变。该说明只描述 Framework 的通用冻结事实，不代替
+EKO 产品退役文案，也不宣称 A2A/LSP 已删除、消费者已进 main、Source/final、CI、native
+或发布已经完成。Stage0 绑定和待验范围见 ADR0090 与
+`.echo-semantic/evidence/evidence.stage0-generic-diagnostics.md`。
