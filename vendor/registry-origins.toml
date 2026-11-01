@@ -18,3 +18,15 @@ name = "docx-rs"
 version = "0.4.22"
 checksum = "7fdf00e8af6d0b3e92d4bbf9b76f773d8b84ea80f310324ad16cbdc2e653e02c"
 manifest = "vendor/docx-rs-0.4.22/Cargo.toml"
+
+[[package]]
+name = "polars-arrow"
+version = "0.55.2"
+checksum = "c5ab55460ca2553d1a2bbaf2046998cfbbb685bc18d1e168b4367b63301eb271"
+manifest = "vendor/polars-arrow-0.55.2/Cargo.toml"
+
+[[package]]
+name = "polars-parquet"
+version = "0.55.2"
+checksum = "d33a17979d2afa0309437478662cf996361a6e1768bf467db82bd4f4a9443064"
+manifest = "vendor/polars-parquet-0.55.2/Cargo.toml"
