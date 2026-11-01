@@ -21,7 +21,17 @@ default-members = [
     "echo-orchestration",
 ]
 resolver = "3"
-exclude = ["vendor/rust_xlsxwriter-0.82.0", "vendor/calamine-0.36.1", "vendor/docx-rs-0.4.22"]
+exclude = [
+    "vendor/rust_xlsxwriter-0.82.0",
+    "vendor/calamine-0.36.1",
+    "vendor/docx-rs-0.4.22",
+    "vendor/polars-arrow-0.55.2",
+    "vendor/polars-parquet-0.55.2",
+]
+
+[patch.crates-io]
+polars-arrow = { path = "vendor/polars-arrow-0.55.2" }
+polars-parquet = { path = "vendor/polars-parquet-0.55.2" }
 
 [package]
 name = "echo_agent"
