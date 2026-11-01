@@ -93,6 +93,14 @@ impl InstructionResolver {
             .map(|root| canonical_or_original(root))
             .filter(|root| working_dir.starts_with(root))
             .or_else(|| find_git_root(&working_dir));
+        self.resolve_at_root(working_dir, project_root)
+    }
+
+    fn resolve_at_root(
+        &self,
+        working_dir: PathBuf,
+        project_root: Option<PathBuf>,
+    ) -> ResolvedInstructions {
         let scan_root = project_root.clone().unwrap_or_else(|| working_dir.clone());
         let directories = path_from_root_to_working_dir(&scan_root, &working_dir);
 
@@ -316,9 +324,21 @@ mod tests {
         write(&parent.join("AGENTS.md"), "outside")?;
         write(&child.join("CLAUDE.md"), "local")?;
 
-        let resolved = InstructionResolver::new(&child).resolve();
+        // TMPDIR 可位于真实仓库中；直接验证 Git 探测返回 None 后的同一解析路径，
+        // 不依赖测试宿主祖先目录恰好没有 .git，也不改进程全局 cwd/env。
+        let resolved =
+            InstructionResolver::new(&child).resolve_at_root(canonical_or_original(&child), None);
         assert_eq!(resolved.project_root, None);
-        assert_eq!(resolved.sources.len(), 1);
+        let canonical_child = canonical_or_original(&child);
+        assert_eq!(
+            resolved.sources,
+            vec![InstructionSource {
+                path: canonical_child.join("CLAUDE.md"),
+                kind: "claude".to_string(),
+                precedence: 0,
+            }],
+            "无根时只读 cwd，不准把 parent 或宿主仓库指令当作本项目来源",
+        );
         assert!(resolved.content.contains("local"));
         assert!(!resolved.content.contains("outside"));
         Ok(())

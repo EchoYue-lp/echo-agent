@@ -15,7 +15,7 @@
 ## 绑定输入
 
 - 基底：F517 `51726454985fd6f064b21a7e9c539e22d494c987`，snapshot 2333 files/283 dirs；完整 source manifest：`cd8735d62a4c1170bd06f535e6694514f723f99451f30f1f2a42728aedab16a1`。
-- 唯一代码增量：`src/plugin/prepared.rs` patch `0f2fa4399c433c02a3664ff8bb3ad34090822c7938fb385cf268464790203471`，应用后源 blob `6277087c89a598e08e390077e8a9ef0a6b2fe2157418d58c10624d1aa654139a`。
+- Stage0 代码增量：`src/plugin/prepared.rs` patch `0f2fa4399c433c02a3664ff8bb3ad34090822c7938fb385cf268464790203471`，应用后源 blob `6277087c89a598e08e390077e8a9ef0a6b2fe2157418d58c10624d1aa654139a`；后续 focused 修复仅触及 `echo-core/src/project_rules.rs` private/test-only 解析分支，不改变本 ADR 的产品契约。
 - 依赖输入保持 F517 lock `f76fe10e64ec3faf062ff5bc7a66d6cd82f82cf95e989c824f40fe6f244d234c` 与 duplicate baseline `9ae90ac986f03a16df3213a777ff821e6849f40e7284fa0acc9ae5d89ca02aa3`。
 - 详细 source、focused、artifact gap 和当前 Source/final 范围见 `.echo-semantic/evidence/evidence.stage0-generic-diagnostics.md`；Map 保持 F517 基线，本候选仅以普通 Evidence 记录 Stage0 事实。
 

@@ -2,7 +2,7 @@
 schema_version: 1
 id: evidence.stage0-generic-diagnostics
 kind: evidence
-observed_at: source:bdd09d7e643442fbf798408db20f265591a7c154ca540ce98cee624b1748b644
+observed_at: source:66492a65e2a285bf2a13afedea2242dcc834f4a11d80715240c9e8db33aa0880
 source_refs:
   - src/plugin/prepared.rs
   - docs/adr/0090-a2a-lsp-retirement-contract.md
@@ -35,10 +35,10 @@ snapshot，以及 `src/plugin/prepared.rs` 的唯一 `0f2fa4399c433c02a3664ff8bb
 
 ## 已有结果与未完成门禁
 
-已有 focused 结果：fmt、8 个 no-LSP exact list/body、mcp/lsp boundary、受影响 crate mcp Clippy，及其 raw/run/control/source guard；这些结果只绑定各自 snapshot/执行 epoch。当前候选已补齐 task-scoped Source/final：
+已有 focused 结果：fmt、8 个 no-LSP exact list/body、mcp/lsp boundary、受影响 crate mcp Clippy，及其 raw/run/control/source guard；这些结果只绑定各自 snapshot/执行 epoch。原 2f812 Stage0 source/final 收据仍作为历史事实保留；当前 `project_rules.rs` 跟进后的 Source/final 与 full24 尚待重新验证：
 
-1. 保留历史 Source/final cut：`../pre-main-generic-diagnostics-20261101-r03/stage0-source-final-20261031232808879`（非当前资格）；当前资格由候选 `verification.json` 的 result/contentDigest 与外部 handoff 索引绑定。
-2. 文档/示例适用性与 staged artifact contract 的独立交接记录仍待补齐；final `verification.json` 继续记录 task contentDigest，`globalClosure=not_checked`。
+1. 保留历史 Source/final cut：`../pre-main-generic-diagnostics-20261101-r03/stage0-source-final-20261031232808879`（非当前资格）；当前新源必须重新取得 Source/final 与完整 24 步工程门禁。
+2. 当前局部 focused 复核为 `7 passed / 0 failed / 442 filtered`、natural exit `0`、warning `0`；这不冒充完整 24 步。新增 fmt/clippy 均自然退出 0：fmt raw `e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855`，fmt receipt `7bab82f17a2ebdbf1f1839446ebfd09970bb8567ff97bfb1bec460457b612bdb`，fmt check receipt `ebb9208c88b900a386038d25f3cf09369eee653f81ae56859a9e4d269b64dbfa`，echo-core Clippy raw `4d6dedc9580562c866d84d862b90230852b8afbab2712d5e0c508b6814c6a87b`，receipt `ec4d1de60b2efa82cdcbaf6a888c4b417bafadf5f58f8f1f1f97ad53f7e93ecc`。
 3. 合入 main 前的 Framework 原仓完整门禁：fmt、workspace/all-targets/all-features tests/Clippy、no-default 与独立 feature checks、精确 cargo-deny 49/107 baseline、14 policy controls、任务分支合 main 后的精确 CI。
 4. A2A/LSP 消费者先去依赖与真正 producer/consumer 原子切换仍按 ADR0090、Plan04 独立验收；本 Stage0 不修改 native event 或 producer。
 
@@ -51,12 +51,17 @@ snapshot，以及 `src/plugin/prepared.rs` 的唯一 `0f2fa4399c433c02a3664ff8bb
 
 ## 当前候选 Git 增量（Source/final 绑定输入）
 
-Root 已将 F517 archive 绑定为 Git-backed candidate；当前工作树保持 HEAD=F517、index=F517，唯一 Rust 修改仍是 `src/plugin/prepared.rs`。本次中文文档/evidence 增量仅属于该候选的未暂存交接输入：
+原始 Stage0 记录绑定的是 F517 archive，当时 HEAD/index=F517，唯一 Rust 增量为 `src/plugin/prepared.rs`；该历史事实与旧失败保持不变。当前 candidate 已是 HEAD/index=`2f8123246f51a56b6a247cdf18423df197390c50`，未暂存三路径为 `echo-core/src/project_rules.rs`、本 Evidence 与 ADR；中文插件文档仍沿用已提交内容。本次中文文档/evidence 增量仅属于当前 candidate 的未暂存交接输入：
 
 | 路径 | SHA-256 | 用途 |
 | --- | --- | --- |
-| `docs/adr/0090-a2a-lsp-retirement-contract.md` | `aac0042748f0ca29e45a9424bdb6774beb6b6cf1b854891189cfcd174c946055` | Stage0 适用边界与非目标 |
+| `docs/adr/0090-a2a-lsp-retirement-contract.md` | `0c604d049e52592ff8d259c9b782d4ab72a5b7ffc65fda6ea1e4bb1d13f355cb` | Stage0 适用边界与非目标 |
 | `docs/zh/32-plugin-system.md` | `b06c48c14830cce5362fe9b0d6ea607accff69a216939bc4c63de11c161dc319` | 中文插件系统行为说明 |
+| `echo-core/src/project_rules.rs` | `36eb36c491df8acb57aedab4190589426708386baf1cf2bf9c6ad424c9ae393b` | private/test-only discovery fixture 修复 |
 | `.echo-semantic/evidence/evidence.stage0-generic-diagnostics.md` | 由本次 Source/final 收据的 task evidence 绑定 | 当前候选 change-evidence |
+
+## focused 源码跟进
+
+当前 candidate 另有一处局部、框架 private/test-only 修复：`echo-core/src/project_rules.rs` 将既有扫描主体抽为 private `resolve_at_root`，使 nonGit 测试显式验证无根解析分支；public Git discovery、生产行为和公开 API 均保持不变。该源的 focused gate 使用同一 F517 warm target、冻结工具链和原测试合同，实际结果为 `7 passed / 0 failed / 442 filtered`、natural exit `0`、warning `0`；程序/FP/.d 与原 RED 票据分别由外部 handoff 绑定。Examples 与官网无适用变更，后续 Source/final 必须绑定当前 candidate source。
 
 这些文档路径不属于原 `cd8735…` 基础 manifest 的 Rust/运行输入；Source/final 必须把它们作为本次 Git-backed candidate 的变更证据逐项绑定。Map 保持 F517 基线；英文插件文档与 examples 保持历史/不适用结论，不创建形式英文副本或公共 API 迁移。
