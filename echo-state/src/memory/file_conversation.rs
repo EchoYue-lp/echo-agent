@@ -17,9 +17,9 @@
 //!
 //! ## Robustness
 //!
-//! - **Path-safe ids.** Conversation ids are sanitized to a filesystem-safe
-//!   segment (rejecting `/`, `\`, `..`) before joining into the path. This
-//!   prevents path-traversal (`../foo`) and accidental directory escapes.
+//! - **物理文件key有界。** 原logical id先经既有路径校验；219字节以内的
+//!   ASCII hex key保留原路径，更长的key使用完整UTF-8 id的SHA-256。
+//!   为完整u64消息generation后缀留出预算，不截断或改写会话身份。
 //! - **Corrupt JSON is an error.** A malformed record / meta file surfaces as
 //!   `MemoryError::SerializationError` rather than silently returning `None` /
 //!   an empty list (which previously looked indistinguishable from "no data").
@@ -61,6 +61,9 @@ type BoxFut<'a, T> = BoxFuture<'a, Result<T>>;
 const SEARCH_FILTER_WORDS: usize = 64;
 const MAX_PROJECTION_EPOCH: u64 = i64::MAX as u64;
 const DELETE_RECEIPT_RETENTION: usize = 32;
+// ASCII文件key的字节预算：为.messages.、完整u64 generation和.jsonl预留36字节。
+// 短key保持现有路径；atomic_write的独立短临时名不再消耗目标basename预算。
+const MAX_CONVERSATION_FILE_KEY_BYTES: usize = 219;
 
 /// One conversation manifest plus messages loaded from its committed log.
 ///
@@ -658,7 +661,18 @@ impl FileConversationStore {
     fn read_manifest(&self, conversation_id: &str) -> Result<Option<ConversationRecord>> {
         let path = self.conv_path(conversation_id)?;
         match std::fs::read_to_string(&path) {
-            Ok(content) => Self::parse_manifest(&path, &content).map(Some),
+            Ok(content) => {
+                let record = Self::parse_manifest(&path, &content)?;
+                // 固定哈希key只是物理地址；原logical id仍是记录身份权威。
+                // 本地文件串位或实现错误不能把另一条记录当作本次请求返回。
+                if record.conversation.conversation_id != conversation_id {
+                    return Err(MemoryError::SerializationError(
+                        "conversation manifest identity does not match the requested id".into(),
+                    )
+                    .into());
+                }
+                Ok(Some(record))
+            }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
             Err(error) => Err(MemoryError::IoError(format!(
                 "read conversation {conversation_id}: {error}"
@@ -2276,8 +2290,14 @@ fn safe_segment(id: &str) -> Result<String> {
     if id == "_meta" {
         return Err(MemoryError::Unsupported("conversation id is reserved: _meta".into()).into());
     }
-    echo_core::utils::fs::encode_path_segment_identity(id)
-        .map_err(|error| MemoryError::Unsupported(error.to_string()).into())
+    let encoded = echo_core::utils::fs::encode_path_segment_identity(id)
+        .map_err(|error| MemoryError::Unsupported(error.to_string()))?;
+    // encoded仅含ASCII；此处衡量的是文件名字节数，不截断UTF-8 logical id。
+    if encoded.len() <= MAX_CONVERSATION_FILE_KEY_BYTES {
+        Ok(encoded)
+    } else {
+        Ok(format!("sha256-{:x}", Sha256::digest(id.as_bytes())))
+    }
 }
 
 fn is_message_log_file_name(file_name: &str) -> bool {
@@ -2295,6 +2315,287 @@ fn is_message_log_file_name(file_name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn long_scheduled_id_preserves_history_through_append_replace_and_cleanup() -> TestResult
+    {
+        let base = tmp_base();
+        let id = format!(
+            "cron:ae3a72d3-21d2-4830-8e0b-21e603ff9622:cron-scheduled:{}",
+            "4".repeat(64)
+        );
+        assert_eq!(id.len(), 121); // 此原协议样例为ASCII，核其完整字节长度。
+        let store = FileConversationStore::new(&base)?;
+        store
+            .create_conversation(new_conv(&id, Some("scheduled history")))
+            .await?;
+        store
+            .save_messages(&id, &[stored("user", "原完整自动输入🙂")])
+            .await?;
+        let mut transcript = store.get_messages(&id).await?;
+        transcript.push(stored("assistant", "自动回答原文"));
+        store.save_messages(&id, &transcript).await?;
+        let before = log_meta(&manifest(&store, &id)?)?;
+        assert_eq!(before.generation, 1, "纯增长继续使用原append机制");
+        let original_log = store.message_log_path(&id, before.generation)?;
+        let orphan = store.message_log_path(&id, before.generation.saturating_add(1))?;
+        std::fs::write(&orphan, b"uncommitted replacement")?;
+        drop(store);
+
+        let reopened = FileConversationStore::new(&base)?;
+        assert!(!orphan.exists(), "原cleanup仍只清无引用generation");
+        let conversation = reopened
+            .get_conversation(&id)
+            .await?
+            .ok_or_else(|| std::io::Error::other("scheduled conversation missing after reopen"))?;
+        assert_eq!(conversation.conversation_id, id);
+        let listed = reopened
+            .list_conversations(ConversationFilter::default())
+            .await?;
+        assert_eq!(listed.len(), 1);
+        assert_eq!(
+            listed.first().map(|item| item.conversation_id.as_str()),
+            Some(id.as_str())
+        );
+        let loaded = reopened.get_messages(&id).await?;
+        assert_eq!(loaded.len(), 2);
+        assert_eq!(
+            loaded
+                .first()
+                .and_then(|message| message.content.as_deref()),
+            Some("原完整自动输入🙂")
+        );
+        assert_eq!(
+            loaded.get(1).and_then(|message| message.content.as_deref()),
+            Some("自动回答原文")
+        );
+        reopened
+            .save_messages(&id, &[stored("user", "替换后的完整历史🧭")])
+            .await?;
+        let replaced = log_meta(&manifest(&reopened, &id)?)?;
+        assert!(replaced.generation > before.generation);
+        assert!(!original_log.exists());
+        drop(reopened);
+        let final_store = FileConversationStore::new(&base)?;
+        let final_messages = final_store.get_messages(&id).await?;
+        assert_eq!(final_messages.len(), 1);
+        assert_eq!(
+            final_messages
+                .first()
+                .and_then(|message| message.content.as_deref()),
+            Some("替换后的完整历史🧭")
+        );
+        assert_eq!(
+            final_store
+                .get_conversation(&id)
+                .await?
+                .map(|conversation| conversation.conversation_id),
+            Some(id)
+        );
+        drop(final_store);
+        std::fs::remove_dir_all(base)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn existing_manual_hex_history_reopens_without_rekeying_or_orphan_loss() -> TestResult {
+        let base = tmp_base();
+        let conversation_dir = base.join("conversations");
+        std::fs::create_dir_all(&conversation_dir)?;
+        let id = "cron:ae3a72d3-21d2-4830-8e0b-21e603ff9622:cron-manual:2d39969c-a7e8-435a-86d4-d806249964ff:1";
+        let legacy_key = echo_core::utils::fs::encode_path_segment_identity(id)?;
+        assert_eq!(legacy_key.len(), 187); // lossless ASCII key的字节数。
+        // 直接布置已有hex/current-schema原件；不能由新路径writer先写后读来假验旧历史。
+        let messages = [
+            stored("user", "已有手动输入"),
+            stored("assistant", "已有手动回答"),
+        ]
+        .into_iter()
+        .zip([2_i64, 3_i64])
+        .map(|(mut message, message_id)| {
+            message.id = Some(message_id);
+            message.conversation_id = id.to_string();
+            message.created_at = now_rfc3339();
+            message
+        })
+        .collect::<Vec<_>>();
+        let bytes = FileConversationStore::serialize_message_log(&messages)?;
+        let record = ConversationRecord {
+            conversation: Conversation {
+                id: 1,
+                conversation_id: id.to_string(),
+                user_id: "default".to_string(),
+                agent_type: None,
+                title: Some("already stored manual history".to_string()),
+                summary: None,
+                compressed_before_id: None,
+                created_at: now_rfc3339(),
+                updated_at: now_rfc3339(),
+            },
+            messages: Vec::new(),
+            message_log: MessageLogMeta {
+                generation: 1,
+                committed_bytes: u64::try_from(bytes.len())?,
+                message_count: messages.len(),
+                max_message_id: Some(3),
+            },
+            search_filter: None,
+            projection: Some(FileProjectionState::live()),
+        };
+        let manifest_path = conversation_dir.join(format!("{legacy_key}.json"));
+        let log_path = conversation_dir.join(format!("{legacy_key}.messages.1.jsonl"));
+        let manifest_bytes = serde_json::to_vec(&record)?;
+        std::fs::write(&manifest_path, &manifest_bytes)?;
+        std::fs::write(&log_path, &bytes)?;
+        let store = FileConversationStore::new(&base)?;
+        assert_eq!(std::fs::read(&manifest_path)?, manifest_bytes);
+        assert_eq!(std::fs::read(&log_path)?, bytes);
+        assert_eq!(store.conv_path(id)?, manifest_path);
+        assert_eq!(store.message_log_path(id, 1)?, log_path);
+        assert_eq!(
+            store
+                .list_conversations(ConversationFilter::default())
+                .await?
+                .len(),
+            1
+        );
+        let loaded = store.get_messages(id).await?;
+        assert_eq!(loaded.len(), 2);
+        assert!(loaded.iter().all(|message| message.conversation_id == id));
+        assert_eq!(
+            loaded.get(1).and_then(|message| message.content.as_deref()),
+            Some("已有手动回答")
+        );
+        let projection = store
+            .get_projection_authority(id)
+            .await?
+            .ok_or_else(|| std::io::Error::other("existing managed authority missing"))?;
+        assert_eq!(projection.epoch, 1);
+        assert_eq!(projection.revision, 1);
+        drop(store);
+        let reopened = FileConversationStore::new(&base)?;
+        assert_eq!(
+            reopened
+                .get_conversation(id)
+                .await?
+                .map(|conversation| conversation.conversation_id),
+            Some(id.to_string())
+        );
+        assert_eq!(reopened.get_messages(id).await?.len(), 2);
+        assert_eq!(std::fs::read(log_path)?, bytes);
+        drop(reopened);
+        std::fs::remove_dir_all(base)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn long_utf8_ids_keep_distinct_files_and_full_logical_identity() -> TestResult {
+        let base = tmp_base();
+        let prefix = "会话🙂".repeat(30);
+        let ids = [
+            format!("{prefix}A"),
+            format!("{prefix}a"),
+            format!("{prefix}é"),
+            format!("{prefix}e\u{301}"),
+        ];
+        let store = FileConversationStore::new(&base)?;
+        let mut paths = HashSet::new();
+        for id in &ids {
+            assert!(paths.insert(store.conv_path(id)?));
+            store.create_conversation(new_conv(id, Some(id))).await?;
+            store.save_messages(id, &[stored("user", id)]).await?;
+        }
+        drop(store);
+        let reopened = FileConversationStore::new(&base)?;
+        assert_eq!(
+            reopened
+                .list_conversations(ConversationFilter::default())
+                .await?
+                .len(),
+            ids.len()
+        );
+        for id in &ids {
+            assert_eq!(
+                reopened
+                    .get_conversation(id)
+                    .await?
+                    .map(|conversation| conversation.conversation_id),
+                Some(id.clone())
+            );
+            assert_eq!(
+                reopened
+                    .get_messages(id)
+                    .await?
+                    .first()
+                    .and_then(|message| message.content.as_deref()),
+                Some(id.as_str())
+            );
+        }
+        drop(reopened);
+        std::fs::remove_dir_all(base)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn file_key_budget_reserves_full_u64_generation_suffix() -> TestResult {
+        let base = tmp_base();
+        let store = FileConversationStore::new(&base)?;
+        let boundary = "b".repeat(108);
+        // 3+2*108=219；完整u64 generation后缀36字节，目标名恰255字节。
+        assert_eq!(safe_segment(&boundary)?.len(), 219);
+        let path = store.message_log_path(&boundary, u64::MAX)?;
+        assert_eq!(
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .map(str::len),
+            Some(255)
+        );
+        echo_core::utils::fs::atomic_write(&path, b"maximum generation payload")?;
+        assert_eq!(std::fs::read(&path)?, b"maximum generation payload");
+        let longer = "c".repeat(109);
+        assert!(safe_segment(&longer)?.len() <= 219);
+        assert!(
+            store
+                .message_log_path(&longer, u64::MAX)?
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.len() <= 255)
+        );
+        assert!(
+            FileConversationStore::next_generation(&MessageLogMeta {
+                generation: u64::MAX,
+                committed_bytes: 0,
+                message_count: 0,
+                max_message_id: None,
+            })
+            .is_err(),
+            "generation耗尽继续由原checked_add拒绝"
+        );
+        drop(store);
+        std::fs::remove_dir_all(base)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn mismatched_manifest_logical_id_is_rejected_without_rewriting() -> TestResult {
+        let base = tmp_base();
+        let store = FileConversationStore::new(&base)?;
+        let requested = "long-request-".repeat(24);
+        store
+            .create_conversation(new_conv(&requested, None))
+            .await?;
+        let path = store.conv_path(&requested)?;
+        let mut record = manifest(&store, &requested)?;
+        record.conversation.conversation_id = "different-long-logical-id-".repeat(24);
+        let wrong = serde_json::to_vec(&record)?;
+        std::fs::write(&path, &wrong)?;
+        assert!(store.get_conversation(&requested).await.is_err());
+        assert!(store.get_messages(&requested).await.is_err());
+        assert_eq!(std::fs::read(&path)?, wrong);
+        drop(store);
+        std::fs::remove_dir_all(base)?;
+        Ok(())
+    }
     use echo_core::memory::conversation::{
         ConversationProjectionCapability, ConversationProjectionEpochStatus,
         EnsureConversationProjectionRequest, ManagedConversationDelete,

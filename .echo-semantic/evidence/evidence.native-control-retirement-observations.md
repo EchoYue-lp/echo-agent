@@ -10,9 +10,9 @@ source_refs:
 - src/tools/builtin/mod.rs
 - src/agent/react/run/native_message_contract_tests.rs
 - src/agent/react/run/stream_channel.rs
-- src/state/legacy_control_history.rs
-- src/state/legacy_control_history/pending_recovery.rs
 - echo-agent-learning/tests/example_contracts/demo64_tool_pipeline.rs
+evidence_refs:
+- evidence.current-control-history-before-source
 supports:
 - finding.native-control-tools-retirement
 - asset.agent-execution-contract
@@ -81,3 +81,18 @@ Provider104和当前默认7的run/log/input SHA、原命令、成功用例行及
 FileConversationStore冷重载Signed/Opaque blocks属于after增强；旧按名称终态、critic
 预算接受、one-shot Stop与新增phase/status/model_streaming均单列有意变化。全source/
 旧402/正式Gitpin与全部loaded needs_review仍独立。
+
+## 2026-11-01：退役源码的历史读源入口
+
+两条旧路径改由既有 `evidence.current-control-history-before-source` 的语义引用读取。
+该 owner 以真实 Git `684ad1d9d0de9bff57e27e4c04f04232c6af9f1f` 保存两份原件；
+这里不再把已删除文件交给非 Git 观察身份按当前工作树直接读取，也不恢复旧实现。
+
+| 原直接源码关联 | 现有历史读源 owner | 保留的事实 |
+| --- | --- | --- |
+| `src/state/legacy_control_history.rs` | `evidence.current-control-history-before-source` / Git684 | 原 epoch08 Legacy17 工程观察保持历史范围 |
+| `src/state/legacy_control_history/pending_recovery.rs` | `evidence.current-control-history-before-source` / Git684 | 原 epoch08 Pending22 工程观察保持历史范围 |
+
+本次只迁移历史关联的入口；原 `observed_at=source:69225014cbf5d5b28fa8e8bff9fd368792c1ad199efbb8afb55b5b688f01ac5f`、
+命令、原结果、失败与 profile 均保持。Git684 两旧源与原 epoch08 input 的各自 SHA 已逐项核对，
+不据此把其它源或整份工程观察重绑 Git684，也不宣称当前 Source/Final 或新运行通过。

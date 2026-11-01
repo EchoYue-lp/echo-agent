@@ -201,11 +201,9 @@ pub fn atomic_write(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
         .parent()
         .ok_or_else(|| std::io::Error::other(format!("path has no parent: {}", path.display())))?;
     std::fs::create_dir_all(parent)?;
-    let file_name = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("data");
-    let tmp = parent.join(format!(".{file_name}.{}.tmp", uuid::Uuid::new_v4()));
+    // 同目录rename与原durability顺序不变。临时名不携带目标basename，
+    // 防止合法长文件名加UUID后超出文件系统分量上限。
+    let tmp = parent.join(format!(".atomic-{}.tmp", uuid::Uuid::new_v4()));
     let existing_permissions = std::fs::metadata(path)
         .ok()
         .map(|metadata| metadata.permissions());
@@ -916,6 +914,49 @@ fn sync_parent_directory(_parent: &Path) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_write_accepts_full_length_basename_and_preserves_permissions() -> std::io::Result<()>
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let root =
+            std::env::temp_dir().join(format!("echo-core-long-name-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root)?;
+        // 255字节是目标分量预算；临时名不能再叠加这个目标名。
+        let name = format!("{}.json", "x".repeat(250));
+        let path = root.join(&name);
+        assert_eq!(name.len(), 255); // name只含ASCII；这里核文件名字节数。
+        std::fs::write(&path, b"before")?;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+        atomic_write(&path, b"after")?;
+        assert_eq!(std::fs::read(&path)?, b"after");
+        assert_eq!(
+            std::fs::metadata(&path)?.permissions().mode() & 0o777,
+            0o600
+        );
+        let entries = std::fs::read_dir(&root)?.collect::<std::io::Result<Vec<_>>>()?;
+        assert_eq!(entries.len(), 1, "成功替换不能遗留临时文件");
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn atomic_write_failed_replace_cleans_temporary_file() -> std::io::Result<()> {
+        let root = std::env::temp_dir().join(format!(
+            "echo-core-replace-cleanup-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let target = root.join("existing-directory");
+        std::fs::create_dir_all(&target)?;
+        assert!(atomic_write(&target, b"cannot replace directory").is_err());
+        assert!(target.is_dir());
+        let entries = std::fs::read_dir(&root)?.collect::<std::io::Result<Vec<_>>>()?;
+        assert_eq!(entries.len(), 1, "原replace失败后必须清理同目录临时文件");
+        assert_eq!(entries.first().map(|entry| entry.path()), Some(target));
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
 
     #[test]
     fn durable_nested_creation_stops_at_failed_barrier_and_retries() -> std::io::Result<()> {

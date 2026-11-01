@@ -43,3 +43,17 @@ SDK owner 必须同步 checkpoint wire、Host projection、fixture 和生成的�
 旧接纳和迁移测试义务记为 `retired_by_goal`，不计通过，不新增 skip。当前 cold/history/skills/resource/trace、字段保真、工具配对、签名/Parts/approved `None` 与空数组、digest 腐坏、CAS/replay、清除不重放和 owner-first crash cuts 保留或迁为当前格式。
 
 本轮仅可执行 standalone rustfmt、隔离 apply 和只读源码审查；没有 Cargo、类型检查、测试或应用运行证据。正式接纳前应先合齐所有 owner 的调用变化，在冻结组合快照按测试分类执行真实 tests-first 和当前回归；不得借用先前主批或旧候选结果。
+
+## 文件后端物理文件名预算修复（2026-11-01，局部证据已保全）
+
+自动 Cron 的原会话 ID 为 121 字节，现有完整 hex key 为 245 字节，加消息日志后缀后 262 字节；原 atomic sibling 临时名又增加 42 字节，真实文件 API 已返回 `ENAMETOOLONG`。手动 92 字节 ID 的临时名可写，不构成自动 ID 结论。
+
+此修复属于通用 Framework 文件持久化机制。EKO 保留原 logical conversation、occurrence 和 TaskRun 身份，不缩 ID、不新建 store 或 executor，也不重放既有失败 Run。全局 `encode_utf8_path_identity` / `encode_path_segment_identity` 保持无损原契约，因为它们也用于非文件名 scope 和 runtime-state。
+
+选定方案只调整内部物理地址：FileConversationStore 沿既有路径校验后，对不超过 219 字节的 ASCII 完整 hex key 保持原路径；超过预算时使用完整 UTF-8 原 ID 的固定 SHA-256 key。219 为 255 字节文件分量扣除 `.messages.<u64最大20位>.jsonl` 的 36 字节。manifest、消息日志、append、replacement 和 orphan cleanup 继续共享同一 safe_segment，无第二 fallback、decoder 或逻辑 ID 迁移。读取 manifest 必须匹配请求的原 logical id；不靠哈希路径推断内容身份。
+
+`atomic_write` 同目录临时名改为固定 UUID 形式，不再携带目标 basename。原 existing permissions、write/sync、replace、parent fsync 以及错误后的临时文件清理顺序全部保留。既有 manual hex 路径继续可写，long key 与完整 generation 后缀获得有界物理名；没有新增公开签名、schema、依赖或配置。
+
+本地已保全 Core 22 个与 State 45 个 distinct focused 回归，共 67 个原件；manual current-format seed 另有 1 passed。初始 State 的 44 passed / 1 failed 是错误 manual seed 目录造成的历史原件，修复 fixture 后的 regression-state-r02 为 45 passed / 0 failed。正式 clean 自然退出 0，target 已移除，程序、fingerprint、`.d`、raw 与 receipt 均完成 clean 后回读。上述证据只覆盖 Framework 文件后端局部行为，不冒充自动 Cron、App99009 之外的产品运行、SDK、main CI、native 或完整工程门禁。
+
+本 ADR 小节只校准文件后端物理文件名预算修复的当前时态，不改变既有 NoCompat 退役决定、旧记录/推断恢复边界或其它 ADR 结论。examples 与官网没有新的公开调用方式或产品能力；本变更不修改 SDK、EKO 正式源码、锁、风险或 AGENTS。

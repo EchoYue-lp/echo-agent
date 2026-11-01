@@ -16,7 +16,8 @@ source_refs:
 - src/agent/react/run/pipeline.rs
 - src/agent/react/run/stream_channel.rs
 - src/state/file.rs
-- src/state/legacy_control_history/pending_recovery.rs
+evidence_refs:
+- evidence.current-control-history-before-source
 supports:
 - finding.native-control-tools-retirement
 - asset.agent-execution-contract
@@ -84,7 +85,8 @@ scenario_results:
     status: matched
     source_refs:
     - src/state/file.rs
-    - src/state/legacy_control_history/pending_recovery.rs
+    evidence_refs:
+    - evidence.current-control-history-before-source
     before_evidence_ref: evidence.native-control-retirement-before-source
     basis: before source trace + original actual after tests; limited invariant only
     actual_after_cases:
@@ -262,3 +264,22 @@ SDK newPin、native/MainCI/Goal仍另验。before源码不冒before执行；afte
 锁内record-preflight再次核验。因此HEAD已保存后，正常预检无法同时把原Outcome
 0e4当currentbase。本轮如实记录该外部base/HEAD绑定限制，不改工具、不换HEAD、
 不造源码副本、不清unknown；完整历史删除与保留面资格继续保原失败/已验证边界。
+
+## 2026-11-01：退役源码的历史关联入口
+
+顶层及 `cas-revision-fence` 中的 pending 源码关联迁入既有 `evidence_refs`，由
+`evidence.current-control-history-before-source` 按其自身 Git
+`684ad1d9d0de9bff57e27e4c04f04232c6af9f1f` 读取历史原件。
+该路径不再被非 Git `observed_at` 解释为当前工作树源码；原 CAS 场景仍直接引用
+`src/state/file.rs`，仍只比较既有 revision/epoch fence 共同不变量。
+
+| 原关联位置 | 原关联路径 | 现有历史读源 owner |
+| --- | --- | --- |
+| 顶层 `source_refs` | `src/state/legacy_control_history/pending_recovery.rs` | `evidence.current-control-history-before-source` / Git684 |
+| `cas-revision-fence.source_refs` | `src/state/legacy_control_history/pending_recovery.rs` | 同一 owner / Git684；场景限制仍将 pending 恢复与 raw archive 列为新增适配 |
+
+这只调整历史关联的读取入口。原 `observed_at=source:69225014cbf5d5b28fa8e8bff9fd368792c1ad199efbb8afb55b5b688f01ac5f`、
+`before_revision`、`after_revision=task:99e4f0c8c8bef3b3fbb171f3cb4b645e39ac1f3f98d67b715963c4ead0ff3905`、
+六个场景的名称、matched 状态、basis、case、limitations、命令、原结果与 profile 均保持。
+旧六项 Eq 不续签为当前行为验收，不以 current-control 九项 Eq 取代它，也不把两文件之外的
+旧工程输入整体重绑到 Git684。原源码关联与本次迁移关系并存于上述表和保全原件中。

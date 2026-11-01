@@ -8,7 +8,7 @@ observed_at: e5372b8ca3dc308ce8dde4a0092ea58b8d7dd21d
 boundary_refs: [boundary.context-memory]
 behavior_refs: [behavior.context-memory-lifecycle]
 rule_refs: [rule.context-persistence-separation]
-evidence_refs: [evidence.agent-context-execution, evidence.persistence-observation, evidence.high-risk-audit-frontier, evidence.framework-concept-navigation, evidence.transcript-projection-settlement-repair, evidence.transcript-projection-settlement-verification, evidence.managed-import-generation-repair, evidence.checkpoint-plan-authority-repair, evidence.checkpoint-plan-authority-verification, evidence.memory-provenance-authority-repair, evidence.memory-provenance-authority-verification, evidence.compacted-context-projection-repair]
+evidence_refs: [evidence.agent-context-execution, evidence.persistence-observation, evidence.high-risk-audit-frontier, evidence.framework-concept-navigation, evidence.transcript-projection-settlement-repair, evidence.transcript-projection-settlement-verification, evidence.managed-import-generation-repair, evidence.checkpoint-plan-authority-repair, evidence.checkpoint-plan-authority-verification, evidence.memory-provenance-authority-repair, evidence.memory-provenance-authority-verification, evidence.compacted-context-projection-repair, evidence.framework-conversation-filename-repair]
 finding_refs: [finding.transcript-projection-settlement, finding.transcript-generation-runtime-identity, finding.checkpoint-current-plan-orphan-authority, finding.pre-compaction-memory-trust-provenance, finding.runtime-token-limit-explicit-publication, finding.compacted-transcript-retained-ordinals, finding.canonical-root-system-refresh]
 audit_refs: [audit.context-memory.data-durability, audit.transcript-generation-runtime-identity-rereview, audit.transcript-projection-settlement-rereview, audit.checkpoint-plan-authority-rereview, audit.memory-provenance-authority-rereview]
 related_map_refs: [map.agent-session-turn, map.observation-persistence-delivery, map.eval-evolution]
@@ -147,3 +147,9 @@ scope/epoch/revision及close admission派生恢复后继。它们不新增Store/
 为实际证据，epoch08实施不变关系由发布5908记载。pending_recovery测试模块的
 `AdmittedRecoveryStore`只委托真实File CAS以观察已准入的物理任务，不是生产Store。
 不把历史observed_at/未知项改为当前已验，也不宣称新test profile重跑了旧全套。
+
+## 当前文件后端物理文件名预算修复（限域）
+
+`evidence.framework-conversation-filename-repair` 绑定本仓 FileConversationStore 的物理文件名预算与 atomic_write 临时名局部修复。它关联现有 `asset.conversation-store`、`behavior.context-memory-lifecycle`、`rule.context-persistence-separation` 和 `rule.fact-projection-separation`，只补充本次三路径的关系与证据入口。
+
+本关系不新造 `asset.atomic-write`，不升级既有 Behavior 状态，不改已有场景、unknown、observed_at 或退役结论；自动 Cron、App/SDK/main CI、native 和完整工程门禁仍按 Evidence 限制分列。
