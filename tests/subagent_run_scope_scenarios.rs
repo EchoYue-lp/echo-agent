@@ -405,3 +405,217 @@ async fn mismatched_execution_owner_preserves_guidance_without_constructing_a_fa
     );
     Ok(())
 }
+
+#[tokio::test]
+async fn future_attempt_guidance_reaches_only_its_original_run_and_attempt_model() -> Result<()> {
+    fn attempt_identity(run: &str, attempt: u32) -> Result<SubagentAttemptIdentity> {
+        // 各 Run/attempt 复用原 claim 文本，只由 TaskClaim 原公式派生 execution。
+        let claim = TaskClaim {
+            claim_id: "fixed-claim".into(),
+            revision: 1,
+            attempt,
+            spec_hash: "fixed-spec".into(),
+        };
+        SubagentAttemptIdentity::for_runtime_scope(
+            SCOPE,
+            run,
+            TASK,
+            claim.execution_id(run, TASK),
+            claim.attempt,
+        )
+        .map_err(|error| ReactError::Other(error.to_string()))
+    }
+
+    let instructions = [
+        ("run-a", 1, "甲本次唯一指导"),
+        ("run-b", 1, "乙本次唯一指导"),
+        ("run-a", 2, "甲下次唯一指导"),
+        ("run-b", 2, "乙下次唯一指导"),
+    ];
+    for mode in [
+        ExecutionMode::Sync,
+        ExecutionMode::Fork,
+        ExecutionMode::Teammate,
+    ] {
+        let (registry, executor, observations, entered, release) = harness().await?;
+        let mut events = registry.event_bus().subscribe();
+        for (run, attempt, instruction) in instructions {
+            if attempt != 1 {
+                continue;
+            }
+            executor
+                .queue_guidance_scoped(SCOPE, run, TASK, attempt, instruction)
+                .map_err(|error| ReactError::Other(error.to_string()))?;
+        }
+
+        for attempt in [1, 2] {
+            if attempt == 2 {
+                let factories_before = observations.factories.load(Ordering::SeqCst);
+                let mut wrong_owner = request("run-a", mode.clone());
+                if let Some(runtime) = wrong_owner.runtime_context.as_mut() {
+                    runtime.execution_id = Some(attempt_identity("run-a", 1)?.execution_id);
+                }
+                let refused = executor
+                    .dispatch_background_attempt(wrong_owner, attempt_identity("run-a", 2)?)
+                    .await;
+                let rejected = refused.is_err();
+                // 负控若意外准入，先回收其原 owner，再报告失败；不留下模型等待。
+                let cleanup = match refused {
+                    Ok(handle) => {
+                        release.add_permits(1);
+                        join_original(&handle, &release).await
+                    }
+                    Err(_) => Ok(()),
+                };
+                cleanup?;
+                assert!(
+                    rejected,
+                    "attempt 1 execution cannot own attempt 2 guidance"
+                );
+                assert_eq!(
+                    observations.factories.load(Ordering::SeqCst),
+                    factories_before
+                );
+            }
+
+            let mut handles = Vec::new();
+            let mut admission_error = None;
+            for run in ["run-a", "run-b"] {
+                let mut original = request(run, mode.clone());
+                original
+                    .task
+                    .push_str(&format!("; original-attempt:{attempt}"));
+                match executor
+                    .dispatch_background_attempt(original, attempt_identity(run, attempt)?)
+                    .await
+                {
+                    Ok(handle) => handles.push(handle),
+                    Err(error) => admission_error = Some(error),
+                }
+            }
+            let entered_result =
+                tokio::time::timeout(Duration::from_secs(2), entered.acquire_many(2))
+                    .await
+                    .map_err(|_| {
+                        ReactError::Other("two exact-attempt model requests did not enter".into())
+                    })
+                    .and_then(|permit| permit.map_err(|error| ReactError::Other(error.to_string())))
+                    .map(|permit| permit.forget());
+            let mut future_queue_error = None;
+            if attempt == 1 {
+                // 原 attempt 1 已进入真实模型等待，未来指导只能留给 attempt 2。
+                for (run, expected_attempt, instruction) in instructions {
+                    if expected_attempt == 2
+                        && let Err(error) = executor.queue_guidance_scoped(
+                            SCOPE,
+                            run,
+                            TASK,
+                            expected_attempt,
+                            instruction,
+                        )
+                    {
+                        future_queue_error = Some(ReactError::Other(error.to_string()));
+                    }
+                }
+            }
+            let requests = observations
+                .requests
+                .lock()
+                .map(|requests| requests.clone())
+                .map_err(|error| ReactError::Other(error.to_string()));
+            let active = registry.control_registry().active_snapshot(8);
+            let factories_before_release = observations.factories.load(Ordering::SeqCst);
+            let late_guidance_rejected = executor
+                .queue_guidance_scoped(SCOPE, "run-a", TASK, attempt, "不得重放的迟到指导")
+                .is_err();
+            let old_attempt = executor
+                .dispatch_background_attempt(
+                    request("run-a", mode.clone()),
+                    attempt_identity("run-a", 1)?,
+                )
+                .await;
+            let old_attempt_rejected = old_attempt.is_err();
+            if let Ok(unexpected) = old_attempt {
+                handles.push(unexpected);
+            }
+            // 两个原模型屏障均已进入后才放行；仍用既有原join/5秒及一次消费校验。
+            release.add_permits(handles.len());
+            let mut join_error = None;
+            for handle in &handles {
+                if let Err(error) = join_original(handle, &release).await {
+                    join_error = Some(error);
+                }
+            }
+            if let Some(error) = admission_error.or(join_error).or(future_queue_error) {
+                return Err(error);
+            }
+            entered_result?;
+            let requests = requests?;
+            let expected_count = if attempt == 1 { 2 } else { 4 };
+            assert_eq!(handles.len(), 2);
+            assert_eq!(active.len(), 2);
+            assert_eq!(factories_before_release, expected_count);
+            assert_eq!(requests.len(), expected_count);
+            assert!(late_guidance_rejected && old_attempt_rejected);
+            assert!(registry.control_registry().active_snapshot(8).is_empty());
+            for (run, expected_attempt, instruction) in instructions {
+                let run_marker = format!("original-request:{run}");
+                let attempt_marker = format!("original-attempt:{expected_attempt}");
+                let owned = requests
+                    .iter()
+                    .filter(|messages| {
+                        messages.iter().any(|text| text.contains(&run_marker))
+                            && messages.iter().any(|text| text.contains(&attempt_marker))
+                    })
+                    .collect::<Vec<_>>();
+                assert_eq!(owned.len(), usize::from(expected_attempt <= attempt));
+                for messages in owned {
+                    let text = messages.join("\n");
+                    assert_eq!(text.matches(instruction).count(), 1);
+                    for (_, _, foreign) in instructions {
+                        if foreign != instruction {
+                            assert!(!text.contains(foreign), "guidance crossed Run/attempt");
+                        }
+                    }
+                    assert!(!text.contains("不得重放的迟到指导"));
+                }
+            }
+        }
+
+        let mut expected = Vec::new();
+        for (run, attempt, _) in instructions {
+            let identity = attempt_identity(run, attempt)?;
+            expected.push((Some(run.to_string()), Some(identity.execution_id)));
+        }
+        let mut started = Vec::new();
+        let mut completed = Vec::new();
+        while let Ok(event) = events.try_recv() {
+            match event.as_ref() {
+                SubagentEvent::DispatchStarted {
+                    run_id,
+                    execution_id,
+                    conversation_id,
+                    ..
+                } => {
+                    assert_eq!(conversation_id.as_deref(), Some("same-conversation"));
+                    started.push((run_id.clone(), execution_id.clone()));
+                }
+                SubagentEvent::DispatchCompleted {
+                    run_id,
+                    execution_id,
+                    ..
+                } => {
+                    completed.push((run_id.clone(), execution_id.clone()));
+                }
+                _ => {}
+            }
+        }
+        expected.sort();
+        started.sort();
+        completed.sort();
+        assert_eq!(started, expected);
+        assert_eq!(completed, expected);
+        assert_eq!(observations.factories.load(Ordering::SeqCst), 4);
+    }
+    Ok(())
+}
