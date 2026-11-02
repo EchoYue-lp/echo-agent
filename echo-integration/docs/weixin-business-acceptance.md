@@ -48,3 +48,40 @@ cursor／ACK、Stop 与退出收尾均不新增或替换，不引入 getConfig�
 取得3通过2失败／0通过1失败的目标RED后，只采用最小wire生产补丁，再由同命令取得
 5通过／1通过的GREEN。源码、原始退出与后续保留回归分别绑定，不回填早期失败。
 静态审查不替代执行，focused与loopback HTTP结果不代表真实账号或手机Received。
+
+
+## 原 sender 错误的有界脱敏观测
+
+同一原 sendmessage 请求在错误路径补充 `echo_agent::channels::weixin::send_observation`：
+HTTP状态、原传输/读body/协议阶段、ret与errcode各自presence/type/i64、
+errmsg presence/type/字符数/SHA及有限已知公开字面，和真实响应
+`x-request-id`／`request_id` 的来源和值。未知errmsg不输出正文；完整body、
+headers、Auth、token、recipient、配置Debug均不写日志。原请求中的header值、收件身份、context与出站正文
+仅在进程内排除；本地client_id只给独立标明的SHA，不冒充provider requestId。
+缺失、类型不符、超过128字符或可能含私密内容的响应requestId整项省略，
+不截断身份、不生成替代。两个来源都出现则分开保存，不猜哪一个是权威。
+这是响应字段观测，不写入模型ProviderOutputSource，也不补造任何原生requestId。
+
+观测沿原一次HTTP producer，不新增sender、请求、重试、store或结算权威。
+原non2xx继续先返回原HTTP错误，不为读取错误body延后原第一错误；因此这种
+情况下只记实际status／原响应ID与body未捕获，errmsg明确不可得。原
+transport／chunk／size／decode错误及WeixinSendOutcome保持不变，只有
+Rejected/Unknown发一条有界诊断，Accepted不发。ret非零优先规则、
+Unknown不授权重试、CLI retryablefalse和独立通知结算均不改变。
+
+2026-11-02实际自动Cron已完成，但一次本人通知被原服务明确拒绝-2。
+旧响应没有保留HTTP status／ret或errcode的来源／errmsg／requestId；本观测
+不能追溯恢复旧body或确定该编号的业务原因。新夹具中的公开错误字面仅为
+合成测试，不证明现场context过期。手机Received仍需新的人类观察。
+
+此增量包含6个private Rust定向测试方法，覆盖真实typed拒绝码不变、
+公开字段及真实ID来源、私密内容／未知正文抑制、missing/null/错误类型/
+duplicate区分、UTF-8与长度、无HTTP／无ID／成功不产诊断，以及合法UTF-8 header/Auth原值回显抑制。
+2026-11-02后继具名focused已真实list并通过这6个方法、根6个原POST→scoped
+EnvFilter/fmt-writer集成方法，以及原3个ACK/Unknown方法，均0失败/0忽略；根6方法
+内部覆盖16个回环场景，不计为16个selected。每次原请求数1、server实际join、默认
+filter捕获WARN、严格filter仍有HTTP及隐私负控均实际通过。两处Clippy条件链修复后
+上述集合重新通过，定向Clippy零警告、整仓fmt write/check自然0。
+这些是合成回环及测试writer资格，不是EKO app.log启动、真实微信服务或手机实收。该变化只增加框架
+通道内部诊断，没有public API或examples调用形状变化；官网无需先宣称
+手机投递改善，后继真实服务与应用验收按其独立结果补齐。

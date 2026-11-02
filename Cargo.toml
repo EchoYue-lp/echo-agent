@@ -148,6 +148,8 @@ tracing-opentelemetry = { version = "0.28", optional = true }
 rusqlite = { version = "0.32.1", features = ["bundled"], optional = true }
 
 [dev-dependencies]
+# 根集成测试复用原回环客户端能力；resolver 3 将 dev 特性与生产构建隔离。
+echo_integration = { version = "0.2.0", path = "echo-integration", features = ["channel-test-support"] }
 # Test-only local OTLP collector; these exact versions already exist in the lockfile.
 opentelemetry-proto = { version = "=0.27.0", default-features = false, features = ["gen-tonic", "trace", "metrics", "with-serde"] }
 tonic = { version = "=0.12.3", features = ["transport"] }

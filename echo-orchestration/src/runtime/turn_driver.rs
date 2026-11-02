@@ -902,7 +902,38 @@ impl AgentTurnDriver {
                 _ => {}
             }
         })
-        .fuse();
+        .fuse()
+        .peekable();
+        let mut effective_identity = request.identity;
+        // 只在无持久前缀的首帧构造前绑定；原 inspect/唯一 projection 先验 Started。
+        // Peekable 保留同一 item，后继读取和拒绝投递后的 raw drain 仍由原 owner 完成。
+        if effective_identity.execution_id.is_none() && request.last_persisted_sequence == 0 {
+            let starts_native = matches!(
+                std::pin::Pin::new(&mut raw).peek().await,
+                Some(Ok(AgentEvent::ExecutionStatus(status)))
+                    if !status.adapter_generated
+                        && status.status == echo_core::agent::ExecutionStatusKind::Started
+            );
+            if starts_native {
+                let mut projection = source_projection
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner());
+                if projection.1.is_none() {
+                    let execution = projection
+                        .0
+                        .execution_id()
+                        .map(echo_core::agent::ExecutionId::new);
+                    match execution {
+                        Some(Ok(execution)) => effective_identity.execution_id = Some(execution),
+                        Some(Err(error)) => {
+                            // 沿原首因槽收敛，不能提前返回并 drop 已打开的 raw source。
+                            projection.1.get_or_insert(error);
+                        }
+                        None => {}
+                    }
+                }
+            }
+        }
         // 复用已核验的原 source projection；主投递与 raw drain 固定同一首次原因。
         // delivery 只描述 sink，不能覆盖真实 native 取消/失败或更早 producer 原因。
         let source_terminal_cause = || -> echo_core::error::Result<Option<TurnOutcome>> {
@@ -938,7 +969,7 @@ impl AgentTurnDriver {
         let mut observation = None;
         let mut stream = envelope_event_stream_after(
             raw.by_ref().boxed(),
-            request.identity,
+            effective_identity,
             request.last_persisted_sequence,
         );
         while let Some(item) = stream.next().await {
@@ -1780,7 +1811,7 @@ mod tests {
         // 同一脚本 source 显式发布 Started / Settled，正文不决定完成。
         assert_delivery_trace(
             &envelopes,
-            &id,
+            &id.clone().with_execution_id("scripted")?,
             0,
             &["started", "usage", "final_answer", "settled"],
         )?;
@@ -2059,8 +2090,15 @@ mod tests {
             } else {
                 &["started", "final_answer", "settled"]
             };
-            assert_delivery_trace(&envelopes, &id, 0, expected)
-                .map_err(|error| error.to_string())?;
+            assert_delivery_trace(
+                &envelopes,
+                &id.clone()
+                    .with_execution_id("scripted")
+                    .map_err(|error| error.to_string())?,
+                0,
+                expected,
+            )
+            .map_err(|error| error.to_string())?;
             assert_eq!(
                 receipt.last_event_sequence,
                 if at_projection { 2 } else { 3 },
@@ -2148,7 +2186,12 @@ mod tests {
             } else {
                 &["started", "error"]
             };
-            assert_delivery_trace(&envelopes, &id, 0, expected)?;
+            assert_delivery_trace(
+                &envelopes,
+                &id.clone().with_execution_id("scripted")?,
+                0,
+                expected,
+            )?;
             if !before_error {
                 assert!(
                     matches!(envelopes.last().map(|event| &event.payload), Some(AgentEvent::Error { failure, .. }) if failure == &producer_failure)
@@ -2255,7 +2298,12 @@ mod tests {
             .envelopes
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        assert_delivery_trace(&envelopes, &id, 0, &["started", "final_answer", "settled"])?;
+        assert_delivery_trace(
+            &envelopes,
+            &id.clone().with_execution_id("scripted")?,
+            0,
+            &["started", "final_answer", "settled"],
+        )?;
         assert_eq!(receipt.last_event_sequence, 3);
         Ok(())
     }
@@ -2836,7 +2884,7 @@ mod tests {
                     .envelopes
                     .lock()
                     .unwrap_or_else(|error| error.into_inner()),
-                &id,
+                &id.clone().with_execution_id("original-observed-attempt")?,
                 0,
                 held_trace,
             )?;
@@ -2883,7 +2931,7 @@ mod tests {
                     .envelopes
                     .lock()
                     .unwrap_or_else(|error| error.into_inner()),
-                &id,
+                &id.clone().with_execution_id("original-observed-attempt")?,
                 0,
                 &expected,
             )?;
@@ -2997,7 +3045,7 @@ mod tests {
                             .envelopes
                             .lock()
                             .unwrap_or_else(|error| error.into_inner()),
-                        &id,
+                        &id.clone().with_execution_id("original-observed-attempt")?,
                         0,
                         &expected,
                     )?;
@@ -3037,7 +3085,7 @@ mod tests {
                             .envelopes
                             .lock()
                             .unwrap_or_else(|error| error.into_inner()),
-                        &id,
+                        &id.clone().with_execution_id("original-observed-attempt")?,
                         0,
                         &expected,
                     )?;
@@ -3261,7 +3309,7 @@ mod tests {
                 .envelopes
                 .lock()
                 .unwrap_or_else(|error| error.into_inner()),
-            &id,
+            &id.clone().with_execution_id("native-cancel-tail")?,
             0,
             &["started", "assistant"],
         )?;
@@ -3539,7 +3587,7 @@ mod tests {
         assert_eq!(receipt.last_event_sequence, 5);
         assert_delivery_trace(
             &sink.envelopes.lock().await,
-            &id,
+            &id.clone().with_execution_id("scripted")?,
             0,
             &[
                 "started",
@@ -3636,7 +3684,7 @@ mod tests {
         ));
         assert_delivery_trace(
             &envelopes,
-            &id,
+            &id.clone().with_execution_id("scripted")?,
             0,
             &["started", "usage", "assistant", "final_answer", "settled"],
         )?;
@@ -3756,7 +3804,7 @@ mod tests {
                     .envelopes
                     .lock()
                     .unwrap_or_else(|error| error.into_inner()),
-                &id,
+                &id.clone().with_execution_id("native-cancel-tail")?,
                 0,
                 &["started", "assistant"],
             )?;
@@ -3810,7 +3858,7 @@ mod tests {
                     .envelopes
                     .lock()
                     .unwrap_or_else(|error| error.into_inner()),
-                &id,
+                &id.clone().with_execution_id("native-cancel-tail")?,
                 0,
                 &["started", "assistant"],
             )?;
@@ -3882,6 +3930,7 @@ mod tests {
                 );
                 let cancel = CancellationToken::new();
                 let id = identity("native-first-cause")?;
+                let expected_identity = id.clone().with_execution_id("native-failure-tail")?;
                 let (request, input) = TurnRequest::new(id.clone(), "task")
                     .mode(TurnMode::Execute)
                     .cancel(cancel.clone())
@@ -3960,12 +4009,12 @@ mod tests {
                         &event.message_id,
                     )),
                     Some((
-                        &id.stream_id,
-                        &id.turn_id,
-                        &id.conversation_id,
-                        &id.run_id,
-                        &id.execution_id,
-                        &id.message_id,
+                        &expected_identity.stream_id,
+                        &expected_identity.turn_id,
+                        &expected_identity.conversation_id,
+                        &expected_identity.run_id,
+                        &expected_identity.execution_id,
+                        &expected_identity.message_id,
                     ))
                 );
                 assert_eq!(
@@ -4008,7 +4057,9 @@ mod tests {
     #[tokio::test]
     async fn native_unknown_requires_matching_owner_terminal_and_original_eof()
     -> echo_core::error::Result<()> {
-        for matching_owner in [false, true] {
+        for (matching_owner, caller_bound) in
+            [(false, false), (false, true), (true, false), (true, true)]
+        {
             let agent = TailObservationAgent {
                 terminal_execution_id: Some(if matching_owner {
                     "original-observed-attempt"
@@ -4046,8 +4097,12 @@ mod tests {
                 )],
                 ..Default::default()
             };
+            let mut request_identity = id.clone();
+            if !caller_bound {
+                request_identity.execution_id = None;
+            }
             let (request, input) =
-                TurnRequest::from_message(id.clone(), Message::user("task".to_string()))
+                TurnRequest::from_message(request_identity, Message::user("task".to_string()))
                     .mode(TurnMode::Execute)
                     .invocation(invocation)
                     .with_input_receipt();
@@ -4363,11 +4418,43 @@ mod canonical_turn_kernel_contract_tests {
             let identity =
                 EventIdentity::new("original-stream", "original-turn")?.with_run_id("run")?;
             assert!(identity.execution_id.is_none());
+            let expected_identity = identity.clone().with_execution_id("native-source")?;
             let request = TurnRequest::from_message(identity, Message::user("input".into()))
                 .mode(TurnMode::Execute);
-            let result = AgentTurnDriver
-                .drive(&agent, request, &Sink::default())
-                .await;
+            let sink = Sink::default();
+            let result = AgentTurnDriver.drive(&agent, request, &sink).await;
+            {
+                let events = sink.0.lock().unwrap_or_else(|error| error.into_inner());
+                assert_eq!(events.len(), 3);
+                assert!(events.iter().all(|event| {
+                    event.execution_id == expected_identity.execution_id
+                        && event.stream_id == expected_identity.stream_id
+                        && event.turn_id == expected_identity.turn_id
+                        && event.run_id == expected_identity.run_id
+                        && event.conversation_id == expected_identity.conversation_id
+                        && event.message_id == expected_identity.message_id
+                }));
+                assert!(matches!(events.first().map(|event| &event.payload),
+                    Some(AgentEvent::ExecutionStatus(status)) if !status.adapter_generated
+                    && status.execution_id == "native-source"
+                    && status.status == ExecutionStatusKind::Started && status.sequence == 0));
+                assert!(matches!(events.get(1).map(|event| &event.payload),
+                    Some(AgentEvent::FinalAnswer(answer)) if answer == "safe current"));
+                assert!(matches!(events.last().map(|event| &event.payload),
+                    Some(AgentEvent::ExecutionStatus(status)) if !status.adapter_generated
+                    && status.execution_id == "native-source"
+                    && status.status == ExecutionStatusKind::Settled && status.sequence == 1));
+                assert_eq!(
+                    events
+                        .iter()
+                        .map(|event| event.sequence)
+                        .collect::<Vec<_>>(),
+                    vec![1, 2, 3]
+                );
+                assert!(echo_core::agent::validate_envelope_trajectory(&events).is_empty());
+            }
+            assert_eq!(agent.physical_eof.load(Ordering::SeqCst), 1);
+            assert_eq!(agent.owner_drops.load(Ordering::SeqCst), 1);
             if foreign {
                 assert!(
                     matches!(result, Err(ReactError::ExecutionNotSettled { run_id, .. }) if run_id=="foreign-run")
@@ -4378,6 +4465,257 @@ mod canonical_turn_kernel_contract_tests {
                 );
             }
         }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn canonical_driver_resume_keeps_none_header_and_persisted_event_ids()
+    -> echo_core::error::Result<()> {
+        let identity = EventIdentity::new("resume-stream", "resume-turn")?.with_run_id("run")?;
+        let prefix = EventEnvelope::new(
+            &identity,
+            41,
+            None,
+            AgentEvent::LlmUsage {
+                model: "fixture".into(),
+                prompt_tokens: 0,
+                completion_tokens: 0,
+                total_tokens: 0,
+                cached_prompt_tokens: 0,
+                cache_creation_prompt_tokens: 0,
+                usage_reported: true,
+            },
+        )?;
+        let prefix_bytes =
+            serde_json::to_vec(&prefix).map_err(|error| ReactError::Other(error.to_string()))?;
+        let prefix_id = prefix.event_id.clone();
+        let source = NativeSource::new(vec![
+            Ok(status("resume-source", ExecutionStatusKind::Started, 0)),
+            Ok(AgentEvent::FinalAnswer("resumed body".into())),
+            Ok(status("resume-source", ExecutionStatusKind::Settled, 1)),
+        ]);
+        let sink = Sink::default();
+        let receipt = AgentTurnDriver
+            .drive(
+                &source,
+                TurnRequest::new(identity, "input")
+                    .mode(TurnMode::Execute)
+                    .last_persisted_sequence(41),
+                &sink,
+            )
+            .await?;
+        assert!(matches!(receipt.outcome, TurnOutcome::Completed));
+        assert_eq!(receipt.last_event_sequence, 44);
+        let events = sink.0.lock().unwrap_or_else(|error| error.into_inner());
+        assert!(events.iter().all(|event| event.execution_id.is_none()));
+        assert_eq!(
+            events
+                .iter()
+                .map(|event| event.sequence)
+                .collect::<Vec<_>>(),
+            vec![42, 43, 44]
+        );
+        let mut combined = vec![prefix];
+        combined.extend(events.iter().cloned());
+        assert_eq!(
+            combined.first().map(|event| &event.event_id),
+            Some(&prefix_id)
+        );
+        assert_eq!(
+            combined
+                .first()
+                .map(serde_json::to_vec)
+                .transpose()
+                .map_err(|error| ReactError::Other(error.to_string()))?,
+            Some(prefix_bytes)
+        );
+        assert!(echo_core::agent::validate_envelope_trajectory(&combined).is_empty());
+        assert_eq!(source.physical_eof.load(Ordering::SeqCst), 1);
+        assert_eq!(source.owner_drops.load(Ordering::SeqCst), 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn canonical_driver_prefix_first_never_late_binds_at_fresh_or_resume_cursor()
+    -> echo_core::error::Result<()> {
+        for cursor in [0_u64, 41] {
+            let source = NativeSource::new(vec![
+                Ok(AgentEvent::LlmUsage {
+                    model: "fixture".into(),
+                    prompt_tokens: 0,
+                    completion_tokens: 0,
+                    total_tokens: 0,
+                    cached_prompt_tokens: 0,
+                    cache_creation_prompt_tokens: 0,
+                    usage_reported: true,
+                }),
+                Ok(status("late-source", ExecutionStatusKind::Started, 0)),
+                Ok(AgentEvent::FinalAnswer("late body".into())),
+                Ok(status("late-source", ExecutionStatusKind::Settled, 1)),
+            ]);
+            let sink = Sink::default();
+            let request = TurnRequest::new(
+                EventIdentity::new("prefix-stream", "prefix-turn")?.with_run_id("run")?,
+                "input",
+            )
+            .mode(TurnMode::Execute)
+            .last_persisted_sequence(cursor);
+            let receipt = AgentTurnDriver.drive(&source, request, &sink).await?;
+            assert!(matches!(receipt.outcome, TurnOutcome::Completed));
+            assert_eq!(Some(receipt.last_event_sequence), cursor.checked_add(4));
+            let events = sink.0.lock().unwrap_or_else(|error| error.into_inner());
+            assert_eq!(events.len(), 4);
+            assert!(events.iter().all(|event| event.execution_id.is_none()));
+            assert!(matches!(
+                events.first().map(|event| &event.payload),
+                Some(AgentEvent::LlmUsage { .. })
+            ));
+            assert!(
+                matches!(events.get(1).map(|event| &event.payload), Some(AgentEvent::ExecutionStatus(status))
+                if status.status == ExecutionStatusKind::Started)
+            );
+            assert!(echo_core::agent::validate_envelope_trajectory(&events).is_empty());
+            assert_eq!(source.physical_eof.load(Ordering::SeqCst), 1);
+            assert_eq!(source.owner_drops.load(Ordering::SeqCst), 1);
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn canonical_driver_explicit_identity_keeps_match_and_original_conflict()
+    -> echo_core::error::Result<()> {
+        for cursor in [0_u64, 41] {
+            for foreign in [false, true] {
+                let execution = if foreign { "foreign-B" } else { "explicit-A" };
+                let source = NativeSource::new(vec![
+                    Ok(status(execution, ExecutionStatusKind::Started, 0)),
+                    Ok(AgentEvent::FinalAnswer("explicit body".into())),
+                    Ok(status(execution, ExecutionStatusKind::Settled, 1)),
+                ]);
+                let identity = EventIdentity::new("explicit-stream", "explicit-turn")?
+                    .with_run_id("run")?
+                    .with_execution_id("explicit-A")?;
+                let sink = Sink::default();
+                let receipt = AgentTurnDriver
+                    .drive(
+                        &source,
+                        TurnRequest::new(identity.clone(), "input")
+                            .mode(TurnMode::Execute)
+                            .last_persisted_sequence(cursor),
+                        &sink,
+                    )
+                    .await?;
+                if foreign {
+                    assert!(matches!(receipt.outcome, TurnOutcome::Failed(failure)
+                        if failure.message == "source execution does not match the admitted turn identity"));
+                    assert!(receipt.final_answer.is_none());
+                } else {
+                    assert!(matches!(receipt.outcome, TurnOutcome::Completed));
+                }
+                let events = sink.0.lock().unwrap_or_else(|error| error.into_inner());
+                assert!(
+                    events
+                        .iter()
+                        .all(|event| event.execution_id == identity.execution_id)
+                );
+                assert!(echo_core::agent::validate_envelope_trajectory(&events).is_empty());
+                assert_eq!(source.physical_eof.load(Ordering::SeqCst), 1);
+                assert_eq!(source.owner_drops.load(Ordering::SeqCst), 1);
+            }
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn canonical_driver_bad_first_item_cannot_supply_envelope_identity()
+    -> echo_core::error::Result<()> {
+        let mut generated = status("generated", ExecutionStatusKind::Started, 0);
+        if let AgentEvent::ExecutionStatus(status) = &mut generated {
+            status.adapter_generated = true;
+        }
+        let first_items = [
+            Ok(generated),
+            Ok(status("", ExecutionStatusKind::Started, 0)),
+            Ok(AgentEvent::FinalAnswer("early body".into())),
+            Err(ReactError::Other("original first error".into())),
+        ];
+        for first in first_items {
+            let source = NativeSource::new(vec![
+                first,
+                Ok(status("later-source", ExecutionStatusKind::Started, 0)),
+                Ok(AgentEvent::FinalAnswer("later body".into())),
+                Ok(status("later-source", ExecutionStatusKind::Settled, 1)),
+            ]);
+            let sink = Sink::default();
+            let receipt = AgentTurnDriver
+                .drive(
+                    &source,
+                    TurnRequest::new(
+                        EventIdentity::new("bad-stream", "bad-turn")?.with_run_id("run")?,
+                        "input",
+                    )
+                    .mode(TurnMode::Execute),
+                    &sink,
+                )
+                .await?;
+            assert!(matches!(receipt.outcome, TurnOutcome::Failed(_)));
+            assert!(receipt.final_answer.is_none());
+            let events = sink.0.lock().unwrap_or_else(|error| error.into_inner());
+            assert!(events.iter().all(|event| event.execution_id.is_none()));
+            assert_eq!(source.physical_eof.load(Ordering::SeqCst), 1);
+            assert_eq!(source.owner_drops.load(Ordering::SeqCst), 1);
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn canonical_driver_keeps_execution_per_turn_on_same_physical_source()
+    -> echo_core::error::Result<()> {
+        let source = NativeSource::new(Vec::new());
+        let mut heads = Vec::new();
+        for (turn, execution) in [("one", "source-E1"), ("two", "source-E2")] {
+            *source
+                .events
+                .lock()
+                .unwrap_or_else(|error| error.into_inner()) = vec![
+                Ok(status(execution, ExecutionStatusKind::Started, 0)),
+                Ok(AgentEvent::FinalAnswer("turn body".into())),
+                Ok(status(execution, ExecutionStatusKind::Settled, 1)),
+            ];
+            let identity = EventIdentity::new(format!("stream-{turn}"), format!("turn-{turn}"))?
+                .with_run_id("physical-run")?;
+            let sink = Sink::default();
+            let receipt = AgentTurnDriver
+                .drive(
+                    &source,
+                    TurnRequest::new(identity.clone(), "input").mode(TurnMode::Execute),
+                    &sink,
+                )
+                .await?;
+            assert!(matches!(receipt.outcome, TurnOutcome::Completed));
+            let events = sink.0.lock().unwrap_or_else(|error| error.into_inner());
+            assert_eq!(events.len(), 3);
+            assert!(
+                events
+                    .iter()
+                    .all(|event| event.execution_id.as_ref().map(|id| id.as_str())
+                        == Some(execution)
+                        && event.turn_id == identity.turn_id
+                        && event.stream_id == identity.stream_id)
+            );
+            assert!(echo_core::agent::validate_envelope_trajectory(&events).is_empty());
+            heads.push(events.first().map(|event| {
+                (
+                    event.stream_id.clone(),
+                    event.turn_id.clone(),
+                    event.execution_id.clone(),
+                )
+            }));
+        }
+        assert_ne!(heads.first(), heads.get(1));
+        assert_eq!(source.typed_calls.load(Ordering::SeqCst), 2);
+        assert_eq!(source.physical_eof.load(Ordering::SeqCst), 2);
+        assert_eq!(source.owner_drops.load(Ordering::SeqCst), 2);
         Ok(())
     }
 

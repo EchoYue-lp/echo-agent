@@ -13,6 +13,9 @@ use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 use std::time::Duration;
 
+mod send_diagnostic;
+use send_diagnostic::SendDiagnostic;
+
 const PROTOCOL_VERSION: &str = "2.4.10";
 // The first-party application version encoding is 0x00MMNNPP.
 const APP_CLIENT_VERSION: &str = "132106";
@@ -248,7 +251,11 @@ impl WeixinApi {
     }
 
     async fn execute_send(&self, request: reqwest::Request, client_id: &str) -> WeixinSendOutcome {
-        match self.execute_json::<SendResponse>(request).await {
+        let mut diagnostic = SendDiagnostic::new(&request, client_id);
+        let outcome = match self
+            .execute_json_observed::<SendResponse>(request, Some(&mut diagnostic))
+            .await
+        {
             Ok(response) => response.into_outcome(client_id),
             Err(_) => WeixinSendOutcome::Unknown {
                 client_id: client_id.to_owned(),
@@ -256,7 +263,12 @@ impl WeixinApi {
                 // query credentials, transport details, or response bodies.
                 reason: "Weixin send has no definitive platform receipt".to_owned(),
             },
+        };
+        if let Some(view) = diagnostic.error_view(&outcome) {
+            tracing::warn!(target: "echo_agent::channels::weixin::send_observation", diagnostic = %view,
+                "Weixin original send error observation");
         }
+        outcome
     }
 
     fn bot_post(
@@ -328,6 +340,15 @@ impl WeixinApi {
     }
 
     async fn execute_json<T: DeserializeOwned>(&self, request: reqwest::Request) -> Result<T> {
+        self.execute_json_observed(request, None).await
+    }
+
+    // 同一个 HTTP producer；诊断只旁读原响应，不改第一错误、接受谓词或重试。
+    async fn execute_json_observed<T: DeserializeOwned>(
+        &self,
+        request: reqwest::Request,
+        mut diagnostic: Option<&mut SendDiagnostic>,
+    ) -> Result<T> {
         let observe_poll = request.method() == reqwest::Method::POST
             && request.url().path() == "/ilink/bot/getupdates";
         let mut response = self
@@ -336,7 +357,19 @@ impl WeixinApi {
             .await
             .map_err(|error| request_error(error, "Weixin HTTPS request failed"))?;
         let http_status = response.status().as_u16();
+        if let Some(observation) = diagnostic.as_mut() {
+            observation.response(
+                http_status,
+                response
+                    .headers()
+                    .get("x-request-id")
+                    .and_then(|value| value.to_str().ok()),
+            );
+        }
         if !response.status().is_success() {
+            if let Some(observation) = diagnostic.as_mut() {
+                observation.stage("http_non_success");
+            }
             if observe_poll {
                 self.record_poll_observation(http_status, None);
             }
@@ -345,12 +378,24 @@ impl WeixinApi {
             ));
         }
         let mut bytes = Vec::new();
-        while let Some(chunk) = response
-            .chunk()
-            .await
-            .map_err(|error| request_error(error, "Weixin HTTPS response was interrupted"))?
-        {
+        loop {
+            let chunk = match response.chunk().await {
+                Ok(Some(chunk)) => chunk,
+                Ok(None) => break,
+                Err(error) => {
+                    if let Some(observation) = diagnostic.as_mut() {
+                        observation.stage("body_interrupted");
+                    }
+                    return Err(request_error(
+                        error,
+                        "Weixin HTTPS response was interrupted",
+                    ));
+                }
+            };
             if bytes.len().saturating_add(chunk.len()) > MAX_RESPONSE_BYTES {
+                if let Some(observation) = diagnostic.as_mut() {
+                    observation.stage("body_limit_exceeded");
+                }
                 return Err(protocol_error(
                     "Weixin HTTPS response exceeds the local buffer limit",
                 ));
@@ -360,8 +405,25 @@ impl WeixinApi {
         if observe_poll {
             self.record_poll_observation(http_status, Some(&bytes));
         }
-        serde_json::from_slice(&bytes)
-            .map_err(|_| protocol_error("Weixin HTTPS response has an invalid protocol payload"))
+        if let Some(observation) = diagnostic.as_mut() {
+            observation.body(&bytes);
+        }
+        match serde_json::from_slice(&bytes) {
+            Ok(value) => {
+                if let Some(observation) = diagnostic.as_mut() {
+                    observation.stage("typed_response_decoded");
+                }
+                Ok(value)
+            }
+            Err(_) => {
+                if let Some(observation) = diagnostic.as_mut() {
+                    observation.stage("invalid_protocol_payload");
+                }
+                Err(protocol_error(
+                    "Weixin HTTPS response has an invalid protocol payload",
+                ))
+            }
+        }
     }
     fn record_poll_observation(&self, http_status: u16, bytes: Option<&[u8]>) {
         if !self

@@ -126,6 +126,30 @@ native source 的 unknown 只由同一 execution 身份的运行时终态解除�
 和 foreign 终态不能代替。未提供运行时状态的旧 source 保留原兼容读取，所有路径仍等原
 EOF 才返回 receipt。这里复用同一 driver、原 input lifecycle 与 source，不增加结束总线或 owner。
 
+## Driver 首帧的执行身份与恢复游标
+
+当 caller 未提供 execution_id、last_persisted_sequence 为0，且第一原始item为唯一
+AgentOutputProjection 已验证的真实 Started、合同首因槽为空时，Driver 在首次构造
+EventEnvelope 前只读该真实 execution，固定本次流的有效头。原 inspect/fuse 之后的一项
+Peekable 只缓存同一item，不重复observe、不改变Started顺序；转换失败记原首因槽，仍保
+sink拒绝后的原raw drain、物理EOF、原计时起点和owner。此处不增加公开DTO或执行权威。
+
+caller显式身份保持原值和原冲突拒绝。None+非零游标或prefix-first流全程保None，不迟绑、
+不修改既有头或event_id；调用方不得重置cursor绕过同scope持久前缀。0只是必要输入，Driver
+不拥有历史为空的证明。同一物理source的不同turn各自建立原projection及execution，不能
+复用physical context ID。此修复只覆盖Started-first的fresh流，不承诺prefix-first历史发布。
+
+验收包含加强既有首帧测试、cursor0/41和None前缀字节/event_id不变、显式匹配/冲突、
+prefix/非法首item、同source两turn，以及既有setup/sink拒绝/held EOF和资源回收控制。
+2026-11-02的具名focused先取得原生产区下exact1新增外层身份断言的真实RED。迁移旧fresh
+测试预期后，新test-only切点再次实际NoRun/list并取得0通过/1失败/退出101；保同一整个
+tests区SHA，再采用最小生产桥取得exact1 GREEN。整个`runtime::turn_driver::`实际list55，
+运行55通过/0失败/0忽略，497过滤；原强helper、恢复41/prefix None、显式冲突和原heldEOF
+控制均保留并通过。定向Clippy零警告、整仓fmt write/check自然0，原失败与实际程序/FP/.d
+分别保存在`.echo-semantic/local/framework-native-diagnostics-focused-20261102-r01/`。
+这是Framework Driver定向资格，不替代App真实physical owner连续RunTurn、Cron、GUI、
+独立SDK、完整工程矩阵或main CI验收。
+
 ## 参考
 
 - 跨仓设计：`docs/supreme/specs/native-message-execution/design.md`
