@@ -719,6 +719,30 @@ mod stage4_e1_tests {
         }
     }
 
+    #[tokio::test]
+    async fn implicit_temperature_is_absent_from_pre_compaction_flush() -> Result<()> {
+        let llm = Arc::new(MockLlmClient::new().with_response("[]"));
+        let mut agent = ReactAgentBuilder::new()
+            .llm_client(llm.clone())
+            .system_prompt("test")
+            .token_limit(1)
+            .build()?;
+        let dir = tempfile::tempdir()?;
+        let layer = Arc::new(MemoryLayerManager::new(
+            dir.path().to_path_buf(),
+            Arc::new(InMemoryStore::new()),
+            Box::new(NullChangeLog),
+        ));
+        agent.install_memory_layer_manager(layer)?;
+        push_messages(&agent, 8).await;
+        let snapshot = AgentRunSnapshot::from_agent(&agent);
+        snapshot
+            .pre_compaction_flush(&agent.memory.context, 0)
+            .await;
+        assert_eq!(llm.all_temperatures(), vec![None]);
+        Ok(())
+    }
+
     /// When compression is imminent (low token_limit + messages), the flush
     /// LLM call runs and durable facts land in the unified store (割裂点 1/7).
     #[tokio::test]

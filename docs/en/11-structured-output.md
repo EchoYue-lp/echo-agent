@@ -306,7 +306,7 @@ let report: SalesReport = extractor_agent.extract(&raw_answer, schema).await?;
 1. **Model compatibility**: JSON response formats require a fresh, affirmative structured-output capability. Provider support helps produce valid output, but the local strict validator rejects a mismatch even if a provider ignores the hint. An explicit `Text` format is sent as the unconstrained provider default.
 2. **`additionalProperties: false`**: Always set this in your JSON Schema to prevent the model from emitting extra fields
 3. **原生模型推理**：旧 CoT 提示开关已退役。推理深度使用 `ReactAgent::set_thinking()` 配置，并由模型能力决定支持方式；结构化输出仍走原本地 Schema 校验。
-4. **Temperature**: `extract_json()` internally uses `temperature=0.0` for stable outputs. The `AgentConfig::response_format()` path uses the Agent's configured temperature
+4. **temperature**：`extract_json()` 不主动设置温度，沿用 provider/model 的原生缺省；`AgentConfig::response_format()` 的 ReAct 请求仍保留调用方显式配置的温度。通用 `chat_simple()`、Critic、摘要/增量压缩、压缩前记忆提取和后台 review 也不注入固定温度；`SimpleChatOptions::with_temperature()` 等显式 API 继续保留，并由原 provider 规则支持或明确拒绝。
 5. **Schema references**: Strict validation supports local references such as `$defs`; external HTTP/file `$ref` targets are rejected before the model call. Bundle external definitions into the supplied schema.
 
 ---

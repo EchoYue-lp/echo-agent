@@ -364,7 +364,7 @@ mod protocol_tests {
 /// Options for [`LlmClient::chat_simple_with_options`].
 #[derive(Debug, Clone)]
 pub struct SimpleChatOptions {
-    /// Sampling temperature (0.0–2.0). Defaults to `0.7`.
+    /// 可选采样温度（0.0–2.0）；默认不发送，只有调用方显式设置才提供。
     pub temperature: Option<f32>,
     /// Maximum tokens to generate. Defaults to `2048`.
     pub max_tokens: Option<u32>,
@@ -373,7 +373,7 @@ pub struct SimpleChatOptions {
 impl Default for SimpleChatOptions {
     fn default() -> Self {
         Self {
-            temperature: Some(0.7),
+            temperature: None,
             max_tokens: Some(2048),
         }
     }
@@ -413,8 +413,8 @@ pub trait LlmClient: Send + Sync {
 
     /// Convenience helper for simple text-only calls.
     ///
-    /// Accepts optional overrides via [`SimpleChatOptions`]; defaults are
-    /// `temperature: 0.7` and `max_tokens: 2048`.
+    /// 通过 [`SimpleChatOptions`] 接收显式选项；默认不提供温度，
+    /// `max_tokens` 仍为 `2048`。显式温度是否可用由原 provider 规则判断。
     fn chat_simple(&self, messages: Vec<Message>) -> BoxFuture<'_, Result<String>> {
         self.chat_simple_with_options(messages, SimpleChatOptions::default())
     }
@@ -506,6 +506,18 @@ mod client_capability_tests {
 
     struct UnknownClient;
     struct DeclaredClient;
+
+    #[test]
+    fn implicit_temperature_is_opt_in_for_simple_chat_options() {
+        assert_eq!(SimpleChatOptions::default().temperature, None);
+        assert_eq!(SimpleChatOptions::default().max_tokens, Some(2048));
+        assert_eq!(
+            SimpleChatOptions::default()
+                .with_temperature(0.25)
+                .temperature,
+            Some(0.25)
+        );
+    }
 
     impl LlmClient for UnknownClient {
         fn chat(&self, _request: ChatRequest) -> BoxFuture<'_, Result<ChatResponse>> {

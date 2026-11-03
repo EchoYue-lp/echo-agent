@@ -4913,6 +4913,95 @@ mod responses_compatibility_http_tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
 
+    async fn implicit_temperature_simple_chat_wire(provider: &str, model: &str) -> Result<()> {
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let address = listener.local_addr()?;
+        let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+        let server = tokio::spawn(async move {
+            let accepted = tokio::select! {
+                accepted = listener.accept() => Some(accepted),
+                _ = stopped => None,
+            };
+            let Some(accepted) = accepted else {
+                return Ok::<_, echo_core::error::ReactError>(None);
+            };
+            let (mut socket, _) = accepted?;
+            let body = tokio::time::timeout(Duration::from_secs(5), read_request(&mut socket))
+                .await
+                .map_err(|_| invalid_response("temperature fixture read timeout"))??;
+            let reply = response(2).to_string();
+            socket.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", reply.len()).as_bytes()).await?;
+            socket.write_all(reply.as_bytes()).await?;
+            socket.shutdown().await?;
+            Ok(Some(body))
+        });
+        let client = ResponsesClient::new(LlmConfig {
+            provider_name: Some(provider.into()),
+            api_protocol: LlmApiProtocol::Responses,
+            base_url: format!("http://{address}"),
+            api_key: "owned-dummy-key".into(),
+            model: model.into(),
+            input_modalities: echo_core::llm::ModelInputModality::all_supported(),
+            thinking_protocol: ThinkingProtocol::OpenaiReasoningEffort,
+            timeouts: echo_core::llm::LlmTimeouts::default(),
+        })?;
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            client.chat_simple(vec![Message::user("probe".into())]),
+        )
+        .await;
+        let _ = stop.send(());
+        // 两侧都收回后先保原请求首因，fixture读写错误不遮掉client错误。
+        let captured = server.await;
+        let text = result.map_err(|_| invalid_response("temperature request timeout"))??;
+        let captured =
+            captured.map_err(|_| invalid_response("temperature fixture join failed"))??;
+        assert_eq!(text, "最终回答");
+        let body = captured
+            .ok_or_else(|| invalid_response("original chat_simple never sent a request"))?;
+        assert!(
+            body.get("temperature").is_none(),
+            "default helper injected a wire sampling parameter"
+        );
+        assert_eq!(body.get("max_output_tokens"), Some(&json!(2048)));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn implicit_temperature_default_simple_chat_deepseek_reasoning_wire() -> Result<()> {
+        implicit_temperature_simple_chat_wire("deepseek", "deepseek-flash").await
+    }
+
+    #[tokio::test]
+    async fn implicit_temperature_default_simple_chat_openai_wire() -> Result<()> {
+        // 仅使用当前源码已识别的模型名；不声称这是用户现场的模型或外部API验收。
+        implicit_temperature_simple_chat_wire("openai", "gpt-5.1").await
+    }
+
+    #[tokio::test]
+    async fn implicit_temperature_explicit_simple_options_keep_provider_rejection() -> Result<()> {
+        let client = ResponsesClient::new(LlmConfig {
+            provider_name: Some("deepseek".into()),
+            model: "deepseek-flash".into(),
+            api_protocol: LlmApiProtocol::Responses,
+            base_url: "http://127.0.0.1:1".into(),
+            api_key: "owned-dummy-key".into(),
+            input_modalities: echo_core::llm::ModelInputModality::all_supported(),
+            thinking_protocol: ThinkingProtocol::OpenaiReasoningEffort,
+            timeouts: echo_core::llm::LlmTimeouts::default(),
+        })?;
+        let error = client
+            .chat_simple_with_options(
+                vec![Message::user("probe".into())],
+                echo_core::llm::SimpleChatOptions::default().with_temperature(0.25),
+            )
+            .await;
+        assert!(
+            matches!(error, Err(echo_core::error::ReactError::Llm(error)) if matches!(error.as_ref(), LlmError::SerializationError(message) if message == "Responses request: temperature cannot be honored with this reasoning configuration"))
+        );
+        Ok(())
+    }
+
     fn response(round: usize) -> Value {
         let output = match round {
             0 => json!([

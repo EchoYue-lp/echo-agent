@@ -920,7 +920,7 @@ impl crate::agent::snapshot::AgentRunSnapshot {
                 Message::system(PRE_COMPACTION_FLUSH_PROMPT.to_string()),
                 Message::user(transcript),
             ],
-            temperature: Some(0.2),
+            temperature: None,
             max_tokens: Some(2048),
             user_id: self.config.cache_user_id.clone(),
             ..Default::default()

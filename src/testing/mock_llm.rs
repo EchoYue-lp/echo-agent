@@ -84,6 +84,8 @@ pub struct MockLlmClient {
     tool_choices: Arc<Mutex<Vec<Option<crate::llm::ToolChoice>>>>,
     response_formats: Arc<Mutex<Vec<Option<crate::llm::ResponseFormat>>>>,
     tool_counts: Arc<Mutex<Vec<usize>>>,
+    #[cfg(test)]
+    temperatures: Arc<Mutex<Vec<Option<f32>>>>,
     /// Optional delay before returning each response. When set, `chat` and
     /// `chat_stream` sleep for this duration, but will return early with a
     /// Cancelled error if the request's `cancel_token` is triggered. This lets
@@ -108,6 +110,8 @@ impl MockLlmClient {
             tool_choices: Arc::new(Mutex::new(Vec::new())),
             response_formats: Arc::new(Mutex::new(Vec::new())),
             tool_counts: Arc::new(Mutex::new(Vec::new())),
+            #[cfg(test)]
+            temperatures: Arc::new(Mutex::new(Vec::new())),
             delay: None,
         }
     }
@@ -384,6 +388,14 @@ impl MockLlmClient {
             .len()
     }
 
+    #[cfg(test)]
+    pub(crate) fn all_temperatures(&self) -> Vec<Option<f32>> {
+        self.temperatures
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
     /// Clear all recorded call history (response queue is unaffected)
     pub fn reset_calls(&self) {
         self.calls.lock().unwrap_or_else(|e| e.into_inner()).clear();
@@ -433,6 +445,11 @@ enum PopResult {
 impl LlmClient for MockLlmClient {
     fn chat(&self, request: ChatRequest) -> BoxFuture<'_, Result<ChatResponse>> {
         Box::pin(async move {
+            #[cfg(test)]
+            self.temperatures
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(request.temperature);
             // Record this call
             self.tool_counts
                 .lock()

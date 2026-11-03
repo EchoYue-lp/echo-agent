@@ -305,7 +305,7 @@ let report: SalesReport = extractor_agent.extract(&raw_answer, schema).await?;
 1. **模型兼容性**：JSON 格式需要新鲜且明确的结构化输出能力事实。Provider 支持有助于生成合格输出；即使 Provider 忽略提示，本地严格校验也会拒绝不匹配值。显式 `Text` 会按未约束的默认请求发送。
 2. **`additionalProperties: false`**：JSON Schema 中建议始终设置此项，防止模型输出多余字段
 3. **原生模型推理**：旧 CoT 提示开关已退役。推理深度使用 `ReactAgent::set_thinking()` 配置，并由模型能力决定支持方式；结构化输出仍走原本地 Schema 校验。
-4. **temperature**：`extract_json()` 内部固定使用 `temperature=0.0`，保证输出稳定；`AgentConfig::response_format()` 方式仍使用 Agent 默认温度
+4. **temperature**：`extract_json()` 不主动设置温度，沿用 provider/model 的原生缺省；`AgentConfig::response_format()` 的 ReAct 请求仍保留调用方显式配置的温度。通用 `chat_simple()`、Critic、摘要/增量压缩、压缩前记忆提取和后台 review 也不注入固定温度；`SimpleChatOptions::with_temperature()` 等显式 API 继续保留，并由原 provider 规则支持或明确拒绝。
 5. **Schema 引用**：严格校验支持 `$defs` 等本地引用；外部 HTTP/文件 `$ref` 会在模型调用前拒绝。请将外部定义打包进传入的 Schema。
 
 ---
