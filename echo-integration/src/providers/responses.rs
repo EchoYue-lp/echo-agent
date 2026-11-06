@@ -38,6 +38,9 @@ use super::openai::assemble_req_header;
 use super::thinking_translate::translate_thinking_openai_compat;
 use echo_core::llm::LlmApiProtocol;
 
+mod diagnostics;
+use diagnostics::ResponsesDiagnostics;
+
 /// Client for the OpenAI Responses API.
 pub struct ResponsesClient {
     client: Arc<Client>,
@@ -312,20 +315,37 @@ impl LlmClient for ResponsesClient {
                 let timeouts = request.timeouts.unwrap_or(self.config.timeouts);
                 let cancel_token = request.cancel_token.clone();
                 let body = self.request_body(&request, true)?;
+                let mut diagnostics = ResponsesDiagnostics::start(
+                    &self.config,
+                    &body,
+                    &format!("{:?}", self.responses_dialect()?),
+                );
                 let request = self
                     .client
                     .post(&self.config.base_url)
                     .headers(self.header_map.clone())
                     .json(&body);
-                let raw_stream =
-                    stream_json_sse(request, self.config.model.clone(), timeouts, cancel_token)
-                        .await?;
+                let raw_stream = match stream_json_sse(
+                    request,
+                    self.config.model.clone(),
+                    timeouts,
+                    cancel_token,
+                )
+                .await
+                {
+                    Ok(stream) => stream,
+                    Err(error) => {
+                        diagnostics.finish("transport_start_error", true);
+                        return Err(error);
+                    }
+                };
                 Ok(adapt_responses_stream(
                     raw_stream,
                     self.config
                         .provider_name
                         .clone()
                         .unwrap_or_else(|| "openai_responses".into()),
+                    Some(diagnostics),
                 ))
             }
             .instrument(info_span!("openai_responses_stream", model = %model)),
@@ -362,6 +382,7 @@ impl LlmClient for ResponsesClient {
 fn adapt_responses_stream<S>(
     raw_stream: S,
     provider: String,
+    mut diagnostics: Option<ResponsesDiagnostics>,
 ) -> BoxStream<'static, Result<ChatChunk>>
 where
     S: futures::Stream<Item = Result<JsonSseEvent>> + Send + 'static,
@@ -370,19 +391,50 @@ where
         let mut adapter = ResponsesStreamAdapter { provider, ..Default::default() };
         futures::pin_mut!(raw_stream);
         while let Some(event) = raw_stream.next().await {
-            match event? {
+            let event = match event {
+                Ok(event) => event,
+                Err(error) => {
+                    if let Some(diagnostics) = &mut diagnostics {
+                        diagnostics.finish("transport_error", true);
+                    }
+                    Err(error)?;
+                    return;
+                }
+            };
+            match event {
                 JsonSseEvent::Done => {
-                    adapter.validate_transport_end("SSE [DONE]")?;
+                    let result = adapter.validate_transport_end("SSE [DONE]");
+                    if let Some(diagnostics) = &mut diagnostics {
+                        diagnostics.finish("transport_done", result.is_err());
+                    }
+                    result?;
                     return;
                 }
                 JsonSseEvent::Data(value) => {
-                    if let Some(chunk) = adapter.map_event(value)? {
+                    if let Some(diagnostics) = &mut diagnostics {
+                        diagnostics.event(&value, &adapter.raw_phases);
+                    }
+                    let mapped = match adapter.map_event(value) {
+                        Ok(chunk) => chunk,
+                        Err(error) => {
+                            if let Some(diagnostics) = &mut diagnostics {
+                                diagnostics.finish("adapter_error", true);
+                            }
+                            Err(error)?;
+                            return;
+                        }
+                    };
+                    if let Some(chunk) = mapped {
                         yield chunk;
                     }
                 }
             }
         }
-        adapter.validate_transport_end("SSE EOF")?;
+        let result = adapter.validate_transport_end("SSE EOF");
+        if let Some(diagnostics) = &mut diagnostics {
+            diagnostics.finish("transport_eof", result.is_err());
+        }
+        result?;
     };
     Box::pin(stream)
 }
@@ -1226,8 +1278,10 @@ enum ResponsesOutputItem {
     },
     Reasoning {
         id: String,
+        /// 不透明推理负载。部分兼容网关没有加密推理，会显式返回 `null`
+        /// 或空串；两者都表示"没有可回放的不透明内容"，不能当成协议错误。
         #[serde(default)]
-        encrypted_content: String,
+        encrypted_content: Option<String>,
         #[serde(default)]
         summary: Vec<ReasoningText>,
         #[serde(default)]
@@ -1629,11 +1683,12 @@ fn response_to_chat_for_provider(raw: Value, provider: &str) -> Result<ChatRespo
                     contents
                 });
                 require_non_empty(&id, "reasoning.id")?;
-                if !encrypted_content.is_empty() {
+                let encrypted = encrypted_content.unwrap_or_default();
+                if !encrypted.is_empty() {
                     reasoning_blocks.push(ReasoningBlock::Opaque {
                         provider: "openai_responses".to_string(),
                         id,
-                        data: encrypted_content,
+                        data: encrypted,
                         summary: summaries.clone(),
                     });
                 }
@@ -1745,7 +1800,8 @@ struct ResponsesStreamAdapter {
     closed_blocks: HashSet<String>,
     metadata_completed: HashSet<String>,
     sequence: u64,
-    observed_items: HashMap<u32, (String, String)>,
+    // 内容块事件只给出父item坐标，不声明父item类型；缺失类型保持未知。
+    observed_items: HashMap<u32, (String, Option<String>)>,
     closed_arguments: HashSet<u32>,
 }
 
@@ -2076,7 +2132,9 @@ impl ResponsesStreamAdapter {
                 .and_then(|index| output.get(index))
                 .ok_or_else(|| invalid_response("incomplete response omitted observed item"))?;
             if item.get("id").and_then(Value::as_str) != Some(id.as_str())
-                || item.get("type").and_then(Value::as_str) != Some(kind.as_str())
+                || kind
+                    .as_deref()
+                    .is_some_and(|kind| item.get("type").and_then(Value::as_str) != Some(kind))
             {
                 return Err(invalid_response(
                     "incomplete response changed observed item",
@@ -2340,7 +2398,14 @@ impl ResponsesStreamAdapter {
             .and_then(Value::as_u64)
             .and_then(|value| u32::try_from(value).ok())
         {
-            let (id, kind) = if let Some(item) = event.get("item") {
+            let (id, kind) = if matches!(
+                event_type.as_str(),
+                "response.content_part.added" | "response.content_part.done"
+            ) {
+                // 该事件的part是内容块，不是message父项；不能把reasoning父项
+                // 改猜成message。ID仍立即登记，等待output_item或明确delta绑定类型。
+                (event.get("item_id").and_then(Value::as_str), None)
+            } else if let Some(item) = event.get("item") {
                 (
                     item.get("id").and_then(Value::as_str),
                     item.get("type").and_then(Value::as_str),
@@ -2357,11 +2422,33 @@ impl ResponsesStreamAdapter {
                     }),
                 )
             };
-            if let (Some(id), Some(kind)) = (id, kind) {
+            if let Some(id) = id {
                 if let Some(previous) = self.observed_items.get(&index)
-                    && (previous.0 != id || previous.1 != kind)
+                    && (previous.0 != id
+                        || previous
+                            .1
+                            .as_deref()
+                            .zip(kind)
+                            .is_some_and(|(before, after)| before != after))
                 {
-                    return Err(invalid_response("Responses output item identity changed"));
+                    // 只记录事件类别与身份变化类型，不输出正文、arguments或完整响应；
+                    // 保留原拒绝条件，便于区分上游ID漂移和条目类型不一致。
+                    return Err(invalid_response(format!(
+                        "Responses output item identity changed (event={}, output_index={index}, id_changed={}, previous_type={}, current_type={})",
+                        event_type.chars().take(96).collect::<String>(),
+                        previous.0 != id,
+                        previous
+                            .1
+                            .as_deref()
+                            .unwrap_or("unknown")
+                            .chars()
+                            .take(64)
+                            .collect::<String>(),
+                        kind.unwrap_or("unknown")
+                            .chars()
+                            .take(64)
+                            .collect::<String>(),
+                    )));
                 }
                 if self
                     .observed_items
@@ -2372,8 +2459,13 @@ impl ResponsesStreamAdapter {
                         "Responses reused item id at different output index",
                     ));
                 }
+                let resolved_kind = kind.map(ToString::to_string).or_else(|| {
+                    self.observed_items
+                        .get(&index)
+                        .and_then(|previous| previous.1.clone())
+                });
                 self.observed_items
-                    .insert(index, (id.to_string(), kind.to_string()));
+                    .insert(index, (id.to_string(), resolved_kind));
             }
         }
         if self.request_id.is_empty() {
@@ -2425,7 +2517,9 @@ impl ResponsesStreamAdapter {
                         invalid_response("Responses completed output omitted observed item")
                     })?;
                 if item.get("id").and_then(Value::as_str) != Some(id.as_str())
-                    || item.get("type").and_then(Value::as_str) != Some(kind.as_str())
+                    || kind
+                        .as_deref()
+                        .is_some_and(|kind| item.get("type").and_then(Value::as_str) != Some(kind))
                 {
                     return Err(invalid_response(
                         "Responses completed output changed observed item",
@@ -2919,7 +3013,18 @@ impl ResponsesStreamAdapter {
 
         let call_id = required_non_empty_string(item, "call_id", "Responses function_call")?;
         let name = required_non_empty_string(item, "name", "Responses function_call")?;
-        let arguments = required_string(item, "arguments", "Responses function_call")?;
+        // `added` 只声明调用身份。OpenAI 会带一个空串，部分兼容网关直接省略
+        // 该键（参数随后由 `response.function_call_arguments.delta` 补齐）；
+        // 缺失/null 都等价于空串。完整性仍由 `item.done` 强制，不放宽终态。
+        let arguments = match item.get("arguments") {
+            None | Some(Value::Null) => "",
+            Some(Value::String(value)) => value.as_str(),
+            Some(_) => {
+                return Err(invalid_response(
+                    "Responses function_call arguments was not a string",
+                ));
+            }
+        };
         let initial_arguments = (!arguments.is_empty()).then(|| arguments.to_string());
         self.function_calls.insert(
             output_index,
@@ -3141,32 +3246,40 @@ fn tool_chunk(
 
 fn reasoning_item_done(item: &Value) -> Result<Option<ChatChunk>> {
     let id = required_non_empty_string(item, "id", "Responses reasoning item")?;
+    // `null` 与空串都表示"没有不透明负载"：兼容网关没有加密推理时会这样返回，
+    // 公开文本仍通过 reasoning_text 事件单独下发。只有出现非字符串、非 null 的
+    // 形状才是真正的协议错误。
     let data = match item.get("encrypted_content") {
-        Some(value) => value
-            .as_str()
-            .filter(|data| !data.is_empty())
-            .ok_or_else(|| {
-                invalid_response("Responses reasoning encrypted_content was empty or invalid")
-            })?,
-        None => {
-            let has_public_text = ["summary", "content"].into_iter().any(|field| {
-                item.get(field)
-                    .and_then(Value::as_array)
-                    .into_iter()
-                    .flatten()
-                    .any(|part| {
-                        part.get("text")
-                            .and_then(Value::as_str)
-                            .is_some_and(|text| !text.is_empty())
-                    })
-            });
-            if !has_public_text {
-                return Err(invalid_response(
-                    "Responses reasoning omitted both opaque data and public text",
-                ));
-            }
-            return Ok(None);
+        None | Some(Value::Null) => None,
+        Some(Value::String(value)) if value.is_empty() => None,
+        Some(Value::String(value)) => Some(value.as_str()),
+        Some(_) => {
+            return Err(invalid_response(
+                "Responses reasoning encrypted_content was not a string",
+            ));
         }
+    };
+    let Some(data) = data else {
+        // 没有不透明负载时仍要求这条 reasoning 至少带公开文本：一个
+        // `item.done` 既无不透明数据也无公开文本，说明这一轮丢了内容，
+        // 不能静默跳过（原合同保持不变）。
+        let has_public_text = ["summary", "content"].into_iter().any(|field| {
+            item.get(field)
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .any(|part| {
+                    part.get("text")
+                        .and_then(Value::as_str)
+                        .is_some_and(|text| !text.is_empty())
+                })
+        });
+        if !has_public_text {
+            return Err(invalid_response(
+                "Responses reasoning omitted both opaque data and public text",
+            ));
+        }
+        return Ok(None);
     };
     let summary = item
         .get("summary")
@@ -3667,11 +3780,10 @@ mod tests {
 
     #[test]
     fn nonstream_rejects_missing_or_empty_opaque_reasoning_identity() {
+        // 身份缺失/为空才是协议错误。
         let invalid_items = [
             json!({"type":"reasoning","encrypted_content":"encrypted"}),
             json!({"type":"reasoning","id":"","encrypted_content":"encrypted"}),
-            json!({"type":"reasoning","id":"rs_1"}),
-            json!({"type":"reasoning","id":"rs_1","encrypted_content":""}),
         ];
         for item in invalid_items {
             let result = response_to_chat(json!({
@@ -3681,6 +3793,101 @@ mod tests {
             }));
             assert!(is_invalid_response(&result));
         }
+    }
+
+    /// 兼容网关（实测 token.longshine.com 的 deepseek-v4.1-flash）在 Responses
+    /// 流里把推理条目写成 `encrypted_content: null`，思考文本放在 `content[].text`。
+    /// 这是"没有加密推理"，不是协议错误：必须转成公开推理文本并继续这一轮。
+    #[test]
+    fn reasoning_without_opaque_payload_still_accepts_public_text() -> Result<()> {
+        let response = response_to_chat(json!({
+            "id": "resp_1",
+            "status": "completed",
+            "output": [
+                {
+                    "type": "reasoning",
+                    "id": "msg_1",
+                    "encrypted_content": null,
+                    "summary": [],
+                    "content": [{"type": "reasoning_text", "text": "先算 17*20 再加 17*3"}]
+                },
+                {
+                    "type": "message",
+                    "id": "msg_2",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "391"}]
+                }
+            ]
+        }))?;
+        let message = response.message;
+        assert_eq!(message.content.as_text().as_deref(), Some("391"));
+        assert!(
+            message
+                .reasoning_blocks
+                .as_deref()
+                .unwrap_or_default()
+                .is_empty(),
+            "没有不透明负载时不得伪造 Opaque 回放块"
+        );
+        assert_eq!(
+            message.reasoning_content.as_deref(),
+            Some("先算 17*20 再加 17*3")
+        );
+        Ok(())
+    }
+
+    /// 兼容网关（实测 token.longshine.com）在 `response.output_item.added`
+    /// 里省略 `arguments`，参数只在 delta 与 `item.done` 上出现。身份事件必须
+    /// 接受这种形状，否则一次工具调用会让整轮失败。
+    #[test]
+    fn function_call_added_without_arguments_is_accepted() -> Result<()> {
+        let mut adapter = ResponsesStreamAdapter::default();
+        let added = required_chunk(
+            adapter.map_event(json!({
+                "type":"response.output_item.added",
+                "output_index":1,
+                "item":{
+                    "id":"fc_1",
+                    "type":"function_call",
+                    "call_id":"call_1",
+                    "name":"read_file",
+                    "status":"in_progress"
+                }
+            })),
+            "function_call added without arguments",
+        )?;
+        assert_eq!(first_tool_delta(&added)?.id.as_deref(), Some("call_1"));
+        assert_eq!(
+            tool_arguments(&added),
+            None,
+            "没有初始参数时不得发出空 delta"
+        );
+
+        let delta = required_chunk(
+            adapter.map_event(json!({
+                "type":"response.function_call_arguments.delta",
+                "output_index":1,
+                "item_id":"fc_1",
+                "delta":"{\"path\":\"/etc/hostname\"}"
+            })),
+            "arguments delta",
+        )?;
+        assert_eq!(tool_arguments(&delta), Some("{\"path\":\"/etc/hostname\"}"));
+
+        let done = adapter.map_event(json!({
+            "type":"response.output_item.done",
+            "output_index":1,
+            "item":{
+                "id":"fc_1",
+                "type":"function_call",
+                "call_id":"call_1",
+                "name":"read_file",
+                "status":"completed",
+                "arguments":"{\"path\":\"/etc/hostname\"}"
+            }
+        }))?;
+        assert!(done.is_none(), "终态参数已由 delta 补齐，不应重复发出增量");
+        Ok(())
     }
 
     #[test]
@@ -3920,11 +4127,6 @@ mod tests {
                 "item":{"id":"fc_1","type":"function_call","call_id":"call_1","arguments":""}
             }),
             json!({
-                "type":"response.output_item.added",
-                "output_index":0,
-                "item":{"id":"fc_1","type":"function_call","call_id":"call_1","name":"read"}
-            }),
-            json!({
                 "type":"response.output_item.done",
                 "output_index":0,
                 "item":{"id":"rs_1","type":"reasoning"}
@@ -3986,7 +4188,7 @@ mod tests {
             }))),
             Ok(JsonSseEvent::Done),
         ]);
-        let mut stream = adapt_responses_stream(raw_stream, "test-provider".into());
+        let mut stream = adapt_responses_stream(raw_stream, "test-provider".into(), None);
         let first = stream.next().await.ok_or_else(|| {
             invalid_response("adapted stream omitted the text delta before [DONE]")
         })??;
@@ -4008,7 +4210,7 @@ mod tests {
             "content_index":0,
             "delta":"partial"
         })))]);
-        let mut stream = adapt_responses_stream(raw_stream, "test-provider".into());
+        let mut stream = adapt_responses_stream(raw_stream, "test-provider".into(), None);
         let first = stream.next().await.ok_or_else(|| {
             invalid_response("adapted stream omitted the text delta before EOF")
         })??;
@@ -4030,7 +4232,7 @@ mod tests {
             }))),
             Ok(JsonSseEvent::Done),
         ]);
-        let items = adapt_responses_stream(raw_stream, "test-provider".into())
+        let items = adapt_responses_stream(raw_stream, "test-provider".into(), None)
             .collect::<Vec<_>>()
             .await;
         assert_eq!(items.len(), 1);
@@ -4146,6 +4348,66 @@ mod plaintext_reasoning_contract_tests {
         json!({"id":"plain-response","status":"completed","output":[
         {"id":"plain-reason","type":"reasoning","content":[{"type":"reasoning_text","text":"公开推理🙂"}]},
         {"id":"plain-answer","type":"message","status":"completed","role":"assistant","content":[{"type":"output_text","text":"answer"}]}]})
+    }
+    #[test]
+    fn neutral_content_parts_still_reject_changed_and_reused_ids() -> Result<()> {
+        let mut adapter = ResponsesStreamAdapter::default();
+        adapter.map_native_event(json!({"type":"response.content_part.added","output_index":0,"item_id":"original","content_index":0,"part":{"type":"reasoning_text","text":""}}))?;
+        assert!(adapter.map_native_event(json!({"type":"response.content_part.added","output_index":0,"item_id":"changed","content_index":0,"part":{"type":"reasoning_text","text":""}})).is_err());
+        assert!(adapter.map_native_event(json!({"type":"response.content_part.added","output_index":1,"item_id":"original","content_index":0,"part":{"type":"reasoning_text","text":""}})).is_err());
+        adapter.map_native_event(json!({"type":"response.output_item.added","output_index":0,"item":{"id":"original","type":"reasoning","content":[]}}))?;
+        assert!(adapter.map_native_event(json!({"type":"response.output_item.done","output_index":0,"item":{"id":"original","type":"message","role":"assistant","content":[]}})).is_err());
+        assert_eq!(
+            adapter
+                .observed_items
+                .get(&0)
+                .and_then(|item| item.1.as_deref()),
+            Some("reasoning")
+        );
+        Ok(())
+    }
+    #[test]
+    fn reasoning_content_part_events_keep_the_output_item_type() -> Result<()> {
+        let full = response();
+        let mut adapter = ResponsesStreamAdapter::default();
+        let mut chunks = Vec::new();
+        for event in [
+            json!({"type":"response.created","response":{"id":"plain-response"}}),
+            json!({"type":"response.output_item.added","output_index":0,"item":{"id":"plain-reason","type":"reasoning","content":[]}}),
+            json!({"type":"response.content_part.added","output_index":0,"item_id":"plain-reason","content_index":0,"part":{"type":"reasoning_text","text":""}}),
+            json!({"type":"response.reasoning_text.delta","output_index":0,"item_id":"plain-reason","content_index":0,"delta":"公开推理🙂"}),
+            json!({"type":"response.content_part.done","output_index":0,"item_id":"plain-reason","content_index":0,"part":{"type":"reasoning_text","text":"公开推理🙂"}}),
+            json!({"type":"response.output_item.done","output_index":0,"item":full.pointer("/output/0").cloned().ok_or_else(||invalid_response("missing reasoning fixture"))?}),
+            json!({"type":"response.output_item.added","output_index":1,"item":{"id":"plain-answer","type":"message","role":"assistant","content":[]}}),
+            json!({"type":"response.content_part.added","output_index":1,"item_id":"plain-answer","content_index":0,"part":{"type":"output_text","text":""}}),
+            json!({"type":"response.output_text.delta","output_index":1,"item_id":"plain-answer","content_index":0,"delta":"answer"}),
+            json!({"type":"response.output_item.done","output_index":1,"item":full.pointer("/output/1").cloned().ok_or_else(||invalid_response("missing answer fixture"))?}),
+            json!({"type":"response.completed","response":full}),
+        ] {
+            if let Some(chunk) = adapter.map_event(event)? {
+                chunks.push(chunk);
+            }
+        }
+        let reasoning = chunks
+            .iter()
+            .flat_map(|c| c.delta.assistant_blocks.iter().flatten())
+            .filter(|b| b.phase == AssistantPhase::Reasoning)
+            .map(|b| b.delta.as_str())
+            .collect::<String>();
+        assert_eq!(reasoning, "公开推理🙂");
+        assert_eq!(
+            chunks
+                .iter()
+                .filter_map(|c| c.delta.content.as_deref())
+                .collect::<String>(),
+            "answer"
+        );
+        assert_eq!(
+            chunks.iter().filter(|c| c.finish_reason.is_some()).count(),
+            1
+        );
+        adapter.validate_transport_end("EOF")?;
+        Ok(())
     }
     #[test]
     fn plaintext_reasoning_nonstream_preserves_original_content_identity_without_opaque()
@@ -5624,7 +5886,7 @@ mod responses_metadata_contract_tests {
             )),
             Err(LlmError::NetworkError("actual transport failure".into()).into()),
         ]);
-        let mut stream = adapt_responses_stream(events, "actual-alias".into());
+        let mut stream = adapt_responses_stream(events, "actual-alias".into(), None);
         assert!(
             stream
                 .next()
@@ -6120,6 +6382,28 @@ mod responses_native_id_provenance_tests {
                     .provider_source
                     .as_ref()
                     .is_some_and(|source| source.request_id == "real-response"))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn stream_item_identity_diagnostic_preserves_original_rejection() -> Result<()> {
+        let mut adapter = ResponsesStreamAdapter::default();
+        adapter.map_native_event(json!({"type":"response.output_item.added","output_index":0,"item":{"type":"message","id":"original-item","role":"assistant","content":[]}}))?;
+        let error = adapter
+            .map_native_event(json!({"type":"response.output_text.delta","output_index":0,"item_id":"different-item","content_index":0,"delta":"不应进入诊断的正文"}))
+            .err()
+            .ok_or_else(|| invalid_response("changed output identity unexpectedly accepted"))?;
+        let diagnostic = error.to_string();
+        assert!(diagnostic.contains("event=response.output_text.delta"));
+        assert!(diagnostic.contains("output_index=0, id_changed=true"));
+        assert!(diagnostic.contains("previous_type=message, current_type=message"));
+        assert!(!diagnostic.contains("不应进入诊断的正文"));
+        assert!(!diagnostic.contains("original-item"));
+        assert!(!diagnostic.contains("different-item"));
+        assert_eq!(
+            adapter.observed_items.get(&0).map(|item| item.0.as_str()),
+            Some("original-item")
         );
         Ok(())
     }
