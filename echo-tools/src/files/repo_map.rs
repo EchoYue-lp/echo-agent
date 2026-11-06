@@ -146,16 +146,29 @@ impl Tool for RepoMapTool {
                     .map(|base| base.join(requested))
                     .unwrap_or_else(|| requested.to_path_buf())
             };
-            if !file_system.exists(&root)? {
+            // 一次调用共用一个只读会话，避免为每个目录重建传输。
+            let (built, session_reused) =
+                echo_core::tools::filesystem::with_read_session(file_system, |files| {
+                    if !files.exists(&root)? {
+                        return Ok(None);
+                    }
+                    let output = if format == "symbols" {
+                        build_symbol_map(files, cancel, &root, &this.base_dir, max_depth)?
+                    } else {
+                        build_tree(files, cancel, &root, &this.base_dir, max_depth)?
+                    };
+                    Ok(Some(output))
+                });
+            tracing::debug!(
+                tool = "repo_map",
+                reused = session_reused,
+                "repo map scope settled"
+            );
+            let Some(output) = built? else {
                 return Ok(ToolResult::invalid_arguments(format!(
                     "Path does not exist: {}",
                     root.display()
                 )));
-            }
-            let output = if format == "symbols" {
-                build_symbol_map(file_system, cancel, &root, &this.base_dir, max_depth)?
-            } else {
-                build_tree(file_system, cancel, &root, &this.base_dir, max_depth)?
             };
             let lines = if output.is_empty() {
                 Vec::new()

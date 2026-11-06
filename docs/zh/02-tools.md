@@ -687,6 +687,14 @@ Skill 后续激活、资源和脚本保持自身来源；用户级来源不继�
 继续使用原有固定大小缓冲区；provider 保留实际 operation 至真实关闭/结算。
 不支持流式读取时明确 Unsupported，不读本机同名文件。
 
+`grep` 另有可选的内容搜索接缝：`tools::search::ContentSearchProvider` 可在远端
+完成匹配、只回传已经排版的记录，避免把候选文件正文逐文件拉回本机。通过
+`StandardToolPack::with_content_search_provider` 或
+`ReactAgentBuilder::content_search_provider` 注入，默认 `None` 表示既有本机
+遍历。提供者返回 `None` 表示不支持该请求，工具落回本机路径且输出与未注入时
+一致；返回错误则按工具既有映射失败，不降级成“没有匹配”。远端结果只沿用原
+`PageRequest` 分页与输出格式，不新增工具名或模型可见参数。
+
 `list_worktrees` 经同一目标 Git executor 和文件 provider 检查原 marker。
 原本机 worktree 创建/清理仍保留目录身份保护。当前非本机
 `enter_worktree`/`exit_worktree` 在预留目录、合并或删除前明确不可用：

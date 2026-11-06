@@ -35,6 +35,9 @@ fn metadata(value: std::fs::Metadata) -> FileMetadata {
         file_type: file_type(value.file_type()),
         len: value.len(),
         mode,
+        // 本地提供者只转发目标自己报告的 mtime；不支持的平台/文件系统保持 None，
+        // 不能用读取时刻的本机时间冒充目标事实。
+        modified: value.modified().ok(),
     }
 }
 
@@ -693,6 +696,32 @@ mod target_file_system_tests {
         LocalFileSystem.rename(&path, &root.path().join("original"))?;
         LocalFileSystem.create_dir(&path)?;
         assert!(guard.verify(&path).is_err());
+        Ok(())
+    }
+
+    /// mtime 是上层判断"文件内容是否变化"的廉价指纹：只 stat、不读正文。
+    ///
+    /// 用例只断言"存在且单调可比"，不锁定具体时间值，也不假设时钟精度——
+    /// 同一时间粒度内的两次写入完全可能得到相等的时间戳。
+    #[test]
+    fn local_metadata_exposes_comparable_modification_time() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let path = root.path().join("fingerprint.txt");
+        std::fs::write(&path, "first\n")?;
+        let before = LocalFileSystem
+            .metadata(&path)?
+            .modified
+            .ok_or_else(|| std::io::Error::other("local target did not report mtime"))?;
+        // 等长改写：仅靠 len 无法区分内容变化，mtime 必须仍可比较。
+        std::fs::write(&path, "secnd\n")?;
+        let after = LocalFileSystem
+            .metadata(&path)?
+            .modified
+            .ok_or_else(|| std::io::Error::other("local target stopped reporting mtime"))?;
+        assert!(
+            after >= before,
+            "mtime went backwards: {after:?} < {before:?}"
+        );
         Ok(())
     }
 

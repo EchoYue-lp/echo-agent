@@ -6,7 +6,10 @@ pub mod control;
 pub mod filesystem;
 pub mod pagination;
 pub mod permission;
+pub mod search;
 pub mod skill;
+
+pub use search::{ContentSearchOutcome, ContentSearchProvider, ContentSearchRequest};
 
 use crate::error::{ReactError, Result, SandboxError, ToolError};
 use crate::sandbox::SandboxExecutor;

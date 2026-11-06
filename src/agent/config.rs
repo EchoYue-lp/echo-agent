@@ -32,6 +32,11 @@ pub struct AgentConfig {
     pub(crate) enable_tool: bool,
     #[cfg(feature = "files")]
     pub(crate) file_system: Option<Arc<dyn echo_core::tools::filesystem::FileSystem>>,
+    /// 可选远端内容搜索接缝，只交给标准工具包里的 `grep`。`None`（默认）
+    /// 时 grep 保持本机遍历，工具定义与本机行为都不变。
+    #[cfg(feature = "files")]
+    pub(crate) content_search_provider:
+        Option<Arc<dyn echo_core::tools::search::ContentSearchProvider>>,
     /// Restrict custom registration, invocation visibility, and execution to
     /// read-only capabilities.
     pub(crate) readonly_tools: bool,
@@ -182,6 +187,8 @@ impl AgentConfig {
             enable_tool: false,
             #[cfg(feature = "files")]
             file_system: None,
+            #[cfg(feature = "files")]
+            content_search_provider: None,
             readonly_tools: false,
             command_cells: None,
             enable_human_in_loop: false,
@@ -310,6 +317,19 @@ impl AgentConfig {
         file_system: Arc<dyn echo_core::tools::filesystem::FileSystem>,
     ) -> Self {
         self.file_system = Some(file_system);
+        self
+    }
+
+    /// 注入可选的远端内容搜索提供者，标准工具包会把它交给 `grep`。
+    ///
+    /// `None` 是默认值，也是“不接入”的唯一表达：grep 继续本机遍历，
+    /// 工具 schema 与输出格式都不受影响。
+    #[cfg(feature = "files")]
+    pub fn content_search_provider(
+        mut self,
+        provider: Option<Arc<dyn echo_core::tools::search::ContentSearchProvider>>,
+    ) -> Self {
+        self.content_search_provider = provider;
         self
     }
 

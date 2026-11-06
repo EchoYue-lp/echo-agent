@@ -12,6 +12,13 @@ use std::path::{Path, PathBuf};
 
 // ── GrepTool ────────────────────────────────────────────────────────────────
 
+/// 远端内容搜索单次请求允许回传的记录条数上界。
+///
+/// 本机遍历天然把结果留在内存里；远端记录要跨网络传输，必须有界。该上界
+/// 不随分页 `limit` 变化——分页指纹覆盖结果集合本身，若上界随页大小变化，
+/// 同一查询的后续页会因快照不同而失配。
+const CONTENT_SEARCH_MAX_RESULTS: usize = 1_000;
+
 /// Search file contents by regex pattern.
 ///
 /// Walks the directory tree from `path` (default: `.`), reads each file,
@@ -21,6 +28,7 @@ use std::path::{Path, PathBuf};
 pub struct GrepTool {
     base_dir: Option<PathBuf>,
     file_system: std::sync::Arc<dyn echo_core::tools::filesystem::FileSystem>,
+    search_provider: Option<std::sync::Arc<dyn echo_core::tools::search::ContentSearchProvider>>,
 }
 
 impl GrepTool {
@@ -32,10 +40,23 @@ impl GrepTool {
         self
     }
 
+    /// 接入可选远端搜索提供者。`None`（默认）时保持本机遍历，行为不变。
+    ///
+    /// 提供者只在远端完成匹配并回传最终展示记录；本机遍历是它说“不支持”
+    /// 时的回退路径，不是被替换的实现。
+    pub fn with_search_provider(
+        mut self,
+        provider: Option<std::sync::Arc<dyn echo_core::tools::search::ContentSearchProvider>>,
+    ) -> Self {
+        self.search_provider = provider;
+        self
+    }
+
     pub fn new() -> Self {
         Self {
             base_dir: None,
             file_system: std::sync::Arc::new(super::LocalFileSystem),
+            search_provider: None,
         }
     }
 
@@ -43,6 +64,7 @@ impl GrepTool {
         Self {
             base_dir: Some(base.into()),
             file_system: std::sync::Arc::new(super::LocalFileSystem),
+            search_provider: None,
         }
     }
 }
@@ -237,35 +259,83 @@ impl Tool for GrepTool {
                 PathBuf::from(path_str)
             };
 
-            if !file_system.exists(&search_path)? {
-                return Ok(ToolResult::invalid_arguments(format!(
-                    "Path does not exist: {}",
-                    search_path.display()
-                )));
-            }
-
+            // 提供者优先于本机遍历：它在远端完成匹配、只回传排版好的记录，
+            // 避免把候选正文逐文件拉回本机。`None` 表示该提供者不支持这类
+            // 请求，随后落回原本机路径，结果与未接入提供者时完全一致。
+            let mut provider_truncated = false;
             let mut results = Vec::new();
+            let provider_outcome = match this.search_provider.as_ref() {
+                Some(provider) => {
+                    super::check_file_cancel(cancel, "grep")?;
+                    let request = echo_core::tools::search::ContentSearchRequest {
+                        root: &search_path,
+                        pattern: pattern_str,
+                        glob: glob_filter,
+                        context_lines,
+                        case_insensitive,
+                        max_results: CONTENT_SEARCH_MAX_RESULTS,
+                    };
+                    // 远端搜索失败按本工具既有映射上抛；降级成本机遍历或
+                    // “没有匹配”都会把一次故障伪装成一次成功的空结果。
+                    provider.search(&request).map_err(|error| {
+                        super::file_error(error, |error| ToolError::ExecutionFailed {
+                            tool: "grep".to_string(),
+                            message: format!(
+                                "Content search failed for {}: {}",
+                                search_path.display(),
+                                error
+                            ),
+                        })
+                    })?
+                }
+                None => None,
+            };
 
-            if file_system.is_file(&search_path)? {
-                search_file(
-                    file_system,
-                    cancel,
-                    &search_path,
-                    &regex,
-                    glob_filter,
-                    context_lines,
-                    &mut results,
-                )?;
-            } else if file_system.is_dir(&search_path)? {
-                walk_and_search(
-                    file_system,
-                    cancel,
-                    &search_path,
-                    canonical_roots.as_deref(),
-                    &regex,
-                    (glob_filter, context_lines),
-                    &mut results,
-                )?;
+            if let Some(outcome) = provider_outcome {
+                provider_truncated = outcome.truncated;
+                results = outcome.records;
+            } else {
+                // 一次工具调用只建立一个只读会话：支持会话的提供者因此把整次
+                // 遍历复用到同一条传输上；本地提供者不支持会话，行为不变。
+                let (searched, session_reused) =
+                    echo_core::tools::filesystem::with_read_session(file_system, |files| {
+                        if !files.exists(&search_path)? {
+                            return Ok(false);
+                        }
+                        if files.is_file(&search_path)? {
+                            search_file(
+                                files,
+                                cancel,
+                                &search_path,
+                                &regex,
+                                glob_filter,
+                                context_lines,
+                                &mut results,
+                            )?;
+                        } else if files.is_dir(&search_path)? {
+                            walk_and_search(
+                                files,
+                                cancel,
+                                &search_path,
+                                canonical_roots.as_deref(),
+                                &regex,
+                                (glob_filter, context_lines),
+                                &mut results,
+                            )?;
+                        }
+                        Ok(true)
+                    });
+                tracing::debug!(
+                    tool = "grep",
+                    reused = session_reused,
+                    "content search scope settled"
+                );
+                if !searched? {
+                    return Ok(ToolResult::invalid_arguments(format!(
+                        "Path does not exist: {}",
+                        search_path.display()
+                    )));
+                }
             }
 
             let query = serde_json::json!({
@@ -290,6 +360,9 @@ impl Tool for GrepTool {
                 )
             };
             let mut result = ToolResult::success(output);
+            // 远端只回传了完整命中集的前缀时必须显式标记，否则模型会把它
+            // 读成“已经搜到全部命中”。
+            result = result.with_truncated(provider_truncated);
             page_info.apply_to(&mut result);
             Ok(result)
         })
@@ -634,6 +707,380 @@ mod tests {
             .await?;
         assert!(result.success, "{}", result.error.unwrap_or_default());
         assert!(result.output.contains("fix this"));
+        Ok(())
+    }
+
+    // ── read-session scope: one tool call = one transport session ──
+
+    use std::sync::Arc as StdArc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// Delegating provider that counts how many read sessions a single tool
+    /// call establishes. The session hands back a real local provider, so the
+    /// search still runs on the same files and only the scoping is observed.
+    struct CountingFs {
+        inner: crate::filesystem::LocalFileSystem,
+        opens: StdArc<AtomicUsize>,
+    }
+
+    struct CountingSession {
+        inner: crate::filesystem::LocalFileSystem,
+    }
+
+    impl echo_core::tools::filesystem::FileSystemReadSession for CountingSession {
+        fn files(&self) -> &dyn echo_core::tools::filesystem::FileSystem {
+            &self.inner
+        }
+        fn finish(self: Box<Self>) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    impl echo_core::tools::filesystem::FileSystem for CountingFs {
+        fn begin_read_session(
+            &self,
+        ) -> Result<Option<Box<dyn echo_core::tools::filesystem::FileSystemReadSession>>> {
+            self.opens.fetch_add(1, Ordering::SeqCst);
+            Ok(Some(Box::new(CountingSession {
+                inner: crate::filesystem::LocalFileSystem,
+            })))
+        }
+        fn current_dir(&self) -> Result<PathBuf> {
+            self.inner.current_dir()
+        }
+        fn canonicalize(&self, path: &Path) -> Result<PathBuf> {
+            self.inner.canonicalize(path)
+        }
+        fn metadata(&self, path: &Path) -> Result<echo_core::tools::filesystem::FileMetadata> {
+            self.inner.metadata(path)
+        }
+        fn symlink_metadata(
+            &self,
+            path: &Path,
+        ) -> Result<echo_core::tools::filesystem::FileMetadata> {
+            self.inner.symlink_metadata(path)
+        }
+        fn read(&self, path: &Path) -> Result<Vec<u8>> {
+            self.inner.read(path)
+        }
+        fn read_dir(&self, path: &Path) -> Result<Vec<echo_core::tools::filesystem::FileEntry>> {
+            self.inner.read_dir(path)
+        }
+        fn create_dir_all(&self, path: &Path) -> Result<()> {
+            self.inner.create_dir_all(path)
+        }
+        fn create_file(&self, path: &Path) -> Result<()> {
+            self.inner.create_file(path)
+        }
+        fn write(&self, path: &Path, bytes: &[u8]) -> Result<()> {
+            self.inner.write(path, bytes)
+        }
+        fn append(&self, path: &Path, bytes: &[u8]) -> Result<()> {
+            self.inner.append(path, bytes)
+        }
+        fn rename(&self, from: &Path, to: &Path) -> Result<()> {
+            self.inner.rename(from, to)
+        }
+        fn remove_file(&self, path: &Path) -> Result<()> {
+            self.inner.remove_file(path)
+        }
+        fn remove_dir(&self, path: &Path) -> Result<()> {
+            self.inner.remove_dir(path)
+        }
+        fn remove_dir_all(&self, path: &Path) -> Result<()> {
+            self.inner.remove_dir_all(path)
+        }
+        fn set_mode(&self, path: &Path, mode: u32) -> Result<()> {
+            self.inner.set_mode(path, mode)
+        }
+        fn atomic_write(&self, path: &Path, bytes: &[u8]) -> Result<()> {
+            self.inner.atomic_write(path, bytes)
+        }
+        fn checkpoint(&self, path: &Path) -> Result<Option<String>> {
+            self.inner.checkpoint(path)
+        }
+    }
+
+    #[tokio::test]
+    async fn grep_establishes_exactly_one_read_session_per_call() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        std::fs::create_dir_all(root.path().join("nested"))?;
+        std::fs::write(root.path().join("a.txt"), "needle one\n")?;
+        std::fs::write(root.path().join("nested/b.txt"), "needle two\n")?;
+
+        let opens = StdArc::new(AtomicUsize::new(0));
+        let files = StdArc::new(CountingFs {
+            inner: crate::filesystem::LocalFileSystem,
+            opens: StdArc::clone(&opens),
+        });
+        let ctx = echo_core::tools::ToolContext {
+            working_dir: Some(root.path().to_path_buf()),
+            ..Default::default()
+        };
+        let tool = GrepTool::new().with_file_system(files);
+        let result = tool
+            .execute_with_context(grep_params("needle", "."), &ctx)
+            .await?;
+        assert!(result.success, "{}", result.error.unwrap_or_default());
+        assert!(result.output.contains("needle one"));
+        assert!(result.output.contains("needle two"));
+        assert_eq!(
+            opens.load(Ordering::SeqCst),
+            1,
+            "one tool call must reuse a single read session"
+        );
+        Ok(())
+    }
+
+    // ── remote content search seam ──
+
+    use echo_core::tools::search::{
+        ContentSearchOutcome, ContentSearchProvider, ContentSearchRequest,
+    };
+
+    /// 提供者在一次调用里看到的请求快照，用来断言工具确实按实际匹配语义转发。
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct RecordedRequest {
+        root: PathBuf,
+        pattern: String,
+        glob: Option<String>,
+        context_lines: usize,
+        case_insensitive: bool,
+        max_results: usize,
+    }
+
+    enum FakeReply {
+        Matches(Vec<String>, bool),
+        Unsupported,
+        Fail,
+    }
+
+    struct FakeProvider {
+        reply: FakeReply,
+        seen: std::sync::Mutex<Option<RecordedRequest>>,
+    }
+
+    impl FakeProvider {
+        fn new(reply: FakeReply) -> Self {
+            Self {
+                reply,
+                seen: std::sync::Mutex::new(None),
+            }
+        }
+
+        fn recorded(&self) -> Option<RecordedRequest> {
+            self.seen.lock().ok().and_then(|slot| slot.clone())
+        }
+    }
+
+    impl ContentSearchProvider for FakeProvider {
+        fn search(
+            &self,
+            request: &ContentSearchRequest<'_>,
+        ) -> Result<Option<ContentSearchOutcome>> {
+            if let Ok(mut slot) = self.seen.lock() {
+                *slot = Some(RecordedRequest {
+                    root: request.root.to_path_buf(),
+                    pattern: request.pattern.to_string(),
+                    glob: request.glob.map(str::to_string),
+                    context_lines: request.context_lines,
+                    case_insensitive: request.case_insensitive,
+                    max_results: request.max_results,
+                });
+            }
+            match &self.reply {
+                FakeReply::Matches(records, truncated) => Ok(Some(ContentSearchOutcome {
+                    records: records.clone(),
+                    truncated: *truncated,
+                })),
+                FakeReply::Unsupported => Ok(None),
+                FakeReply::Fail => Err(ToolError::ExecutionFailed {
+                    tool: "grep".to_string(),
+                    message: "remote search transport lost".to_string(),
+                }
+                .into()),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn grep_uses_provider_records_without_local_traversal() -> Result<()> {
+        // 目标目录在本机不存在：任何本机遍历都会变成 "Path does not exist"，
+        // 因此成功返回且带远端记录即证明结果没有经过本机逐文件读取。
+        let working_dir = tempfile::tempdir()?;
+        let working = std::fs::canonicalize(working_dir.path())?;
+        let opens = StdArc::new(AtomicUsize::new(0));
+        let files = StdArc::new(CountingFs {
+            inner: crate::filesystem::LocalFileSystem,
+            opens: StdArc::clone(&opens),
+        });
+        let provider = StdArc::new(FakeProvider::new(FakeReply::Matches(
+            vec!["/srv/app/src/remote.rs:7:  remote-only-hit".to_string()],
+            false,
+        )));
+        let ctx = echo_core::tools::ToolContext {
+            working_dir: Some(working.clone()),
+            ..Default::default()
+        };
+        let tool = GrepTool::new()
+            .with_file_system(files)
+            .with_search_provider(Some(provider));
+        let result = tool
+            .execute_with_context(grep_params("needle", "remote-project"), &ctx)
+            .await?;
+
+        assert!(result.success, "{}", result.error.unwrap_or_default());
+        assert!(
+            result
+                .output
+                .contains("/srv/app/src/remote.rs:7:  remote-only-hit")
+        );
+        assert!(result.output.contains("1 matches returned"));
+        assert_eq!(
+            opens.load(Ordering::SeqCst),
+            0,
+            "提供者命中时不得建立本机遍历会话"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn grep_falls_back_to_local_scan_when_provider_returns_none() -> Result<()> {
+        // `None` 是“本提供者不支持”，回退结果必须与未注入提供者时逐字相同。
+        let root = tempfile::tempdir()?;
+        std::fs::create_dir_all(root.path().join("nested"))?;
+        std::fs::write(root.path().join("a.txt"), "alpha needle\nbeta\n")?;
+        std::fs::write(root.path().join("nested/b.txt"), "gamma needle\n")?;
+        let ctx = echo_core::tools::ToolContext {
+            working_dir: Some(root.path().to_path_buf()),
+            ..Default::default()
+        };
+
+        let baseline = GrepTool::new()
+            .execute_with_context(grep_params("needle", "."), &ctx)
+            .await?;
+        let with_none_provider = GrepTool::new()
+            .with_search_provider(Some(StdArc::new(FakeProvider::new(FakeReply::Unsupported))))
+            .execute_with_context(grep_params("needle", "."), &ctx)
+            .await?;
+
+        assert!(baseline.success, "{}", baseline.error.unwrap_or_default());
+        assert!(
+            with_none_provider.success,
+            "{}",
+            with_none_provider.error.unwrap_or_default()
+        );
+        assert_eq!(baseline.output, with_none_provider.output);
+        assert_eq!(baseline.truncated, with_none_provider.truncated);
+        assert!(baseline.output.contains("alpha needle"));
+        assert!(baseline.output.contains("gamma needle"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn grep_propagates_provider_error_instead_of_degrading() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        std::fs::write(root.path().join("a.txt"), "needle\n")?;
+        let ctx = echo_core::tools::ToolContext {
+            working_dir: Some(root.path().to_path_buf()),
+            ..Default::default()
+        };
+        let tool = GrepTool::new()
+            .with_search_provider(Some(StdArc::new(FakeProvider::new(FakeReply::Fail))));
+        let outcome = tool
+            .execute_with_context(grep_params("needle", "."), &ctx)
+            .await;
+
+        let error = match outcome {
+            Ok(result) => {
+                return Err(ToolError::ExecutionFailed {
+                    tool: "grep".to_string(),
+                    message: format!(
+                        "provider failure was swallowed into success: {}",
+                        result.output
+                    ),
+                }
+                .into());
+            }
+            Err(error) => error,
+        };
+        assert!(
+            error.to_string().contains("remote search transport lost"),
+            "{error}"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn grep_forwards_search_request_fields() -> Result<()> {
+        // 提供者必须看到与实际匹配语义一致的字段：大小写开关跟随
+        // RegexBuilder 的 case_insensitive，上下文/glob/上界原样转发。
+        let root = tempfile::tempdir()?;
+        let working = std::fs::canonicalize(root.path())?;
+        let provider = StdArc::new(FakeProvider::new(FakeReply::Matches(Vec::new(), false)));
+        let recorded_handle = StdArc::clone(&provider);
+        let ctx = echo_core::tools::ToolContext {
+            working_dir: Some(working.clone()),
+            ..Default::default()
+        };
+        let parameters = ToolParameters::from([
+            ("pattern".to_string(), Value::String("needle".to_string())),
+            (
+                "path".to_string(),
+                Value::String(working.display().to_string()),
+            ),
+            ("glob".to_string(), Value::String("*.rs".to_string())),
+            ("case_insensitive".to_string(), Value::Bool(true)),
+            ("context".to_string(), serde_json::json!(2)),
+        ]);
+        let tool = GrepTool::new().with_search_provider(Some(provider));
+        let result = tool.execute_with_context(parameters, &ctx).await?;
+
+        assert!(result.success, "{}", result.error.unwrap_or_default());
+        assert_eq!(result.output, "No matches found.");
+        let recorded = recorded_handle
+            .recorded()
+            .ok_or_else(|| ToolError::ExecutionFailed {
+                tool: "grep".to_string(),
+                message: "provider was never consulted".to_string(),
+            })?;
+        assert_eq!(recorded.root, working);
+        assert_eq!(recorded.pattern, "needle");
+        assert_eq!(recorded.glob.as_deref(), Some("*.rs"));
+        assert_eq!(recorded.context_lines, 2);
+        assert!(recorded.case_insensitive);
+        assert_eq!(recorded.max_results, CONTENT_SEARCH_MAX_RESULTS);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn grep_marks_result_truncated_when_provider_truncates() -> Result<()> {
+        let working_dir = tempfile::tempdir()?;
+        let working = std::fs::canonicalize(working_dir.path())?;
+        let ctx = echo_core::tools::ToolContext {
+            working_dir: Some(working),
+            ..Default::default()
+        };
+
+        let truncated = GrepTool::new()
+            .with_search_provider(Some(StdArc::new(FakeProvider::new(FakeReply::Matches(
+                vec!["/srv/a.rs:1:  first".to_string()],
+                true,
+            )))))
+            .execute_with_context(grep_params("needle", "remote-project"), &ctx)
+            .await?;
+        assert!(truncated.success, "{}", truncated.error.unwrap_or_default());
+        assert!(truncated.truncated, "远端只回传命中集前缀时必须标记截断");
+
+        let complete = GrepTool::new()
+            .with_search_provider(Some(StdArc::new(FakeProvider::new(FakeReply::Matches(
+                vec!["/srv/a.rs:1:  first".to_string()],
+                false,
+            )))))
+            .execute_with_context(grep_params("needle", "remote-project"), &ctx)
+            .await?;
+        assert!(complete.success, "{}", complete.error.unwrap_or_default());
+        assert!(!complete.truncated);
         Ok(())
     }
 }

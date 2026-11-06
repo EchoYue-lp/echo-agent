@@ -14,6 +14,8 @@ pub struct StandardToolPack {
     cells: Option<Arc<dyn CommandCellRegistry>>,
     #[cfg(feature = "files")]
     file_system: Option<Arc<dyn echo_core::tools::filesystem::FileSystem>>,
+    #[cfg(feature = "files")]
+    content_search_provider: Option<Arc<dyn echo_core::tools::search::ContentSearchProvider>>,
 }
 
 impl StandardToolPack {
@@ -34,6 +36,19 @@ impl StandardToolPack {
         file_system: Arc<dyn echo_core::tools::filesystem::FileSystem>,
     ) -> Self {
         self.file_system = Some(file_system);
+        self
+    }
+
+    /// 可选远端内容搜索接缝，只作用于 `grep`。
+    ///
+    /// `None`（默认）时 grep 保持本机遍历；提供者说“不支持”的单次请求也
+    /// 落回同一路径，因此未注入者与既有部署行为完全一致。
+    #[cfg(feature = "files")]
+    pub fn with_content_search_provider(
+        mut self,
+        provider: Option<Arc<dyn echo_core::tools::search::ContentSearchProvider>>,
+    ) -> Self {
+        self.content_search_provider = provider;
         self
     }
 }
@@ -90,7 +105,9 @@ impl ToolPack for StandardToolPack {
                     ListDirTool::new().with_file_system(Arc::clone(&file_system)),
                 )),
                 ToolPackEntry::read_only(Box::new(
-                    GrepTool::new().with_file_system(Arc::clone(&file_system)),
+                    GrepTool::new()
+                        .with_file_system(Arc::clone(&file_system))
+                        .with_search_provider(self.content_search_provider.clone()),
                 )),
                 ToolPackEntry::read_only(Box::new(
                     GlobTool::new().with_file_system(Arc::clone(&file_system)),
@@ -356,5 +373,113 @@ mod tests {
         ] {
             assert!(!collector.0.contains(&legacy.to_string()));
         }
+    }
+
+    // ── content search seam: default pack stays local, provider is opt-in ──
+
+    #[cfg(feature = "files")]
+    use echo_core::tools::search::{
+        ContentSearchOutcome, ContentSearchProvider, ContentSearchRequest,
+    };
+    #[cfg(feature = "files")]
+    use echo_core::tools::{ToolContext, ToolParameters};
+
+    #[cfg(feature = "files")]
+    #[derive(Default)]
+    struct ToolCollector(Vec<Box<dyn Tool>>);
+
+    #[cfg(feature = "files")]
+    impl ToolRegistrar for ToolCollector {
+        fn register(&mut self, tool: Box<dyn Tool>) {
+            self.0.push(tool);
+        }
+    }
+
+    #[cfg(feature = "files")]
+    fn grep_from(pack: &StandardToolPack) -> std::result::Result<Box<dyn Tool>, String> {
+        let mut collector = ToolCollector::default();
+        pack.install(&mut collector);
+        collector
+            .0
+            .into_iter()
+            .find(|tool| tool.name() == "grep")
+            .ok_or_else(|| "standard pack did not install grep".to_string())
+    }
+
+    #[cfg(feature = "files")]
+    fn grep_params(pattern: &str, path: &str) -> ToolParameters {
+        ToolParameters::from([
+            ("pattern".to_string(), serde_json::json!(pattern)),
+            ("path".to_string(), serde_json::json!(path)),
+        ])
+    }
+
+    /// 只回传一条远端记录；`root` 在本机不存在，本机遍历必然失败。
+    #[cfg(feature = "files")]
+    struct RemoteOnlyProvider;
+
+    #[cfg(feature = "files")]
+    impl ContentSearchProvider for RemoteOnlyProvider {
+        fn search(
+            &self,
+            request: &ContentSearchRequest<'_>,
+        ) -> echo_core::error::Result<Option<ContentSearchOutcome>> {
+            Ok(Some(ContentSearchOutcome {
+                records: vec![format!("{}:1:  remote-pack-hit", request.root.display())],
+                truncated: false,
+            }))
+        }
+    }
+
+    #[cfg(feature = "files")]
+    #[tokio::test]
+    async fn standard_pack_default_grep_keeps_local_behavior() -> std::result::Result<(), String> {
+        // 默认工具包（未设置提供者）与直接构造 GrepTool 的输出必须逐字相同，
+        // 这是“接入接缝后默认路径行为不变”的回归点。
+        let dir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let working = std::fs::canonicalize(dir.path()).map_err(|error| error.to_string())?;
+        std::fs::write(working.join("notes.txt"), "TODO fix this\n")
+            .map_err(|error| error.to_string())?;
+        let ctx = ToolContext {
+            working_dir: Some(working.clone()),
+            ..Default::default()
+        };
+
+        let from_pack = grep_from(&StandardToolPack::new())?
+            .execute_with_context(grep_params("TODO", "notes.txt"), &ctx)
+            .await
+            .map_err(|error| error.to_string())?;
+        let direct = crate::files::grep::GrepTool::new()
+            .execute_with_context(grep_params("TODO", "notes.txt"), &ctx)
+            .await
+            .map_err(|error| error.to_string())?;
+
+        assert!(from_pack.success, "{}", from_pack.error.unwrap_or_default());
+        assert_eq!(from_pack.output, direct.output);
+        assert_eq!(from_pack.truncated, direct.truncated);
+        assert!(from_pack.output.contains("fix this"));
+        Ok(())
+    }
+
+    #[cfg(feature = "files")]
+    #[tokio::test]
+    async fn standard_pack_forwards_content_search_provider_to_grep()
+    -> std::result::Result<(), String> {
+        let dir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let working = std::fs::canonicalize(dir.path()).map_err(|error| error.to_string())?;
+        let ctx = ToolContext {
+            working_dir: Some(working),
+            ..Default::default()
+        };
+        let pack = StandardToolPack::new()
+            .with_content_search_provider(Some(Arc::new(RemoteOnlyProvider)));
+        let result = grep_from(&pack)?
+            .execute_with_context(grep_params("needle", "remote-project"), &ctx)
+            .await
+            .map_err(|error| error.to_string())?;
+
+        assert!(result.success, "{}", result.error.unwrap_or_default());
+        assert!(result.output.contains("remote-pack-hit"));
+        Ok(())
     }
 }

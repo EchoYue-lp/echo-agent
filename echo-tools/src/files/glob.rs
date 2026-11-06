@@ -149,30 +149,42 @@ impl Tool for GlobTool {
                 )?;
             }
 
-            if !file_system.exists(&search_path)? {
-                return Ok(ToolResult::invalid_arguments(format!(
-                    "Path does not exist: {}",
-                    search_path.display()
-                )));
-            }
-
-            if !file_system.is_dir(&search_path)? {
-                return Ok(ToolResult::invalid_arguments(format!(
-                    "Path is not a directory: {}",
-                    search_path.display()
-                )));
-            }
-
+            // 一次调用共用一个只读会话：支持会话的提供者因此不会为每个
+            // 目录重新建立传输；不支持的提供者行为与逐次读取一致。
             let mut results = Vec::new();
-            walk_glob(
-                file_system,
-                cancel,
-                &search_path,
-                &search_path,
-                &this.base_dir,
-                pattern_str,
-                &mut results,
-            )?;
+            let (walked, session_reused) =
+                echo_core::tools::filesystem::with_read_session(file_system, |files| {
+                    if !files.exists(&search_path)? {
+                        return Ok(Err(ToolResult::invalid_arguments(format!(
+                            "Path does not exist: {}",
+                            search_path.display()
+                        ))));
+                    }
+                    if !files.is_dir(&search_path)? {
+                        return Ok(Err(ToolResult::invalid_arguments(format!(
+                            "Path is not a directory: {}",
+                            search_path.display()
+                        ))));
+                    }
+                    walk_glob(
+                        files,
+                        cancel,
+                        &search_path,
+                        &search_path,
+                        &this.base_dir,
+                        pattern_str,
+                        &mut results,
+                    )?;
+                    Ok(Ok(()))
+                });
+            tracing::debug!(
+                tool = "glob",
+                reused = session_reused,
+                "glob search scope settled"
+            );
+            if let Err(early_result) = walked? {
+                return Ok(early_result);
+            }
             let query = serde_json::json!({
                 "pattern": pattern_str,
                 "path": search_path,
@@ -756,6 +768,8 @@ mod tests {
                     file_type: kind,
                     len: 0,
                     mode: None,
+                    // 该 fixture 是纯路径形状替身，没有目标时钟可言；保持 None 而不是编造本机时间。
+                    modified: None,
                 })
             }
             fn symlink_metadata(&self, p: &Path) -> echo_core::error::Result<FileMetadata> {

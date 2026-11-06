@@ -177,6 +177,8 @@ impl SkillFileSource {
                 file_type,
                 len: metadata.len(),
                 mode: None,
+                // 走本机 stat 时如实转发目标 mtime；平台/文件系统不提供时保持 None。
+                modified: metadata.modified().ok(),
             })
         })
         .await
@@ -1355,6 +1357,8 @@ mod file_source_tests {
                     file_type: FileType::File,
                     len: bytes.len() as u64,
                     mode: None,
+                    // 内存 fixture 没有目标时钟，mtime 保持不可观测。
+                    modified: None,
                 });
             }
             if files.keys().any(|entry| entry.starts_with(path)) {
@@ -1362,6 +1366,7 @@ mod file_source_tests {
                     file_type: FileType::Directory,
                     len: 0,
                     mode: None,
+                    modified: None,
                 });
             }
             Err(Self::absent())

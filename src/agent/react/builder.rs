@@ -36,6 +36,9 @@ pub struct ReactAgentBuilder {
     enable_builtin_tools: bool,
     #[cfg(feature = "files")]
     file_system: Option<Arc<dyn echo_core::tools::filesystem::FileSystem>>,
+    /// 可选远端内容搜索接缝，只交给标准工具包的 `grep`；默认 `None`。
+    #[cfg(feature = "files")]
+    content_search_provider: Option<Arc<dyn echo_core::tools::search::ContentSearchProvider>>,
     auto_project_rules: bool,
     readonly_tools: bool,
     enable_memory: bool,
@@ -127,6 +130,8 @@ impl ReactAgentBuilder {
             enable_builtin_tools: false,
             #[cfg(feature = "files")]
             file_system: None,
+            #[cfg(feature = "files")]
+            content_search_provider: None,
             auto_project_rules: true,
             readonly_tools: false,
             enable_memory: false,
@@ -318,6 +323,19 @@ impl ReactAgentBuilder {
         file_system: Arc<dyn echo_core::tools::filesystem::FileSystem>,
     ) -> Self {
         self.file_system = Some(file_system);
+        self
+    }
+
+    /// 注入可选的远端内容搜索提供者，标准工具包会把它交给 `grep`。
+    ///
+    /// 这是纯可选项：`None`（默认）时 grep 保持本机遍历，未注入者与接入前
+    /// 的构建结果、工具 schema 和执行行为完全一致。
+    #[cfg(feature = "files")]
+    pub fn content_search_provider(
+        mut self,
+        provider: Option<Arc<dyn echo_core::tools::search::ContentSearchProvider>>,
+    ) -> Self {
+        self.content_search_provider = provider;
         self
     }
 
@@ -951,6 +969,10 @@ impl ReactAgentBuilder {
         if let Some(file_system) = self.file_system.clone() {
             config = config.file_system(file_system);
         }
+        #[cfg(feature = "files")]
+        {
+            config = config.content_search_provider(self.content_search_provider.clone());
+        }
         if let Some(cells) = self.command_cells.clone() {
             config = config.command_cells(cells);
         }
@@ -1374,5 +1396,99 @@ mod tests {
             .unwrap();
 
         assert_eq!(agent.config().get_tool_execution().timeout_ms, 120_000);
+    }
+
+    // ── 远端内容搜索接缝的构建期透传 ──
+
+    /// 只回传一条远端记录，用来证明 grep 确实拿到了 builder 注入的提供者。
+    #[cfg(feature = "files")]
+    struct RemoteBuilderProvider;
+
+    #[cfg(feature = "files")]
+    impl echo_core::tools::search::ContentSearchProvider for RemoteBuilderProvider {
+        fn search(
+            &self,
+            request: &echo_core::tools::search::ContentSearchRequest<'_>,
+        ) -> crate::error::Result<Option<echo_core::tools::search::ContentSearchOutcome>> {
+            Ok(Some(echo_core::tools::search::ContentSearchOutcome {
+                records: vec![format!("{}:1:  remote-builder-hit", request.root.display())],
+                truncated: false,
+            }))
+        }
+    }
+
+    #[cfg(feature = "files")]
+    fn grep_parameters(pattern: &str, path: &str) -> echo_core::tools::ToolParameters {
+        echo_core::tools::ToolParameters::from([
+            ("pattern".to_string(), serde_json::json!(pattern)),
+            ("path".to_string(), serde_json::json!(path)),
+        ])
+    }
+
+    #[cfg(feature = "files")]
+    fn installed_grep(agent: &ReactAgent) -> std::result::Result<Arc<dyn Tool>, String> {
+        agent
+            .tool_manager()
+            .get_tool("grep")
+            .ok_or_else(|| "standard pack did not install grep".to_string())
+    }
+
+    /// 不设置提供者时（默认路径），grep 仍是本机遍历，输出与接入前一致。
+    #[cfg(feature = "files")]
+    #[tokio::test]
+    async fn builder_default_keeps_local_grep_behavior() -> std::result::Result<(), String> {
+        let dir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let working = std::fs::canonicalize(dir.path()).map_err(|error| error.to_string())?;
+        std::fs::write(working.join("notes.txt"), "TODO fix this\n")
+            .map_err(|error| error.to_string())?;
+
+        let agent = ReactAgentBuilder::new()
+            .model("test-model")
+            .system_prompt("Test")
+            .enable_tools()
+            .build()
+            .map_err(|error| error.to_string())?;
+        let tool = installed_grep(&agent)?;
+        let ctx = echo_core::tools::ToolContext {
+            working_dir: Some(working),
+            ..Default::default()
+        };
+        let result = tool
+            .execute_with_context(grep_parameters("TODO", "notes.txt"), &ctx)
+            .await
+            .map_err(|error| error.to_string())?;
+
+        assert!(result.success, "{}", result.error.unwrap_or_default());
+        assert!(result.output.contains("fix this"));
+        Ok(())
+    }
+
+    /// 设置提供者后，grep 不再读本机正文：目标目录在本机不存在也能返回记录。
+    #[cfg(feature = "files")]
+    #[tokio::test]
+    async fn builder_forwards_content_search_provider_to_grep() -> std::result::Result<(), String> {
+        let dir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let working = std::fs::canonicalize(dir.path()).map_err(|error| error.to_string())?;
+
+        let agent = ReactAgentBuilder::new()
+            .model("test-model")
+            .system_prompt("Test")
+            .enable_tools()
+            .content_search_provider(Some(Arc::new(RemoteBuilderProvider)))
+            .build()
+            .map_err(|error| error.to_string())?;
+        let tool = installed_grep(&agent)?;
+        let ctx = echo_core::tools::ToolContext {
+            working_dir: Some(working),
+            ..Default::default()
+        };
+        let result = tool
+            .execute_with_context(grep_parameters("needle", "remote-project"), &ctx)
+            .await
+            .map_err(|error| error.to_string())?;
+
+        assert!(result.success, "{}", result.error.unwrap_or_default());
+        assert!(result.output.contains("remote-builder-hit"));
+        Ok(())
     }
 }

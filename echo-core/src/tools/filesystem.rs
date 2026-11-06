@@ -31,13 +31,19 @@ impl FileType {
     }
 }
 
-/// Only the metadata consumed by the original file/search algorithms.
+/// Metadata a provider must report without reading the file body.
+///
+/// `file_type`/`len`/`mode` serve the original file/search algorithms; `modified`
+/// is additive so upper layers can build a cheap change fingerprint from stat
+/// alone (length alone misses same-length edits).
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FileMetadata {
     pub file_type: FileType,
     pub len: u64,
     /// POSIX mode when the target exposes it; unrelated host bits are never used.
     pub mode: Option<u32>,
+    /// 目标文件系统的修改时间；提供者不暴露时保持 `None`，不得用本机时间填充。
+    pub modified: Option<std::time::SystemTime>,
 }
 
 impl FileMetadata {
@@ -69,6 +75,15 @@ pub trait DirectoryIdentityGuard: Send + Sync {
     fn verify(&self, path: &Path) -> Result<()>;
 }
 
+/// 一次有界只读阶段借用的文件通道。它不是跨请求内容缓存。
+///
+/// 调用方在原 blocking 边界使用并显式 finish，以传播关闭失败；实现的
+/// Drop 也必须结算原资源，不能以丢弃观察者冒充操作已经停止。
+pub trait FileSystemReadSession: Send {
+    fn files(&self) -> &dyn FileSystem;
+    fn finish(self: Box<Self>) -> Result<()>;
+}
+
 /// File I/O in a single target namespace, independent of product/transport.
 ///
 /// Local errors retain `ReactError::Io` and their actual `ErrorKind`. Remote
@@ -78,10 +93,51 @@ pub trait DirectoryIdentityGuard: Send + Sync {
 /// or rollback. Adapters retain the original physical owner until settlement;
 /// neither this trait nor its consumers add a retry loop or a second owner.
 pub trait FileSystem: Send + Sync {
+    /// 可选的只读传输复用接缝。默认直接使用原提供者，无新资源或缓存。
+    /// 返回的会话只用于当前准备阶段，不能被后续 invocation 保留。
+    ///
+    /// ```no_run
+    /// use std::path::Path;
+    /// use echo_core::{error::Result, tools::filesystem::FileSystem};
+    /// fn read_rules(provider: &dyn FileSystem, path: &Path) -> Result<Vec<u8>> {
+    ///     let session = provider.begin_read_session()?;
+    ///     let files = session.as_ref().map(|s| s.files()).unwrap_or(provider);
+    ///     let result = files.read(path);
+    ///     if let Some(session) = session { session.finish()?; }
+    ///     result
+    /// }
+    /// ```
+    fn begin_read_session(&self) -> Result<Option<Box<dyn FileSystemReadSession>>> {
+        Ok(None)
+    }
+
+    /// 按输入优先级返回首个存在的路径；在此前发生的错误必须传播。
+    /// 提供者可以有界流水化 metadata，但不能枚举无关目录项或隐藏早期错误。
+    fn first_existing_path(&self, paths: &[PathBuf]) -> Result<Option<PathBuf>> {
+        for path in paths {
+            if self.exists(path)? {
+                return Ok(Some(path.clone()));
+            }
+        }
+        Ok(None)
+    }
     /// Whether these path tokens name this process's actual native filesystem.
     /// Non-native providers must never authorize a native-only fallback.
     fn paths_are_native(&self) -> bool {
         false
+    }
+    /// 该提供者所代表的物理目标的稳定命名空间；`None` 表示不参与跨消息缓存。
+    ///
+    /// 上层可能缓存"读到的文件正文 + stat 指纹"，用绝对路径做次级键；如果只有
+    /// 路径，两个不同远端主机上的 `/home/u/proj/AGENTS.md` 会互相污染。因此值
+    /// 必须是"同一物理目标稳定、不同目标不同"的事实（例如远端连接已有的稳定
+    /// 身份 + 目标根目录），不能用进程内指针、随机数或本次调用时间。
+    ///
+    /// 默认 `None`：框架不假设任何提供者可以跨请求复用内容。本地读取便宜且
+    /// 目录可能被远程操作影响，保持不参与；缓存条目、容量和失效窗口全部由
+    /// 调用方拥有，本 trait 不新增资源或副作用。
+    fn cache_namespace(&self) -> Option<String> {
+        None
     }
     /// Retain the same directory identity across a protected operation. A
     /// backend without stable handle/reopen identity must reject this before
@@ -182,6 +238,46 @@ pub trait FileSystem: Send + Sync {
         String::from_utf8(self.read(path)?)
             .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error).into())
     }
+}
+
+/// 在提供者支持的只读会话作用域内执行一次多文件读取。
+///
+/// 支持会话的提供者（例如远程工作区）可以把一次工具或准备阶段的多次读取
+/// 复用到同一条传输上；不支持的提供者（例如本地文件系统）直接执行，
+/// 行为与逐次读取完全一致。
+///
+/// 返回第二项表示本次是否实际建立了会话，供调用方记录结构化日志，
+/// 不参与任何正确性判断。读取已经失败时保留原读取错误，关闭失败只记录，
+/// 不覆盖它；读取成功时关闭失败必须传播，不能假装会话正常结束。
+pub fn with_read_session<T>(
+    files: &dyn FileSystem,
+    read: impl FnOnce(&dyn FileSystem) -> Result<T>,
+) -> (Result<T>, bool) {
+    let session = match files.begin_read_session() {
+        Ok(session) => session,
+        Err(error) => return (Err(error), false),
+    };
+    let reused = session.is_some();
+    let scoped = session
+        .as_ref()
+        .map(|session| session.files())
+        .unwrap_or(files);
+    let result = read(scoped);
+    let closed = match session {
+        Some(session) => session.finish(),
+        None => Ok(()),
+    };
+    let result = match (result, closed) {
+        (Ok(value), Ok(())) => Ok(value),
+        (Err(error), closure) => {
+            if let Err(close_error) = closure {
+                tracing::error!(%close_error, "read session also failed to close");
+            }
+            Err(error)
+        }
+        (Ok(_), Err(error)) => Err(error),
+    };
+    (result, reused)
 }
 
 impl FileEntry {

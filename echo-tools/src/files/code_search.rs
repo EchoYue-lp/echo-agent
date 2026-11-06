@@ -156,24 +156,33 @@ impl Tool for CodeSearchTool {
                 ctx.working_dir.as_deref(),
             )?;
 
-            if !file_system.exists(&search_path)? {
-                return Err(ToolError::ExecutionFailed {
-                    tool: "code_search".to_string(),
-                    message: format!("Path does not exist: {}", search_path.display()),
-                }
-                .into());
-            }
-
             let file_filter = glob_pattern.map(glob_to_regex).transpose()?;
-            let mut results = search_symbols(
-                file_system,
-                cancel,
-                &search_path,
-                &this.base_dir,
-                query,
-                symbol_type,
-                file_filter.as_ref(),
-            )?;
+            // 一次调用共用一个只读会话，避免为每个候选目录重建传输。
+            let (found, session_reused) =
+                echo_core::tools::filesystem::with_read_session(file_system, |files| {
+                    if !files.exists(&search_path)? {
+                        return Ok(None);
+                    }
+                    let found = search_symbols(
+                        files,
+                        cancel,
+                        &search_path,
+                        &this.base_dir,
+                        query,
+                        symbol_type,
+                        file_filter.as_ref(),
+                    )?;
+                    Ok(Some(found))
+                });
+            tracing::debug!(
+                tool = "code_search",
+                reused = session_reused,
+                "symbol search scope settled"
+            );
+            let mut results = found?.ok_or_else(|| ToolError::ExecutionFailed {
+                tool: "code_search".to_string(),
+                message: format!("Path does not exist: {}", search_path.display()),
+            })?;
             results.sort_by(|left, right| {
                 left.file
                     .cmp(&right.file)

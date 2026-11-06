@@ -888,6 +888,11 @@ impl ReactAgent {
             if let Some(file_system) = &config.file_system {
                 pack = pack.with_file_system(std::sync::Arc::clone(file_system));
             }
+            #[cfg(feature = "files")]
+            {
+                // 提供者只转交给 `grep`；`None` 时保持标准工具包原状。
+                pack = pack.with_content_search_provider(config.content_search_provider.clone());
+            }
             if config.readonly_tools {
                 pack.install_read_only(tool_manager);
             } else {
