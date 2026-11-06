@@ -203,17 +203,27 @@ impl LlmConfig {
         SourcedLlmConfig::new(self.clone()).build_client()
     }
 
+    /// 使用宿主提供的 HTTP 客户端，复用原协议选择与模型事实解析。
+    /// 产品身份、代理和 TLS 等传输策略由宿主配置，框架不硬编码应用品牌。
+    pub fn build_client_with_http_client(
+        &self,
+        http_client: std::sync::Arc<reqwest::Client>,
+    ) -> Result<Box<dyn echo_core::llm::LlmClient>> {
+        SourcedLlmConfig::new(self.clone()).build_client_with_http_client(http_client)
+    }
+
     pub(crate) fn build_client_with_resolver(
         &self,
         resolver: ModelProfileResolver,
+        http_client: std::sync::Arc<reqwest::Client>,
     ) -> Result<Box<dyn echo_core::llm::LlmClient>> {
         match self.api_protocol {
             LlmApiProtocol::Responses => Ok(Box::new(
-                super::responses::ResponsesClient::new(self.clone())?
+                super::responses::ResponsesClient::with_client(http_client, self.clone())?
                     .with_model_profile_resolver(resolver),
             )),
             LlmApiProtocol::ChatCompletions => Ok(Box::new(
-                super::openai::OpenAiClient::new(self.clone())?
+                super::openai::OpenAiClient::with_client(http_client, self.clone())?
                     .with_model_profile_resolver(resolver),
             )),
             LlmApiProtocol::Anthropic => Ok(Box::new(
@@ -222,6 +232,7 @@ impl LlmConfig {
                     &self.api_key,
                     &self.model,
                 )
+                .with_http_client(http_client)
                 .with_model_profile_resolver(
                     self.provider_name.clone().unwrap_or_default(),
                     resolver,
@@ -282,9 +293,18 @@ impl SourcedLlmConfig {
     }
 
     pub fn build_client(&self) -> Result<Box<dyn echo_core::llm::LlmClient>> {
+        self.build_client_with_http_client(std::sync::Arc::new(reqwest::Client::new()))
+    }
+
+    /// 注入传输客户端时仍保留 provider、精确模型和 caller override 的事实优先级。
+    pub fn build_client_with_http_client(
+        &self,
+        http_client: std::sync::Arc<reqwest::Client>,
+    ) -> Result<Box<dyn echo_core::llm::LlmClient>> {
         self.config.build_client_with_resolver(
             self.config
                 .model_profile_resolver_at(SystemTime::now(), &self.facts),
+            http_client,
         )
     }
 }

@@ -323,6 +323,11 @@ impl AnthropicClient {
         }
     }
 
+    pub(crate) fn with_http_client(mut self, client: Arc<Client>) -> Self {
+        self.client = client;
+        self
+    }
+
     pub(crate) fn with_model_profile_resolver(
         mut self,
         provider_name: impl Into<String>,

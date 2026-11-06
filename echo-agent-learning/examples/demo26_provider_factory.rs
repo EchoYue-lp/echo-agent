@@ -39,8 +39,19 @@ fn main() -> echo_agent::error::Result<()> {
         ModelInputModality::Video,
     ]);
 
+    // 宿主设置自己的真实身份；三种协议仍走同一模型事实与客户端工厂。
+    let http_client = Arc::new(
+        reqwest::Client::builder()
+            .user_agent(concat!(
+                "provider-factory-example/",
+                env!("CARGO_PKG_VERSION")
+            ))
+            .build()
+            .map_err(|error| echo_agent::error::ReactError::Other(error.to_string()))?,
+    );
     for config in [text_model, vision_model, audio_video_model] {
-        let client: Arc<dyn LlmClient> = Arc::from(config.build_client()?);
+        let client: Arc<dyn LlmClient> =
+            Arc::from(config.build_client_with_http_client(Arc::clone(&http_client))?);
         println!(
             "provider={} model={} protocol={:?} capabilities={:?}",
             config.provider_name.as_deref().unwrap_or("custom"),
