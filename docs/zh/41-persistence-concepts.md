@@ -134,6 +134,11 @@ framework 会在模型准备前精确 reset/restore；只有相同 ID 才复用 
 restore/save 使用相同优先级：显式 invocation runtime ID、invocation 产品 conversation、
 configured conversation。旧 external setter 入口已退役，因此 A -> B -> A 不会把 A 的消息写入 B。
 
+产品scope与runtime ID可以不同，即使runtime ID恰好等于Agent构造时的conversation配置，也不能
+把构造期ID当作本轮产品scope。流准入使用原invocation快照先协调pending投影，后续上下文恢复
+保留同一scope／runtime组合；默认快照的补充协调只适用于真正的默认scope，scope缺省时沿原
+runtime回退。错误scope读仍由Store拒绝，不通过清空checkpoint或弱化归属校验恢复运行。
+
 轮换 `runtime_state_id` 会创建干净的模型上下文，但不会删除稳定产品会话。
 `save_checkpoint_for_scope` 把每个 runtime ID 持久索引到产品 scope。关闭 admission 并完成旧 owner
 结算后，reset 通过 `clear_persisted_runtime_incarnation` 先结清 durable pending projection，再精确

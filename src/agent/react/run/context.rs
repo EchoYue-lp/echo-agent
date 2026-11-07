@@ -292,13 +292,17 @@ impl ReactAgent {
 
     async fn reconcile_configured_pending_projection(
         &self,
+        scope_id: Option<&str>,
         runtime_state_id: Option<&str>,
     ) -> crate::error::Result<()> {
         if self.memory.conversation_store.is_none()
             || runtime_state_id != self.config.conversation_id.as_deref()
+            || scope_id.or(runtime_state_id) != self.config.conversation_id.as_deref()
         {
             return Ok(());
         }
+        // 此处仅协调构造期的默认scope；调用级产品scope已由准入快照协调，
+        // 不能因runtime ID恰好等于配置ID而回退到错误的默认scope。
         let snapshot = crate::agent::snapshot::AgentRunSnapshot::from_agent(self);
         if let Some(settlement) = snapshot.reconcile_pending_transcript_projection().await?
             && settlement.status != crate::memory::TranscriptProjectionSettlementStatus::Settled
@@ -314,7 +318,7 @@ impl ReactAgent {
         runtime_state_id: Option<&str>,
         trace_snapshot: Option<&crate::agent::snapshot::AgentRunSnapshot>,
     ) -> crate::error::Result<()> {
-        self.reconcile_configured_pending_projection(runtime_state_id)
+        self.reconcile_configured_pending_projection(scope_id, runtime_state_id)
             .await?;
         let _previous_hydration = self.begin_runtime_state_hydration(runtime_state_id).await;
         self.clear_runtime_snapshots();
@@ -389,7 +393,7 @@ impl ReactAgent {
                 .restore_thread_context_for(scope_id, runtime_state_id, trace_snapshot)
                 .await;
         }
-        self.reconcile_configured_pending_projection(runtime_state_id)
+        self.reconcile_configured_pending_projection(scope_id, runtime_state_id)
             .await?;
         let is_cold = {
             let context = self.memory.context.lock().await;

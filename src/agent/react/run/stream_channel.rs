@@ -5028,6 +5028,69 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn configured_runtime_with_product_scope_survives_second_turn() -> Result<()> {
+        let root = tempfile::tempdir().map_err(|error| ReactError::Other(error.to_string()))?;
+        let runtime = Arc::new(crate::state::FileRuntimeStateStore::new(
+            root.path().join("runtime"),
+        )?);
+        let conversations = Arc::new(crate::memory::FileConversationStore::new(
+            root.path().join("conversations"),
+        )?);
+        let llm = Arc::new(MockLlmClient::new().with_responses(["first reply", "second reply"]));
+        let mut agent = ReactAgentBuilder::new()
+            .llm_client(llm.clone())
+            .system_prompt("system")
+            .conversation_id("channel-runtime:fixture")
+            .state_store(runtime.clone())
+            .build()?;
+        agent.set_conversation_store(conversations);
+        for answer in ["first reply", "second reply"] {
+            let invocation = echo_core::agent::AgentInvocationContext {
+                runtime_state_id: Some("channel-runtime:fixture".to_string()),
+                transcript_generation_id: Some("channel-runtime:fixture".to_string()),
+                runtime: Some(echo_core::tools::ExternalRunContext {
+                    conversation_id: Some("channel:fixture".to_string()),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            };
+            let events = agent
+                .run_stream_channel(
+                    StreamInit {
+                        text: "continue".to_string(),
+                        message: None,
+                        label: String::new(),
+                        invocation: Some(invocation),
+                    },
+                    StreamMode::Chat,
+                )
+                .await?
+                .collect::<Vec<_>>()
+                .await
+                .into_iter()
+                .collect::<Result<Vec<_>>>()?;
+            assert!(
+                events
+                    .iter()
+                    .any(|event| matches!(event, AgentEvent::FinalAnswer(text) if text == answer))
+            );
+        }
+        let checkpoint = runtime
+            .load_runtime_state("channel:fixture", "channel-runtime:fixture")
+            .await?
+            .ok_or_else(|| ReactError::Other("original runtime state disappeared".to_string()))?;
+        assert_eq!(checkpoint.scope.scope_id, "channel:fixture");
+        assert_eq!(llm.call_count(), 2);
+        assert!(
+            runtime
+                .load_runtime_state("channel-runtime:fixture", "channel-runtime:fixture")
+                .await
+                .is_err()
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn invocation_runtime_state_identity_controls_restore_and_save() -> Result<()> {
         let root = tempfile::tempdir().map_err(|error| ReactError::Other(error.to_string()))?;
         let store = Arc::new(crate::state::FileRuntimeStateStore::new(root.path())?);
