@@ -2,6 +2,11 @@
 
 Framework 沿既有 ReAct 主循环接收 provider 原生消息。`think`、`final_answer` 控制工具及强制工具前分析提示已退役；模型的原生 thinking 配置、签名、加密块和必要历史回传继续保留。
 
+Responses中的`content_part.added/done`只声明内容块及父项坐标，不声明父项类型。
+解码器因此保留已知`output_item`类型；尚未收到类型时保持未知，不能默认猜成message而误拒
+reasoning。ID仍立即登记，跨索引复用／同索引换ID、已知父项类型变化、完整响应与已观测
+事实不一致等情况继续拒绝，不通过忽略身份校验兼容流事件。
+
 ## 公开返回形式与模型传输
 
 `execute/chat` 返回 String，流式入口返回事件流；两者共用原 Managed owner、ReAct 和结束规则。
