@@ -589,6 +589,21 @@ agent.add_tools(vec![
 执行还要求 serde_json 整数表示；`1.0` 等浮点表示明确报错，不使用默认值。此约束
 不新增资源限额。
 
+`generate_chart` 的默认 JSON 分支保留原 pretty JSON `output`，保留原 Text kind，并以 `data` 和 `mime_type=application/vnd.vegalite.v5+json`
+声明完整公开 spec；这是新增的可选公开副本，不能据 output 未变就称整个序列化返回无变化。
+只在原 pretty JSON 不超过既有 `DEFAULT_TOOL_OUTPUT_ARTIFACT_THRESHOLD_BYTES`（1MiB）的
+字节预算时附加 data/MIME；这是副本资格，不限制原工具执行或截断返回。超大 spec 仍保留原
+output，由既有 artifact/截断机制处理。没有 Guard 改写或预算截断时，tool→Message 仍消费原 output，新增 data 不直接替代它。
+配置了 Guard 或输出预算时仍由原 pipeline 决定；新增 data/MIME 也会参加 Guard 检查，
+可能影响该路径，不能泛称全部模型 wire 不变。内容替换后原 pipeline 会清理这些投影，
+不在其后补回。
+HTML 分支保持原独立页面文本，
+不冒充 JSON spec。MIME 使用 [JupyterLab 的既有 Vega-Lite 格式](https://github.com/jupyterlab/jupyterlab/blob/main/packages/vega5-extension/src/index.ts)，不是应用私有协议。
+该声明只说明公开产物格式，不证明工具是 builtin、不赋予额外权限或执行/最终发布资格。
+消费方须核对原调用/执行来源以及成功、未截断和完整 schema；失败或经 Guard 替换后
+缺失的结构化投影不能靠输出字符串补造。扩展主动声明相同格式时可被视为公开图表，
+同名但只返回普通文本的工具不因此成为图表 producer。
+
 ---
 
 ## ToolChoice 枚举（v0.2.1 新增）
