@@ -6,6 +6,14 @@
 
 本文件是 AI agent 在本仓库工作时的**最高优先级约束**(优先级高于 agent 默认行为和任何技能),请严格遵守。本仓库可独立检出使用,本文件即完整约束,不依赖外部 superproject。
 
+## 2026-11-05 新锁的用户精确裁决
+
+用户在当前协调会话直接回答：“同意本次 Framework 8fb62e 与 CLI 48eece 新锁的精确绑定，不自动接受后续新风险。”原文回执为主根 `.echo-semantic/local/dependency-exact-binding-20261105-r01/authorization.json`，SHA256 `a2e324628e7ad1c11dc737405a48cb46a36e8333f109e15f66b4836810815a62`。
+
+本仓仅接受锁 `8fb62e249fc8fa3114a51b85277f201a98bb190572a80293a91555d8a519e928`（677包）。原49组107个name/version/source身份完整保留，仅quick-xml组新增 `0.42.0`／`registry+https://github.com/rust-lang/crates.io-index`，现49组108身份；唯一机器权威仍为 `.cargo/cargo-deny-duplicate-baseline.json`。原deny策略、cargo-deny 0.20.2、完整四类命令和严格parser不变，所有其它变化继续阻断，不增加ignore/allow。正式rebound caller和原14控制必须实际通过，保留原scanner0、旧caller1和网络失败的原义。
+
+本节更新下方历史绑定的当前时态，不改旧授权和失败事实，不预授未来锁、版本、来源或新风险，不向CLI/SDK继承。局部媒体、完整工程、App及main CI继续分别验收；不授权GUI、提交、推送、合并或发布。
+
 ## 本次 EKO 迭代的开发目录
 
 用户指定唯一开发根 `/Users/ls/MyWork/code/ylp_agent_learn/lp-agent`。本仓在该根的 `echo-agent/` 内开发；源码、工程文档、构建产物、回执与恢复材料均写在主根内，不创建外部 worktree。已有外部工作树只作冻结迁移来源，备份、哈希回读和依赖核对完成后按授权回收。同一主根多会话按文件划分单一写权；验证期间冻结对应源码及依赖。后文 worktree 规则仅用于维护既有工作树，不取消本轮目录限制。

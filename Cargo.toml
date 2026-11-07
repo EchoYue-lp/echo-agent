@@ -23,7 +23,7 @@ default-members = [
 resolver = "3"
 exclude = [
     "vendor/rust_xlsxwriter-0.82.0",
-    "vendor/calamine-0.36.1",
+    "vendor/calamine-0.38.0",
     "vendor/docx-rs-0.4.22",
     "vendor/polars-arrow-0.55.2",
     "vendor/polars-parquet-0.55.2",
@@ -167,7 +167,7 @@ harness = false
 
 [workspace.dependencies]
 rust_xlsxwriter = { version = "=0.82.0", path = "vendor/rust_xlsxwriter-0.82.0" }
-calamine = { version = "=0.36.1", path = "vendor/calamine-0.36.1" }
+calamine = { version = "=0.38.0", path = "vendor/calamine-0.38.0" }
 docx-rs = { version = "=0.4.22", path = "vendor/docx-rs-0.4.22" }
 
 # 测试构建使用温和优化，保留调试断言与整数溢出检查。

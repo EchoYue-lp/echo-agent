@@ -10,7 +10,7 @@ use crate::vba::VbaProject;
 use crate::Picture;
 use crate::{
     open_workbook, open_workbook_from_rs, Data, DataRef, HeaderRow, Metadata, Ods, Range, Reader,
-    ReaderRef, Xls, Xlsb, Xlsx,
+    ReaderRef, StyleRange, WorkbookProperties, Xls, Xlsb, Xlsx,
 };
 
 use std::fs::File;
@@ -27,6 +27,28 @@ pub enum Sheets<RS> {
     Xlsb(Xlsb<RS>),
     /// Ods reader
     Ods(Ods<RS>),
+}
+
+impl<RS: std::io::Read + std::io::Seek> Sheets<RS> {
+    /// Get the workbook document properties.
+    ///
+    /// Read the document properties, such as the creator, title, application
+    /// and company, into a [`WorkbookProperties`] struct. Missing fields are
+    /// returned as `None`.
+    ///
+    /// Document properties are supported for the [`Xls`], [`Xlsx`], [`Xlsb`]
+    /// and [`Ods`] readers.
+    ///
+    /// See [`Xlsx::workbook_properties()`] for an example.
+    ///
+    pub fn workbook_properties(&mut self) -> Result<WorkbookProperties, Error> {
+        match self {
+            Sheets::Xlsx(e) => e.workbook_properties().map_err(Error::Xlsx),
+            Sheets::Xlsb(e) => e.workbook_properties().map_err(Error::Xlsb),
+            Sheets::Xls(e) => e.workbook_properties().map_err(Error::Xls),
+            Sheets::Ods(e) => e.workbook_properties().map_err(Error::Ods),
+        }
+    }
 }
 
 /// Opens a workbook and define the file type at runtime.
@@ -144,6 +166,16 @@ where
             Sheets::Xlsx(e) => e.worksheet_formula(name).map_err(Error::Xlsx),
             Sheets::Xlsb(e) => e.worksheet_formula(name).map_err(Error::Xlsb),
             Sheets::Ods(e) => e.worksheet_formula(name).map_err(Error::Ods),
+        }
+    }
+
+    /// Get the cell styles for the worksheet with the given name.
+    fn worksheet_style(&mut self, name: &str) -> Result<StyleRange, Self::Error> {
+        match self {
+            Sheets::Xls(e) => e.worksheet_style(name).map_err(Error::Xls),
+            Sheets::Xlsx(e) => e.worksheet_style(name).map_err(Error::Xlsx),
+            Sheets::Xlsb(e) => e.worksheet_style(name).map_err(Error::Xlsb),
+            Sheets::Ods(e) => e.worksheet_style(name).map_err(Error::Ods),
         }
     }
 

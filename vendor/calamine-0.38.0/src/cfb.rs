@@ -10,7 +10,7 @@ use std::io::Read;
 
 use log::debug;
 
-use encoding_rs::{Encoding, UTF_16LE, UTF_8};
+use encoding_rs::{Encoding, UTF_16BE, UTF_16LE};
 
 use crate::utils::*;
 
@@ -112,24 +112,33 @@ impl Cfb {
         // load fat and dif sectors
         debug!("load difat {h:?}");
         let mut sector_id = h.difat_start;
+        // Set a bound on the DIFAT chain so it cannot reference more than `maxid` sectors.
+        let mut difat_sectors = 0usize;
         while sector_id < RESERVED_SECTORS {
+            difat_sectors = difat_sectors.saturating_add(1);
+            if difat_sectors > maxid.saturating_add(1) {
+                return Err(CfbError::SectorBeyondEof(sector_id));
+            }
             difat.extend(to_u32(sectors.get(sector_id, reader)?));
-            sector_id = difat.pop().unwrap(); //TODO: check if in infinite loop
+            sector_id = difat.pop().ok_or(CfbError::SectorBeyondEof(sector_id))?;
         }
 
         // load the FATs
         debug!("load fat (len {})", h.fat_len);
-        let mut fats = Vec::with_capacity(h.fat_len);
+        let mut fats = Vec::new();
         for id in difat.into_iter().filter(|id| *id < DIFSECT) {
             fats.extend(to_u32(sectors.get(id, reader)?));
         }
 
         // get the list of directory sectors
         debug!("load directories");
-        // we want to read the full chain, so pass no size restriction
+        // We want to read the full chain, so pass no size restriction. Each
+        // directory entry should be exactly 128 bytes. A short trailing chunk
+        // is malformed and must not be passed to Directory::from_slice.
         let dirs = sectors.get_chain(h.dir_start, &fats, reader, usize::MAX)?;
         let dirs = dirs
             .chunks(128)
+            .filter(|c| c.len() == 128)
             .map(|c| Directory::from_slice(c, h.sector_size))
             .collect::<Vec<_>>();
 
@@ -163,12 +172,18 @@ impl Cfb {
 
     /// Checks if directory exists
     pub fn has_directory(&self, name: &str) -> bool {
-        self.directories.iter().any(|d| &*d.name == name)
+        self.directories
+            .iter()
+            .any(|d| d.name.as_bytes().eq_ignore_ascii_case(name.as_bytes()))
     }
 
     /// Gets a stream by name out of directories
     pub fn get_stream<R: Read>(&mut self, name: &str, r: &mut R) -> Result<Vec<u8>, CfbError> {
-        match self.directories.iter().find(|d| &*d.name == name) {
+        match self
+            .directories
+            .iter()
+            .find(|d| d.name.as_bytes().eq_ignore_ascii_case(name.as_bytes()))
+        {
             None => Err(CfbError::StreamNotFound(name.to_string())),
             Some(d) => {
                 if d.len < 4096 {
@@ -255,9 +270,8 @@ impl Header {
         let mini_fat_start = read_u32(&buf[60..64]);
         let mini_fat_len = read_usize(&buf[64..68]);
         let difat_start = read_u32(&buf[68..72]);
-        let difat_len = read_usize(&buf[62..76]);
 
-        let mut difat = Vec::with_capacity(difat_len);
+        let mut difat = Vec::new();
         difat.extend(to_u32(&buf[76..512]));
 
         Ok((
@@ -472,10 +486,12 @@ impl XlsEncoding {
 
     fn high_byte(&self, high_byte: Option<bool>) -> Option<bool> {
         high_byte.or_else(|| {
-            if self.encoding == UTF_8 || self.encoding.is_single_byte() {
-                None
-            } else {
+            // Only UTF-16 uses compressed low-byte characters. Legacy multibyte
+            // encodings consume their original bytes without inserted NULs.
+            if self.encoding == UTF_16LE || self.encoding == UTF_16BE {
                 Some(false)
+            } else {
+                None
             }
         })
     }
@@ -514,5 +530,55 @@ impl XlsEncoding {
 
     pub fn decode_all(&self, stream: &[u8]) -> String {
         self.encoding.decode(stream).0.into_owned()
+    }
+}
+
+#[cfg(test)]
+mod encoding_test {
+    use super::XlsEncoding;
+
+    #[test]
+    fn legacy_multibyte_strings_keep_the_original_bytes() {
+        for (codepage, bytes, expected) in [
+            (932, &[0x93, 0xfa, 0x96, 0x7b][..], "日本"),
+            (936, &[0xd6, 0xd0, 0xce, 0xc4][..], "中文"),
+            (950, &[0xa4, 0xa4, 0xa4, 0xe5][..], "中文"),
+            (951, &[0xa4, 0xa4, 0xa4, 0xe5][..], "中文"),
+            (1252, &[b'c', b'a', b'f', 0xe9][..], "café"),
+            (65001, "日本".as_bytes(), "日本"),
+        ] {
+            let encoding = XlsEncoding::from_codepage(codepage).unwrap();
+            let mut value = String::from("prefix:");
+            assert_eq!(
+                encoding.decode_to(bytes, bytes.len(), &mut value, None),
+                (bytes.len(), bytes.len())
+            );
+            assert_eq!(value, format!("prefix:{expected}"), "{codepage}");
+        }
+    }
+
+    #[test]
+    fn unicode_flags_and_truncated_legacy_input_keep_consumption_counts() {
+        let encoding = XlsEncoding::from_codepage(1200).unwrap();
+        for (bytes, flag) in [
+            (b"A".as_slice(), None),
+            (b"A".as_slice(), Some(false)),
+            (b"A\0".as_slice(), Some(true)),
+        ] {
+            let mut value = String::new();
+            assert_eq!(
+                encoding.decode_to(bytes, 1, &mut value, flag),
+                (1, bytes.len())
+            );
+            assert_eq!(value, "A");
+        }
+        let mut value = String::new();
+        assert_eq!(
+            XlsEncoding::from_codepage(932)
+                .unwrap()
+                .decode_to(&[0x80, 0xe9], 9, &mut value, None),
+            (2, 2)
+        );
+        assert_eq!(value, "\u{80}\u{fffd}");
     }
 }

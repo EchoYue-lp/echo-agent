@@ -5,12 +5,12 @@ Framework 唯一维护下列官方发布包的有界补丁。第三方包排除�
 | 包                                                                        | 原 `.crate` SHA-256                                                | 原上游 commit                                                       | 许可证             |
 | ------------------------------------------------------------------------- | ------------------------------------------------------------------ | ------------------------------------------------------------------- | ------------------ |
 | [rust_xlsxwriter 0.82.0](https://crates.io/crates/rust_xlsxwriter/0.82.0) | `d61a82de4e7b30fc427909f2c5aafaada88cc7ae8316edabae435f74341f9278` | `f36d8f74d679ec2fe94bcb987146bcc983084070`                          | MIT OR Apache-2.0  |
-| [calamine 0.36.1](https://crates.io/crates/calamine/0.36.1)               | `5fa68281b1a76b54a62156474adb06bb380a67e07dd60656e3217152b42183f3` | `0a24c2a9f1e38c0932c1299e633270dc730db505`                          | MIT                |
+| [calamine 0.38.0](https://crates.io/crates/calamine/0.38.0)               | `f431b67cba6122a1f7d26b7adafc71bbdf07026095fe811f5efc025d8748e1d8` | `a4dba3b5309d81b2774018a13be39e68d938c3c7`                          | MIT                |
 | [docx-rs 0.4.22](https://crates.io/crates/docx-rs/0.4.22)                 | `7fdf00e8af6d0b3e92d4bbf9b76f773d8b84ea80f310324ad16cbdc2e653e02c` | `f04cf8b47a925b2b6fff850dcb75069aae89dab4`（docx-core）             | MIT                |
 | [polars-arrow 0.55.2](https://crates.io/crates/polars-arrow/0.55.2)       | `c5ab55460ca2553d1a2bbaf2046998cfbbb685bc18d1e168b4367b63301eb271` | `d7488c71ecfbc77790292ff5b365b991c08380ce`（crates/polars-arrow）   | MIT AND Apache-2.0 |
 | [polars-parquet 0.55.2](https://crates.io/crates/polars-parquet/0.55.2)   | `d33a17979d2afa0309437478662cf996361a6e1768bf467db82bd4f4a9443064` | `d7488c71ecfbc77790292ff5b365b991c08380ce`（crates/polars-parquet） | MIT AND Apache-2.0 |
 
-## 原媒体补丁
+## 原媒体补丁（0.36.1阶段历史）
 
 [ADR 0089](../docs/adr/0089-non-yanked-media-dependencies.md) 记录三个媒体父包对已撤回 ZIP 版本的修复。保留生产源码、include 所需 README/changelog 和许可；docx-rs 发布包缺失的 LICENSE 取自上表精确上游 commit、Git blob `bb2ae316cb1d1b43c6f7c7f2658ade9ede020e21`。未用于依赖消费的 fixtures、独立 examples、benches、dev-dependency 表与包装元数据未纳入；源码内联测试保留，第三方包不作为独立 workspace 成员运行。
 
@@ -24,6 +24,56 @@ Framework 唯一维护下列官方发布包的有界补丁。第三方包排除�
 原媒体补丁共 449 个依赖文件：436 个原归档成员逐字节保持，十三处差异为三个 manifest、五个适配 Rust 文件、补回的一份许可，以及四处包装文件 EOF 空行归一；完整许可条文与生产内容保留。既有原生 XLSX/Word 工具回归验证实际写读。
 
 此前 ZIP 定向更新由 Cargo 在上游允许范围内重绑过同版本边：hyper-util 0.1.20、quinn 0.11.11、quinn-udp 0.5.15 选择 socket2 0.6.5；tempfile 3.27.0 选择 getrandom 0.4.3；winapi-util 0.1.11 选择 windows-sys 0.61.2。这些并非都由 ZIP 强制要求，历史选择不能替代当前真实锁图。
+
+## 2026-11-04：Calamine CFB 解析的局部修复（历史）
+
+最新原官方registry-origin审计发现 `calamine 0.36.1` 命中 `RUSTSEC-2026-0436`。
+其CFB/OLE2读取器会在短目录块上panic，循环DIFAT链可能无界分配；本地个人应用
+读取损坏附件同样可能受影响。上游修复为PR762／commit
+`b8ec4f09cba6aea7d8359ababc240c9ed064751b`，公告修复版本为0.38.0。
+
+本地先按上游边界修复现有 `src/cfb.rs`：目录短块不进入固定偏移读取器，DIFAT遍历
+受文件扇区数约束，空链返回原typed错误；计数使用饱和加法。上游两份原样样本进入
+`echo-tools/tests/cfb_advisory_regressions.rs` 的 `media` 测试入口。短目录原版实际panic／101，
+局部修复后两项实际通过；旧版OOM样本未执行，不把源码核查冒运行失败。
+该局部回补仅覆盖PR762的两项场景，不承诺任意损坏CFB输入均无panic或分配问题；
+官方0.38还包含其它CFB头分配与格式处理修复，完整升级资格须另验。
+
+版本、origin、三仓正式锁和风险策略保持原值。局部源码修复不使0.36.1的保守registry
+投影审计变绿，也未进入既有abdd App或SDK精pin。官方0.38.0归档已核SHA256
+`f431b67cba6122a1f7d26b7adafc71bbdf07026095fe811f5efc025d8748e1d8`，
+仅作为本地主根内的未采用验证输入；其新依赖quick-xml0.42.0涉及独立的版本／锁／精确基线复评。
+不新增ignore、版本shim或风险豁免。现有入口/API、examples及官网调用说明无需改变。
+
+## 2026-11-05：采用官方Calamine 0.38.0并复评新锁
+
+用户明确选择“采用0.38.0并生成新锁候选；逐项复评，不自动接受新风险”。当前正式
+vendor已切到上表官方0.38归档的完整runtime源码，原0.36目录移除，manifest／唯一origin
+声明及审计生成器版本同步。相对官方runtime仅保留CFB计数的饱和加法；manifest继续固定
+Zip9.0.3，去依赖未用开发target并设独立workspace，许可和include所需原文保留。
+原Zip9文件名错误传播已由0.38上游实现承接，无需再回灌旧版私有补丁。
+
+Framework新锁为677包，CLI新锁为769包：calamine0.36.1→0.38.0并新增quick-xml0.42.0。
+实际resolver还改选Framework tempfile→getrandom0.4.3和CLI iana-time-zone→windows-core0.61.2，
+均为既有版本节点间的边，不是安全修复强制要求；逐项差量原件单列，不宣跨平台等价。
+两份CLI fresh官方audit均零漏洞／仅原五warning，scanner仍自然1；Framework官方deny自然0，
+完整49组中仅quick-xml新增0.42，身份107→108。正式精确baseline和CLI锁风险policy尚未重绑，
+候选比较不冒正式gate0，不新增ignore/allow或扩大风险集合。
+
+SDK精pin和锁保持原340／c448；没有可资格化的Framework新revision前不替SDK编造pin或锁。
+现有abdd App也未重建，不能由源码采用推断制品已包含修复。后续按当前源验证媒体消费者、
+真实锁和适用工程门禁，再独立结算SDK与App资格。具体原件在本仓local的
+`calamine-advisory-validation-20261104-r01/`，人类裁决与此前局部RED／GREEN均保留。
+
+### 2026-11-05 精确绑定已获批准
+
+前段“尚未重绑”保留为采用阶段的历史记录。用户后续已明确接受本次 Framework 锁
+`8fb62e249fc8fa3114a51b85277f201a98bb190572a80293a91555d8a519e928`，
+677 包、49 组／108 个完整身份；CLI 本次锁为 `48eece…`，原五项风险身份保持。
+本仓精确 baseline 已采用，原正式 rebound 与14项控制自然0；CLI 原 actual-lock／
+canonical-origin 精确gate各0，官方scanner各1。这些结果仅属于当时冻结输入，
+不续期后继源码／consumer，也不替代当前新fresh审计、完整工程、SDK、App或main CI。
+完整裁决见[本仓协作规则](../AGENTS.md#2026-11-05-新锁的用户精确裁决)。
 
 ## Polars 的 zstd 补丁
 

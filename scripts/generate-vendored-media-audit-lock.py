@@ -13,7 +13,7 @@ REGISTRY = "registry+https://github.com/rust-lang/crates.io-index"
 OPTIONAL_ORIGINS = {"polars-arrow", "polars-parquet"}
 EXPECTED_ORIGINS = {
     "rust_xlsxwriter": "0.82.0",
-    "calamine": "0.36.1",
+    "calamine": "0.38.0",
     "docx-rs": "0.4.22",
     "polars-arrow": "0.55.2",
     "polars-parquet": "0.55.2",

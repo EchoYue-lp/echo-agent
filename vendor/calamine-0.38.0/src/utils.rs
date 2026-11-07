@@ -10,8 +10,9 @@ use std::io::{Read, Seek};
 
 use quick_xml::{escape::resolve_xml_entity, events::BytesRef};
 use zip::read::ZipArchive;
+use zip::result::ZipResult;
 
-const UNICODE_ESCAPE_LENGTH: usize = 7; // Length of _x00HH_.
+const UNICODE_ESCAPE_LENGTH: usize = 7; // Length of _xHHHH_.
 
 macro_rules! from_err {
     ($from:ty, $to:tt, $var:tt) => {
@@ -26,7 +27,9 @@ macro_rules! from_err {
 /// Converts a &[u8] into an iterator of `u32`s
 pub fn to_u32(s: &[u8]) -> impl ExactSizeIterator<Item = u32> + '_ {
     assert_eq!(s.len() % 4, 0);
-    s.chunks_exact(4)
+    s.as_chunks::<4>()
+        .0
+        .iter()
         .map(|data| u32::from_le_bytes([data[0], data[1], data[2], data[3]]))
 }
 
@@ -65,20 +68,27 @@ pub fn read_f64(s: &[u8]) -> f64 {
     f64::from_le_bytes(s[..8].try_into().unwrap())
 }
 
-/// Push literal column into a String buffer
-pub fn push_column(mut col: u32, buf: &mut String) {
-    if col < 26 {
-        buf.push((b'A' + col as u8) as char);
-    } else {
-        let mut rev = String::new();
-        while col >= 26 {
-            let c = col % 26;
-            rev.push((b'A' + c as u8) as char);
-            col -= c;
-            col /= 26;
-        }
-        buf.extend(rev.chars().rev());
+/// Convert a 0-based column index to an Excel column name (0 -> "A", 26 -> "AA").
+pub fn push_column(col: u32, buf: &mut String) {
+    let mut digits = [0u8; 6];
+    let len = column_name_digits(col, &mut digits);
+    for &d in &digits[..len] {
+        buf.push(d as char);
     }
+}
+
+/// Write the Excel letters for a 0-based column index into `out` (most
+/// significant first) and return how many were written.
+pub(crate) fn column_name_digits(col: u32, out: &mut [u8]) -> usize {
+    let mut num = col + 1;
+    let mut n = 0;
+    while num > 0 {
+        out[n] = b'A' + ((num - 1) % 26) as u8;
+        n += 1;
+        num = (num - 1) / 26;
+    }
+    out[..n].reverse();
+    n
 }
 
 // Utility function to unescape standard XML entities or character references
@@ -89,10 +99,10 @@ pub(crate) fn unescape_entity_to_buffer(
     entity: &BytesRef,
     buffer: &mut String,
 ) -> Result<(), quick_xml::Error> {
-    let decoded = entity.decode()?;
+    let decoded = entity.as_ref();
 
     // Handle standard XML entities directly.
-    if let Some(unescaped_xml_entity) = resolve_xml_entity(&decoded) {
+    if let Some(unescaped_xml_entity) = resolve_xml_entity(decoded) {
         buffer.push_str(unescaped_xml_entity);
         return Ok(());
     }
@@ -112,61 +122,98 @@ pub(crate) fn unescape_entity_to_buffer(
 }
 
 // Function to unescape Excel XML escapes in a string. Excel encodes a character
-// like "\r" as "_x000D_". In turn it escapes the literal string "_x000D_" as
+// like "\r" as "_x000D_", where the 4 hex digits are a UTF-16 code unit, so a
+// character outside the BMP is encoded as a surrogate pair like
+// "_xD83D__xDCF7_". In turn it escapes the literal string "_x000D_" as
 // "_x005F_x000D_".
+//
+// Most strings don't contain escapes so the function returns the original
+// string without allocating unless an escape is found.
 pub(crate) fn unescape_xml(original: &str) -> Cow<'_, str> {
-    if !original.contains("_x00") {
+    let Some((mut index, mut unit)) = find_xml_escape(original, 0) else {
         return Cow::Borrowed(original);
-    }
+    };
 
-    let bytes = original.as_bytes();
-    let mut escaped_string = String::with_capacity(original.len());
-    let mut i = 0;
-    let mut has_changes = false;
+    let mut unescaped = String::with_capacity(original.len());
+    let mut copied = 0;
 
-    while i < bytes.len() {
-        // Look for an escape sequence like: "_x00HH_"
-        if i + UNICODE_ESCAPE_LENGTH <= bytes.len()
-            && bytes[i] == b'_'
-            && bytes.get(i..i + 4) == Some(b"_x00")
-            && bytes[i + 6] == b'_'
-        {
-            // Extract and validate the hex digits.
-            if let Ok(hex_str) = std::str::from_utf8(&bytes[i + 4..i + 6]) {
-                if let Ok(hex_value) = u8::from_str_radix(hex_str, 16) {
-                    // Valid escape sequence, convert to a character.
-                    escaped_string.push(hex_value as char);
+    loop {
+        // Copy the literal text before the escape.
+        unescaped.push_str(&original[copied..index]);
+        index += UNICODE_ESCAPE_LENGTH;
 
-                    // Skip the processed escape sequence.
-                    i += UNICODE_ESCAPE_LENGTH;
-                    has_changes = true;
-                    continue;
+        match unit {
+            0xD800..=0xDBFF => {
+                // A high surrogate must be followed by a low surrogate escape
+                // to form a character. Otherwise it is replaced by U+FFFD.
+                match parse_xml_escape(original, index) {
+                    Some(low @ 0xDC00..=0xDFFF) => {
+                        let code_point = 0x10000
+                            + ((u32::from(unit) - 0xD800) << 10)
+                            + (u32::from(low) - 0xDC00);
+                        unescaped.push(
+                            char::from_u32(code_point).unwrap_or(char::REPLACEMENT_CHARACTER),
+                        );
+                        index += UNICODE_ESCAPE_LENGTH;
+                    }
+                    _ => unescaped.push(char::REPLACEMENT_CHARACTER),
                 }
             }
+            0xDC00..=0xDFFF => unescaped.push(char::REPLACEMENT_CHARACTER),
+            _ => unescaped
+                .push(char::from_u32(u32::from(unit)).unwrap_or(char::REPLACEMENT_CHARACTER)),
         }
 
-        // Not an escape sequence, so we copy the current UTF-8 character.
-        let remaining = &original[i..];
-        match remaining.chars().next() {
-            Some(ch) => {
-                escaped_string.push(ch);
-                i += ch.len_utf8();
-            }
+        copied = index;
+
+        match find_xml_escape(original, index) {
+            Some(next) => (index, unit) = next,
             None => break,
         }
     }
 
-    if has_changes {
-        Cow::Owned(escaped_string)
-    } else {
-        Cow::Borrowed(original)
+    unescaped.push_str(&original[copied..]);
+    Cow::Owned(unescaped)
+}
+
+// Find the first "_xHHHH_" escape at or after the byte index `start`. Returns
+// the index of the escape and its UTF-16 code unit.
+fn find_xml_escape(original: &str, mut start: usize) -> Option<(usize, u16)> {
+    while let Some(offset) = original[start..].find('_') {
+        let index = start + offset;
+        if let Some(unit) = parse_xml_escape(original, index) {
+            return Some((index, unit));
+        }
+        start = index + 1;
     }
+
+    None
+}
+
+// Parse an "_xHHHH_" escape at the byte index `index` and return its UTF-16
+// code unit. Returns None if the bytes at the index aren't a valid escape.
+fn parse_xml_escape(original: &str, index: usize) -> Option<u16> {
+    let bytes = original
+        .as_bytes()
+        .get(index..index + UNICODE_ESCAPE_LENGTH)?;
+
+    if bytes[0] != b'_' || bytes[1] != b'x' || bytes[6] != b'_' {
+        return None;
+    }
+
+    let hex = &bytes[2..6];
+    if !hex.iter().all(u8::is_ascii_hexdigit) {
+        return None;
+    }
+
+    // The digits are ASCII so the slice is valid UTF-8 and fits in a u16.
+    u16::from_str_radix(std::str::from_utf8(hex).ok()?, 16).ok()
 }
 
 /// Build a lookup cache mapping lowercased normalized paths to original ZIP entry names.
 pub fn build_zip_path_cache<RS: Read + Seek>(
     zip: &ZipArchive<RS>,
-) -> Result<HashMap<String, String>, zip::result::ZipError> {
+) -> ZipResult<HashMap<String, String>> {
     let mut cache = HashMap::with_capacity(zip.len());
     for zip_path in zip.file_names() {
         let zip_path = zip_path?;
@@ -1169,6 +1216,24 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_push_column() {
+        let check = |col: u32, expected: &str| {
+            let mut got = String::new();
+            push_column(col, &mut got);
+            assert_eq!(got, expected, "push_column({col})");
+        };
+        check(0, "A");
+        check(25, "Z");
+        check(26, "AA");
+        check(27, "AB");
+        check(51, "AZ");
+        check(53, "BB");
+        check(701, "ZZ");
+        check(702, "AAA");
+        check(16383, "XFD");
+    }
+
+    #[test]
     fn sound_to_u32() {
         let data = b"ABCDEFGH";
         assert_eq!(
@@ -1259,10 +1324,80 @@ mod tests {
             ("Just_a_normal_string", "Just_a_normal_string"),
             ("Hello_x000D_World_x000D__x000D_", "Hello\rWorld\r\r"),
             ("Multiple_x000D__x000D__x000D_Chars", "Multiple\r\r\rChars"),
+            // Escapes of code units above U+00FF, including surrogate pairs.
+            ("_x2764_", "\u{2764}"),
+            ("_x2764__xFE0F_", "\u{2764}\u{FE0F}"),
+            ("_x597d_", "\u{597D}"),
+            ("_x00E9_", "\u{E9}"),
+            ("_xFFFE_", "\u{FFFE}"),
+            ("_xFFFF_", "\u{FFFF}"),
+            ("_xD83D__xDCF7_", "\u{1F4F7}"),
+            ("_xd83d__xdcf7_", "\u{1F4F7}"),
+            ("a_xD83D__xDE00_b", "a\u{1F600}b"),
+            ("_xD83D_", "\u{FFFD}"),
+            ("_xDCF7_", "\u{FFFD}"),
+            ("_xDCF7__xD83D_", "\u{FFFD}\u{FFFD}"),
+            ("_xD83D__xD83D__xDCF7_", "\u{FFFD}\u{1F4F7}"),
+            ("_xD83D_x", "\u{FFFD}x"),
+            ("_xD83D__x0041_", "\u{FFFD}A"),
+            ("_x005F_x2764_", "_x2764_"),
+            ("_x005F_xD83D__xDCF7_", "_xD83D_\u{FFFD}"),
+            ("_x+123_", "_x+123_"),
+            ("_x00+1_", "_x00+1_"),
+            // Round trips of the rust_xlsxwriter escape_xml_escapes() tests.
+            ("hello world", "hello world"),
+            ("/path/to/kernel32_x64d8.pyd", "/path/to/kernel32_x64d8.pyd"),
+            ("test_x", "test_x"),
+            ("test_x00", "test_x00"),
+            ("test_x005F_x0000_end", "test_x0000_end"),
+            ("test_xGGGG_end", "test_xGGGG_end"),
+            ("test_x00GG_end", "test_x00GG_end"),
+            ("test_x005F_xABCD_end", "test_xABCD_end"),
+            ("test_x005F_xabcd_end", "test_xabcd_end"),
+            ("test_x005F_xAbCd_end", "test_xAbCd_end"),
+            ("test_xABCD_end", "test\u{ABCD}end"),
+            ("test_xabcd_end", "test\u{ABCD}end"),
+            ("_x005F_x0000_middle_x005F_x0001_", "_x0000_middle_x0001_"),
+            (
+                "/path/file_x64d8f123xc8c311aa.pyd",
+                "/path/file_x64d8f123xc8c311aa.pyd",
+            ),
+            (
+                "/path/file_x005F_x64d8_name.pyd",
+                "/path/file_x64d8_name.pyd",
+            ),
+            ("/path/file_x64d8_name.pyd", "/path/file\u{64D8}name.pyd"),
+            ("_x005F_x0000_rest", "_x0000_rest"),
+            ("start_x005F_x0000_", "start_x0000_"),
+            ("_x005F_x0000_", "_x0000_"),
+            ("日本語_x005F_x0000_テスト", "日本語_x0000_テスト"),
+            ("test_xäöüü_end", "test_xäöüü_end"),
+            ("_x005F_x0000__x005F_x0001_", "_x0000__x0001_"),
+            ("_x005F_x005F_x005F_x000D_", "_x005F_x000D_"),
         ];
 
         for (input, expected) in test_cases {
             assert_eq!(unescape_xml(input), expected);
+        }
+    }
+
+    #[test]
+    fn test_unescape_xml_borrows_without_escapes() {
+        // Strings without a valid escape are returned without allocating.
+        for input in [
+            "",
+            "_",
+            "pos_x",
+            "_x",
+            "_x00ZZ_",
+            "snake_case_x_y",
+            "a_x005F",
+        ] {
+            assert!(matches!(unescape_xml(input), Cow::Borrowed(_)), "{input:?}");
+        }
+
+        for input in ["_x000D_", "a_x2764_", "_xD83D_"] {
+            assert!(matches!(unescape_xml(input), Cow::Owned(_)), "{input:?}");
         }
     }
 }

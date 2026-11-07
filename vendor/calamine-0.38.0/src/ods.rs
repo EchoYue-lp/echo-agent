@@ -23,7 +23,10 @@ use zip::result::ZipError;
 use crate::attrs::{decode_attr, RawAttributes};
 use crate::utils::unescape_entity_to_buffer;
 use crate::vba::VbaProject;
-use crate::{Data, DataType, HeaderRow, Metadata, Range, Reader, Sheet, SheetType, SheetVisible};
+use crate::{
+    Data, DataType, HeaderRow, Metadata, Range, Reader, Sheet, SheetType, SheetVisible,
+    WorkbookProperties,
+};
 use std::marker::PhantomData;
 
 const MIMETYPE: &[u8] = b"application/vnd.oasis.opendocument.spreadsheet";
@@ -36,6 +39,9 @@ const MAX_COLUMNS: u32 = 16_384;
 
 /// Maximum number of cells to prevent memory exhaustion from malicious files.
 const MAX_CELLS: usize = 100_000_000;
+
+/// Maximum size of the `meta.xml` document properties part.
+const MAX_META_XML_SIZE: u64 = 1024 * 1024;
 
 type OdsReader<'a, RS> = XmlReader<BufReader<ZipFile<'a, RS>>>;
 
@@ -167,8 +173,29 @@ pub struct Ods<RS> {
     marker: PhantomData<RS>,
     #[cfg(feature = "picture")]
     pictures: Option<Vec<(String, Vec<u8>)>>,
+    /// Raw `meta.xml` document properties, parsed on demand.
+    meta_xml: Option<Vec<u8>>,
     /// Reader options
     options: OdsOptions,
+}
+
+impl<RS> Ods<RS> {
+    /// Get the workbook document properties.
+    ///
+    /// Read the document properties, such as the creator, title and
+    /// application, and any custom document properties, into a
+    /// [`WorkbookProperties`] struct. Missing fields are returned as `None`.
+    ///
+    /// See [`Xlsx::workbook_properties()`](crate::Xlsx::workbook_properties)
+    /// for an example.
+    ///
+    pub fn workbook_properties(&self) -> Result<WorkbookProperties, OdsError> {
+        let mut props = WorkbookProperties::default();
+        if let Some(meta_xml) = &self.meta_xml {
+            read_meta_properties(meta_xml, &mut props)?;
+        }
+        Ok(props)
+    }
 }
 
 impl<RS> Reader<RS> for Ods<RS>
@@ -198,6 +225,8 @@ where
         #[cfg(feature = "picture")]
         let pictures = read_pictures(&mut zip)?;
 
+        let meta_xml = read_meta_xml(&mut zip);
+
         let Content {
             sheets,
             sheets_metadata,
@@ -214,6 +243,7 @@ where
             sheets,
             #[cfg(feature = "picture")]
             pictures,
+            meta_xml,
             options: OdsOptions::default(),
         })
     }
@@ -302,10 +332,10 @@ fn check_for_password_protected<RS: Read + Seek>(zip: &mut ZipArchive<RS>) -> Re
     let mut inner = Vec::new();
     loop {
         match reader.read_event_into(&mut buf) {
-            Ok(Event::Start(e)) if e.name() == QName(b"manifest:file-entry") => {
+            Ok(Event::Start(e)) if e.name() == QName("manifest:file-entry") => {
                 loop {
                     match reader.read_event_into(&mut inner) {
-                        Ok(Event::Start(e)) if e.name() == QName(b"manifest:encryption-data") => {
+                        Ok(Event::Start(e)) if e.name() == QName("manifest:encryption-data") => {
                             return Err(OdsError::Password)
                         }
                         Ok(Event::Eof) => break,
@@ -348,18 +378,15 @@ fn parse_content<RS: Read + Seek>(mut zip: ZipArchive<RS>) -> Result<Content, Od
     let mut style_name: Option<String> = None;
     loop {
         match reader.read_event_into(&mut buf) {
-            Ok(Event::Start(e)) if e.name() == QName(b"style:style") => {
-                style_name = e
-                    .raw_attr(b"style:name")?
-                    .map(|v| decode_attr(&reader.decoder(), v))
-                    .transpose()?;
+            Ok(Event::Start(e)) if e.name() == QName("style:style") => {
+                style_name = e.raw_attr("style:name")?.map(decode_attr).transpose()?;
             }
             Ok(Event::Start(e))
-                if style_name.is_some() && e.name() == QName(b"style:table-properties") =>
+                if style_name.is_some() && e.name() == QName("style:table-properties") =>
             {
-                let visible = match e.raw_attr(b"table:display")? {
+                let visible = match e.raw_attr("table:display")? {
                     Some(v) => {
-                        if decode_attr(&reader.decoder(), v)?.parse()? {
+                        if decode_attr(v)?.parse()? {
                             SheetVisible::Visible
                         } else {
                             SheetVisible::Hidden
@@ -369,17 +396,17 @@ fn parse_content<RS: Read + Seek>(mut zip: ZipArchive<RS>) -> Result<Content, Od
                 };
                 styles.insert(style_name.clone(), visible);
             }
-            Ok(Event::Start(e)) if e.name() == QName(b"table:table") => {
+            Ok(Event::Start(e)) if e.name() == QName("table:table") => {
                 let visible = styles
                     .get(
-                        &e.raw_attr(b"table:style-name")?
-                            .map(|v| decode_attr(&reader.decoder(), v))
+                        &e.raw_attr("table:style-name")?
+                            .map(decode_attr)
                             .transpose()?,
                     )
                     .cloned()
                     .unwrap_or(SheetVisible::Visible);
-                if let Some(v) = e.raw_attr(b"table:name")? {
-                    let name = decode_attr(&reader.decoder(), v)?;
+                if let Some(v) = e.raw_attr("table:name")? {
+                    let name = decode_attr(v)?;
                     let (range, formulas) = read_table(&mut reader)?;
                     sheets_metadata.push(Sheet {
                         name: name.clone(),
@@ -389,7 +416,7 @@ fn parse_content<RS: Read + Seek>(mut zip: ZipArchive<RS>) -> Result<Content, Od
                     sheets.insert(name, (range, formulas));
                 }
             }
-            Ok(Event::Start(e)) if e.name() == QName(b"table:named-expressions") => {
+            Ok(Event::Start(e)) if e.name() == QName("table:named-expressions") => {
                 defined_names = read_named_expressions(&mut reader)?;
             }
             Ok(Event::Eof) => break,
@@ -420,9 +447,9 @@ where
     cols.push(0);
     loop {
         match reader.read_event_into(&mut buf) {
-            Ok(Event::Start(e)) if e.name() == QName(b"table:table-row") => {
-                let row_repeats = match e.raw_attr(b"table:number-rows-repeated")? {
-                    Some(v) => decode_attr(&reader.decoder(), v)?.parse()?,
+            Ok(Event::Start(e)) if e.name() == QName("table:table-row") => {
+                let row_repeats = match e.raw_attr("table:number-rows-repeated")? {
+                    Some(v) => decode_attr(v)?.parse()?,
                     None => 1,
                 };
 
@@ -446,7 +473,7 @@ where
                 cols.push(cells.len());
                 rows_repeats.push(capped_repeats);
             }
-            Ok(Event::End(e)) if e.name() == QName(b"table:table") => break,
+            Ok(Event::End(e)) if e.name() == QName("table:table") => break,
             Err(e) => return Err(OdsError::Xml(e)),
             Ok(_) => (),
         }
@@ -593,11 +620,11 @@ where
         row_buf.clear();
         match reader.read_event_into(row_buf) {
             Ok(Event::Start(e))
-                if e.name() == QName(b"table:table-cell")
-                    || e.name() == QName(b"table:covered-table-cell") =>
+                if e.name() == QName("table:table-cell")
+                    || e.name() == QName("table:covered-table-cell") =>
             {
-                let repeats = match e.raw_attr(b"table:number-columns-repeated")? {
-                    Some(v) => reader.decoder().decode(v)?.parse()?,
+                let repeats = match e.raw_attr("table:number-columns-repeated")? {
+                    Some(v) => v.parse()?,
                     None => 1,
                 };
 
@@ -641,7 +668,7 @@ where
                     reader.read_to_end_into(e.name(), cell_buf)?;
                 }
             }
-            Ok(Event::End(e)) if e.name() == QName(b"table:table-row") => break,
+            Ok(Event::End(e)) if e.name() == QName("table:table-row") => break,
             Err(e) => return Err(OdsError::Xml(e)),
             Ok(e) => {
                 return Err(OdsError::Mismatch {
@@ -666,88 +693,91 @@ where
     RS: Read + Seek,
 {
     let mut is_string = false;
+    let mut is_error = false;
     let mut is_value_set = false;
     let mut val = Data::Empty;
     let mut formula = String::new();
     for attr in e.iter_raw_attrs() {
         let (key, value) = attr?;
         match key {
-            b"office:value" if !is_value_set => {
-                let v = reader.decoder().decode(value)?;
+            "office:value" if !is_value_set => {
                 val = Data::Float(
-                    fast_float2::parse(v.as_bytes())
-                        .map_err(|_| OdsError::ParseFloat(v.parse::<f64>().unwrap_err()))?,
+                    fast_float2::parse(value.as_bytes())
+                        .map_err(|_| OdsError::ParseFloat(value.parse::<f64>().unwrap_err()))?,
                 );
                 is_value_set = true;
             }
-            b"office:string-value" | b"office:date-value" | b"office:time-value"
-                if !is_value_set =>
-            {
-                let attr = decode_attr(&reader.decoder(), value)?;
+            "office:string-value" | "office:date-value" | "office:time-value" if !is_value_set => {
+                let attr = decode_attr(value)?;
                 val = match key {
-                    b"office:date-value" => Data::DateTimeIso(attr),
-                    b"office:time-value" => Data::DurationIso(attr),
+                    "office:date-value" => Data::DateTimeIso(attr),
+                    "office:time-value" => Data::DurationIso(attr),
                     _ => Data::String(attr),
                 };
                 is_value_set = true;
             }
-            b"office:boolean-value" if !is_value_set => {
-                let b = value == b"TRUE" || value == b"true";
+            "office:boolean-value" if !is_value_set => {
+                let b = value == "TRUE" || value == "true";
                 val = Data::Bool(b);
                 is_value_set = true;
             }
-            b"office:value-type" if !is_value_set => is_string = value == b"string",
-            b"table:formula" => {
-                formula = decode_attr(&reader.decoder(), value)?;
+            "office:value-type" if !is_value_set => is_string = value == "string",
+            "calcext:value-type" => is_error = value == "error",
+            "table:formula" => {
+                formula = decode_attr(value)?;
             }
             _ => (),
         }
     }
-    if !is_value_set && is_string {
+    if (!is_value_set && is_string) || (is_error && matches!(&val, Data::String(s) if s.is_empty()))
+    {
         // If the value type is string and the office:string-value attribute
-        // is not present, the element content defines the value.
+        // is not present, the element content defines the value. LibreOffice
+        // also stores error text in the content with an empty string-value.
         let mut s = String::new();
         let mut first_paragraph = true;
         loop {
             buf.clear();
             match reader.read_event_into(buf) {
                 Ok(Event::Text(t)) => {
-                    s.push_str(&t.xml10_content()?);
+                    s.push_str(&t.xml10_content());
                 }
                 Ok(Event::GeneralRef(e)) => {
                     unescape_entity_to_buffer(&e, &mut s)?;
                 }
                 Ok(Event::End(e))
-                    if e.name() == QName(b"table:table-cell")
-                        || e.name() == QName(b"table:covered-table-cell") =>
+                    if e.name() == QName("table:table-cell")
+                        || e.name() == QName("table:covered-table-cell") =>
                 {
                     return Ok((Data::String(s), formula, true));
                 }
-                Ok(Event::Start(e)) if e.name() == QName(b"office:annotation") => loop {
+                Ok(Event::Start(e)) if e.name() == QName("office:annotation") => loop {
                     match reader.read_event_into(buf) {
-                        Ok(Event::End(e)) if e.name() == QName(b"office:annotation") => {
+                        Ok(Event::End(e)) if e.name() == QName("office:annotation") => {
                             break;
                         }
                         Err(e) => return Err(OdsError::Xml(e)),
                         _ => (),
                     }
                 },
-                Ok(Event::Start(e)) if e.name() == QName(b"text:p") => {
+                Ok(Event::Start(e)) if e.name() == QName("text:p") => {
                     if first_paragraph {
                         first_paragraph = false;
                     } else {
                         s.push('\n');
                     }
                 }
-                Ok(Event::Start(e)) if e.name() == QName(b"text:s") => {
-                    let count = match e.raw_attr(b"text:c")? {
-                        Some(v) => decode_attr(&reader.decoder(), v)?.parse()?,
+                Ok(Event::Start(e)) if e.name() == QName("text:s") => {
+                    let count = match e.raw_attr("text:c")? {
+                        Some(v) => decode_attr(v)?.parse()?,
                         None => 1,
                     };
                     for _ in 0..count {
                         s.push(' ');
                     }
                 }
+                Ok(Event::Start(e)) if e.name() == QName("text:tab") => s.push('\t'),
+                Ok(Event::Start(e)) if e.name() == QName("text:line-break") => s.push('\n'),
                 Err(e) => return Err(OdsError::Xml(e)),
                 Ok(Event::Eof) => return Err(OdsError::Eof("table:table-cell")),
                 _ => (),
@@ -770,19 +800,19 @@ where
         buf.clear();
         match reader.read_event_into(&mut buf) {
             Ok(Event::Start(e))
-                if e.name() == QName(b"table:named-range")
-                    || e.name() == QName(b"table:named-expression") =>
+                if e.name() == QName("table:named-range")
+                    || e.name() == QName("table:named-expression") =>
             {
                 let mut name = String::new();
                 let mut formula = String::new();
                 for attr in e.iter_raw_attrs() {
                     let (key, value) = attr?;
                     match key {
-                        b"table:name" => {
-                            name = decode_attr(&reader.decoder(), value)?;
+                        "table:name" => {
+                            name = decode_attr(value)?;
                         }
-                        b"table:cell-range-address" | b"table:expression" => {
-                            formula = decode_attr(&reader.decoder(), value)?;
+                        "table:cell-range-address" | "table:expression" => {
+                            formula = decode_attr(value)?;
                         }
                         _ => (),
                     }
@@ -790,9 +820,9 @@ where
                 defined_names.push((name, formula));
             }
             Ok(Event::End(e))
-                if e.name() == QName(b"table:named-range")
-                    || e.name() == QName(b"table:named-expression") => {}
-            Ok(Event::End(e)) if e.name() == QName(b"table:named-expressions") => break,
+                if e.name() == QName("table:named-range")
+                    || e.name() == QName("table:named-expression") => {}
+            Ok(Event::End(e)) if e.name() == QName("table:named-expressions") => break,
             Err(e) => return Err(OdsError::Xml(e)),
             Ok(e) => {
                 return Err(OdsError::Mismatch {
@@ -805,6 +835,107 @@ where
     Ok(defined_names)
 }
 
+/// Read the raw `meta.xml` part, if present.
+///
+/// The document properties don't affect the rest of the workbook, so a
+/// missing, oversized or unreadable part is ignored rather than preventing
+/// the workbook from being opened.
+fn read_meta_xml<RS: Read + Seek>(zip: &mut ZipArchive<RS>) -> Option<Vec<u8>> {
+    let mut f = match zip.by_name("meta.xml") {
+        Ok(f) => f,
+        Err(ZipError::FileNotFound) => return None,
+        Err(e) => {
+            warn!("ignoring document properties, 'meta.xml' could not be read: {e}");
+            return None;
+        }
+    };
+
+    let mut buf = Vec::new();
+    match f.by_ref().take(MAX_META_XML_SIZE + 1).read_to_end(&mut buf) {
+        Ok(len) if len as u64 > MAX_META_XML_SIZE => {
+            warn!(
+                "ignoring document properties, 'meta.xml' is larger than {MAX_META_XML_SIZE} bytes"
+            );
+            None
+        }
+        Ok(_) => Some(buf),
+        Err(e) => {
+            warn!("ignoring document properties, 'meta.xml' could not be read: {e}");
+            None
+        }
+    }
+}
+
+/// Read the document properties from the `meta.xml` part.
+fn read_meta_properties(meta_xml: &[u8], props: &mut WorkbookProperties) -> Result<(), OdsError> {
+    let mut reader = XmlReader::from_reader(meta_xml);
+    let config = reader.config_mut();
+    config.check_end_names = false;
+    config.trim_text(false);
+    config.check_comments = false;
+    config.expand_empty_elements = true;
+
+    let mut buf = Vec::with_capacity(256);
+    let mut keywords = Vec::new();
+    loop {
+        buf.clear();
+        match reader.read_event_into(&mut buf)? {
+            Event::Start(e) => {
+                // ODF uses `dc:creator` for the last author of the document.
+                let field = match e.name().as_ref() {
+                    "meta:initial-creator" => &mut props.creator,
+                    "dc:creator" => &mut props.last_modified_by,
+                    "meta:creation-date" => &mut props.created,
+                    "dc:date" => &mut props.modified,
+                    "dc:title" => &mut props.title,
+                    "dc:subject" => &mut props.subject,
+                    "dc:description" => &mut props.description,
+                    "meta:editing-cycles" => &mut props.revision,
+                    "meta:generator" => &mut props.application,
+                    "meta:keyword" => {
+                        keywords.push(read_meta_text(&mut reader, &e)?);
+                        continue;
+                    }
+                    "meta:user-defined" => {
+                        if let Some(name) = e.raw_attr("meta:name")? {
+                            let name = decode_attr(name)?;
+                            let value = read_meta_text(&mut reader, &e)?;
+                            props.custom_properties.insert(name, value);
+                        }
+                        continue;
+                    }
+                    _ => continue,
+                };
+                *field = Some(read_meta_text(&mut reader, &e)?);
+            }
+            Event::Eof => break,
+            _ => (),
+        }
+    }
+
+    if !keywords.is_empty() {
+        props.keywords = Some(keywords.join(", "));
+    }
+    Ok(())
+}
+
+/// Read the text content of a `meta.xml` element.
+fn read_meta_text(reader: &mut XmlReader<&[u8]>, start: &BytesStart) -> Result<String, OdsError> {
+    let mut buf = Vec::new();
+    let mut value = String::new();
+    loop {
+        buf.clear();
+        match reader.read_event_into(&mut buf)? {
+            Event::Text(t) => value.push_str(&t.xml10_content()),
+            Event::GeneralRef(e) => unescape_entity_to_buffer(&e, &mut value)?,
+            Event::End(end) if end.name() == start.name() => break,
+            Event::Eof => return Err(OdsError::Eof("office:meta")),
+            _ => (),
+        }
+    }
+    Ok(value)
+}
+
 // Read pictures.
 #[cfg(feature = "picture")]
 #[allow(clippy::type_complexity)]
@@ -814,7 +945,7 @@ fn read_pictures<RS: Read + Seek>(
     let mut pics = Vec::new();
     for i in 0..zip.len() {
         let mut zfile = zip.by_index(i)?;
-        let zname = zfile.name();
+        let zname = zfile.name()?;
         // no Thumbnails
         if zname.starts_with("Pictures") {
             if let Some(ext) = zname.split('.').next_back() {

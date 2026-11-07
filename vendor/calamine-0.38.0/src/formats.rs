@@ -49,65 +49,115 @@ pub fn detect_custom_number_format(format: &str) -> CellFormat {
     CellFormat::Other
 }
 
-pub fn builtin_format_by_id(id: &[u8]) -> CellFormat {
+pub fn builtin_format_by_id(id: &str) -> CellFormat {
     match id {
         // mm-dd-yy
-        b"14" |
+        "14" |
         // d-mmm-yy
-        b"15" |
+        "15" |
         // d-mmm
-        b"16" |
+        "16" |
         // mmm-yy
-        b"17" |
+        "17" |
         // h:mm AM/PM
-        b"18" |
+        "18" |
         // h:mm:ss AM/PM
-        b"19" |
+        "19" |
         // h:mm
-        b"20" |
+        "20" |
         // h:mm:ss
-        b"21" |
+        "21" |
         // m/d/yy h:mm
-        b"22" |
+        "22" |
         // mm:ss
-        b"45" |
+        "45" |
         // mmss.0
-        b"47" => CellFormat::DateTime,
+        "47" => CellFormat::DateTime,
+        // East Asian built-in formats vary by locale and include dates and
+        // clock times. Both use DateTime, rather than the duration category.
+        "27" | "28" | "29" | "30" | "31" | "32" | "33" | "34" | "35" | "36" | "50" | "51"
+        | "52" | "53" | "54" | "55" | "56" | "57" | "58" => CellFormat::DateTime,
         // [h]:mm:ss
-        b"46" => CellFormat::TimeDelta,
+        "46" => CellFormat::TimeDelta,
         _ => CellFormat::Other
+    }
+}
+
+// Get the format code string for a builtin number format id.
+//
+// The ids and format codes are defined in ECMA-376 section 18.8.30. Returns
+// `None` for ids that are not built in, such as custom formats and the reserved and
+// locale-specific formats.
+pub(crate) fn builtin_format_code_by_id(id: u32) -> Option<&'static str> {
+    match id {
+        0 => Some("General"),
+        1 => Some("0"),
+        2 => Some("0.00"),
+        3 => Some("#,##0"),
+        4 => Some("#,##0.00"),
+        9 => Some("0%"),
+        10 => Some("0.00%"),
+        11 => Some("0.00E+00"),
+        12 => Some("# ?/?"),
+        13 => Some("# ??/??"),
+        14 => Some("mm-dd-yy"),
+        15 => Some("d-mmm-yy"),
+        16 => Some("d-mmm"),
+        17 => Some("mmm-yy"),
+        18 => Some("h:mm AM/PM"),
+        19 => Some("h:mm:ss AM/PM"),
+        20 => Some("h:mm"),
+        21 => Some("h:mm:ss"),
+        22 => Some("m/d/yy h:mm"),
+        37 => Some("#,##0 ;(#,##0)"),
+        38 => Some("#,##0 ;[Red](#,##0)"),
+        39 => Some("#,##0.00;(#,##0.00)"),
+        40 => Some("#,##0.00;[Red](#,##0.00)"),
+        41 => Some("_(* #,##0_);_(* (#,##0);_(* \"-\"_);_(@_)"),
+        42 => Some("_($* #,##0_);_($* (#,##0);_($* \"-\"_);_(@_)"),
+        43 => Some("_(* #,##0.00_);_(* (#,##0.00);_(* \"-\"??_);_(@_)"),
+        44 => Some("_($* #,##0.00_);_($* (#,##0.00);_($* \"-\"??_);_(@_)"),
+        45 => Some("mm:ss"),
+        46 => Some("[h]:mm:ss"),
+        47 => Some("mmss.0"),
+        48 => Some("##0.0E+0"),
+        49 => Some("@"),
+        _ => None,
     }
 }
 
 /// Check if code corresponds to builtin date format
 ///
-/// See `is_builtin_date_format_id`
+/// See `builtin_format_by_id`
 pub fn builtin_format_by_code(code: u16) -> CellFormat {
     match code {
-        14..=22 | 45 | 47 => CellFormat::DateTime,
+        14..=22 | 27..=36 | 45 | 47 | 50..=58 => CellFormat::DateTime,
         46 => CellFormat::TimeDelta,
         _ => CellFormat::Other,
     }
 }
 
-// convert i64 to date, if format == Date
-pub fn format_excel_i64(value: i64, format: Option<&CellFormat>, is_1904: bool) -> Data {
+// Convert an i64 to a date if the cell format is a date or time format.
+#[inline]
+pub fn format_excel_i64_ref(
+    value: i64,
+    format: Option<&CellFormat>,
+    is_1904: bool,
+) -> DataRef<'static> {
     match format {
-        Some(CellFormat::DateTime) => Data::DateTime(ExcelDateTime::new(
-            value as f64,
-            ExcelDateTimeType::DateTime,
-            is_1904,
-        )),
-        Some(CellFormat::TimeDelta) => Data::DateTime(ExcelDateTime::new(
-            value as f64,
-            ExcelDateTimeType::TimeDelta,
-            is_1904,
-        )),
-        _ => Data::Int(value),
+        Some(CellFormat::DateTime | CellFormat::TimeDelta) => {
+            format_excel_f64_ref(value as f64, format, is_1904)
+        }
+        _ => DataRef::Int(value),
     }
 }
 
-// convert f64 to date, if format == Date
+// Convert an i64 to a date if the cell format is a date or time format.
+pub fn format_excel_i64(value: i64, format: Option<&CellFormat>, is_1904: bool) -> Data {
+    format_excel_i64_ref(value, format, is_1904).into()
+}
+
+// Convert an f64 to a date if the cell format is a date or time format.
 #[inline]
 pub fn format_excel_f64_ref(
     value: f64,
@@ -129,7 +179,7 @@ pub fn format_excel_f64_ref(
     }
 }
 
-// convert f64 to date, if format == Date
+// Convert an f64 to a date if the cell format is a date or time format.
 pub fn format_excel_f64(value: f64, format: Option<&CellFormat>, is_1904: bool) -> Data {
     format_excel_f64_ref(value, format, is_1904).into()
 }

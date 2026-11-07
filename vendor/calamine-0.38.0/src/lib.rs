@@ -17,7 +17,7 @@
 //! use calamine::{Reader, open_workbook, Xlsx, Data};
 //!
 //! // opens a new workbook
-//! # let path = format!("{}/tests/issue3.xlsm", env!("CARGO_MANIFEST_DIR"));
+//! # let path = format!("{}/tests/single_row_sheet.xlsm", env!("CARGO_MANIFEST_DIR"));
 //! let mut workbook: Xlsx<_> = open_workbook(path).expect("Cannot open file");
 //!
 //! // Read whole worksheet data and provide some statistics
@@ -86,6 +86,8 @@ mod cfb;
 mod datatype;
 mod formats;
 mod ods;
+mod oleps;
+mod style;
 mod xls;
 mod xlsb;
 mod xlsx;
@@ -98,6 +100,7 @@ pub mod vba;
 
 use serde::de::{Deserialize, DeserializeOwned, Deserializer};
 use std::cmp::{max, min};
+use std::collections::HashMap;
 use std::fmt;
 use std::fs::File;
 use std::io::{BufReader, Read, Seek};
@@ -111,6 +114,11 @@ pub use crate::de::{
 };
 pub use crate::errors::Error;
 pub use crate::ods::{Ods, OdsError};
+pub use crate::style::{
+    Alignment, Border, BorderStyle, Borders, Color, Fill, FillPattern, Font, FontStyle, FontWeight,
+    HorizontalAlignment, NumberFormat, Protection, Style, StyleRange, StyleRangeCells,
+    TextRotation, UnderlineStyle, VerticalAlignment,
+};
 pub use crate::xls::{Xls, XlsError, XlsOptions};
 pub use crate::xlsb::{Xlsb, XlsbError};
 pub use crate::xlsx::{
@@ -228,6 +236,78 @@ pub struct Metadata {
     names: Vec<(String, String)>,
 }
 
+/// Workbook document properties.
+///
+/// Depending on the file format, these fields may be read from workbook-level
+/// document property parts.
+///
+/// Most fields are optional because they depend on the file format and
+/// whether the producing application wrote them.
+///
+/// See [`Xlsx::workbook_properties()`](crate::Xlsx::workbook_properties)
+/// for an example.
+///
+#[derive(Debug, Default, Clone, PartialEq)]
+#[non_exhaustive]
+pub struct WorkbookProperties {
+    /// Creator (dc:creator).
+    pub creator: Option<String>,
+
+    /// Last modifier (cp:lastModifiedBy).
+    pub last_modified_by: Option<String>,
+
+    /// Creation date (dcterms:created).
+    pub created: Option<String>,
+
+    /// Modification date (dcterms:modified).
+    pub modified: Option<String>,
+
+    /// Title (dc:title).
+    pub title: Option<String>,
+
+    /// Subject (dc:subject).
+    pub subject: Option<String>,
+
+    /// Description/comments (dc:description).
+    pub description: Option<String>,
+
+    /// Keywords (cp:keywords).
+    pub keywords: Option<String>,
+
+    /// Category (cp:category).
+    pub category: Option<String>,
+
+    /// Content status (cp:contentStatus).
+    pub content_status: Option<String>,
+
+    /// Revision (cp:revision).
+    pub revision: Option<String>,
+
+    /// Version (cp:version).
+    pub version: Option<String>,
+
+    /// Application name (ap:Application).
+    pub application: Option<String>,
+
+    /// Application version (ap:AppVersion).
+    pub app_version: Option<String>,
+
+    /// Company (ap:Company).
+    pub company: Option<String>,
+
+    /// Template (ap:Template).
+    pub template: Option<String>,
+
+    /// Manager (ap:Manager).
+    pub manager: Option<String>,
+
+    /// Custom document properties, keyed by name.
+    ///
+    /// Values are returned as the text stored in the file, for example `"4"`,
+    /// `"true"` or `"2020-08-24T20:19:22Z"`.
+    pub custom_properties: HashMap<String, String>,
+}
+
 /// Type of sheet.
 ///
 /// Only Excel formats support this. Default value for ODS is
@@ -337,13 +417,23 @@ where
     /// Read worksheet formula in corresponding worksheet path
     fn worksheet_formula(&mut self, _: &str) -> Result<Range<String>, Self::Error>;
 
+    /// Get the cell styles for the worksheet with the given name.
+    ///
+    /// Returns a [`StyleRange`] holding the styles of all cells in the
+    /// worksheet that have an explicit (non-default) format. Style reading is
+    /// currently only supported for XLSX files. The other file formats
+    /// currently return an empty range.
+    fn worksheet_style(&mut self, _name: &str) -> Result<StyleRange, Self::Error> {
+        Ok(StyleRange::empty())
+    }
+
     /// Get all sheet names of this workbook, in workbook order
     ///
     /// # Examples
     /// ```
     /// use calamine::{Xlsx, open_workbook, Reader};
     ///
-    /// # let path = format!("{}/tests/issue3.xlsm", env!("CARGO_MANIFEST_DIR"));
+    /// # let path = format!("{}/tests/single_row_sheet.xlsm", env!("CARGO_MANIFEST_DIR"));
     /// let mut workbook: Xlsx<_> = open_workbook(path).unwrap();
     /// println!("Sheets: {:#?}", workbook.sheet_names());
     /// ```

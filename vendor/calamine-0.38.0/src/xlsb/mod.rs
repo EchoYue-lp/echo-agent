@@ -27,8 +27,10 @@ use crate::utils::{
     read_usize,
 };
 use crate::vba::VbaProject;
+use crate::xlsx::{read_app_properties, read_core_properties, read_custom_properties};
 use crate::{
     Cell, Data, HeaderRow, Metadata, Range, Reader, ReaderRef, Sheet, SheetType, SheetVisible,
+    WorkbookProperties,
 };
 
 /// A Xlsb specific error
@@ -160,6 +162,8 @@ pub struct Xlsb<RS> {
     formats: Vec<CellFormat>,
     is_1904: bool,
     metadata: Metadata,
+    /// Workbook document properties, parsed lazily on first access.
+    workbook_properties: Option<Box<WorkbookProperties>>,
     #[cfg(feature = "picture")]
     pictures: Option<Vec<(String, Vec<u8>)>>,
     options: XlsbOptions,
@@ -168,7 +172,7 @@ pub struct Xlsb<RS> {
 
 impl<RS: Read + Seek> Xlsb<RS> {
     /// MS-XLSB
-    fn read_relationships(&mut self) -> Result<HashMap<Vec<u8>, String>, XlsbError> {
+    fn read_relationships(&mut self) -> Result<HashMap<String, String>, XlsbError> {
         let mut relationships = HashMap::new();
         match self.zip.by_name("xl/_rels/workbook.bin.rels") {
             Ok(f) => {
@@ -182,11 +186,10 @@ impl<RS: Read + Seek> Xlsb<RS> {
 
                 loop {
                     match xml.read_event_into(&mut buf) {
-                        Ok(Event::Start(e)) if e.name() == QName(b"Relationship") => {
-                            let (id, target) = get_attrs!(e, b"Id" => id, b"Target" => target)?;
+                        Ok(Event::Start(e)) if e.name() == QName("Relationship") => {
+                            let (id, target) = get_attrs!(e, "Id" => id, "Target" => target)?;
                             if let (Some(id), Some(target)) = (id, target) {
-                                relationships
-                                    .insert(id.to_vec(), decode_attr(&xml.decoder(), target)?);
+                                relationships.insert(id.to_string(), decode_attr(target)?);
                             }
                         }
                         Ok(Event::Eof) => break,
@@ -286,7 +289,7 @@ impl<RS: Read + Seek> Xlsb<RS> {
     }
 
     /// MS-XLSB 2.1.7.61
-    fn read_workbook(&mut self, relationships: &HashMap<Vec<u8>, String>) -> Result<(), XlsbError> {
+    fn read_workbook(&mut self, relationships: &HashMap<String, String>) -> Result<(), XlsbError> {
         let mut iter =
             RecordIter::from_zip(&mut self.zip, "xl/workbook.bin", &self.zip_path_cache)?;
         let mut buf = Vec::with_capacity(1024);
@@ -306,7 +309,7 @@ impl<RS: Read + Seek> Xlsb<RS> {
                         let relid = &buf[12..12 + rel_len];
                         // converts utf16le to utf8 for HashMap search
                         let relid = UTF_16LE.decode(relid).0;
-                        let path = format!("xl/{}", relationships[relid.as_bytes()]);
+                        let path = format!("xl/{}", relationships[&*relid]);
                         // ST_SheetState
                         let visible = match read_u32(&buf) {
                             0 => SheetVisible::Visible,
@@ -339,7 +342,12 @@ impl<RS: Read + Seek> Xlsb<RS> {
                         self.sheets.push((name.into_owned(), path));
                     }
                 }
-                0x0090 => break, // BrtEndBundleShs
+                0x0090 => {
+                    // BrtEndBundleShs: consume its (empty) body so the next read
+                    // starts at the following record.
+                    let _ = iter.fill_buffer(&mut buf)?;
+                    break;
+                }
                 _ => {
                     // Consume the body of any unmatched workbook-global record
                     // to avoid reading its trailing bytes in the next read.
@@ -380,10 +388,20 @@ impl<RS: Read + Seek> Xlsb<RS> {
                 0x0027 => {
                     // BrtName
                     let len = iter.fill_buffer(&mut buf)?;
+                    let record = &buf[..len];
+                    let truncated = || XlsbError::Unrecognized {
+                        typ: "BrtName record length",
+                        val: len.to_string(),
+                    };
                     let mut str_len = 0;
-                    let name = wide_str(&buf[9..len], &mut str_len)?.into_owned();
-                    let rgce_len = read_u32(&buf[9 + str_len..]) as usize;
-                    let rgce = &buf[13 + str_len..13 + str_len + rgce_len];
+                    let name = wide_str(record.get(9..).ok_or_else(truncated)?, &mut str_len)?
+                        .into_owned();
+                    let rgce_start = 13 + str_len;
+                    let rgce_len =
+                        read_u32(record.get(9 + str_len..rgce_start).ok_or_else(truncated)?)
+                            as usize;
+                    let rgce_end = rgce_start.checked_add(rgce_len).ok_or_else(truncated)?;
+                    let rgce = record.get(rgce_start..rgce_end).ok_or_else(truncated)?;
                     let formula = parse_formula(rgce, &self.extern_sheets, &defined_names)?;
                     defined_names.push((name, formula));
                 }
@@ -392,7 +410,11 @@ impl<RS: Read + Seek> Xlsb<RS> {
                     self.metadata.names = defined_names;
                     return Ok(());
                 }
-                _ => debug!("Unsupported type {typ:X}"),
+                _ => {
+                    debug!("Unsupported type {typ:X}");
+                    // Consume the body so its bytes aren't read as the next record.
+                    let _ = iter.fill_buffer(&mut buf)?;
+                }
             }
         }
     }
@@ -438,12 +460,39 @@ impl<RS: Read + Seek> Xlsb<RS> {
         )
     }
 
+    /// Get the workbook document properties.
+    ///
+    /// Read the document properties, such as the creator, title, application
+    /// and company, and any custom document properties, into a
+    /// [`WorkbookProperties`] struct. Missing fields are returned as `None`.
+    ///
+    /// See [`Xlsx::workbook_properties()`](crate::Xlsx::workbook_properties)
+    /// for an example.
+    ///
+    pub fn workbook_properties(&mut self) -> Result<WorkbookProperties, XlsbError> {
+        if self.workbook_properties.is_none() {
+            let mut props = WorkbookProperties::default();
+            read_core_properties(&mut self.zip, &mut props, &self.zip_path_cache)
+                .map_err(xlsx_error_to_xlsb)?;
+            read_app_properties(&mut self.zip, &mut props, &self.zip_path_cache)
+                .map_err(xlsx_error_to_xlsb)?;
+            read_custom_properties(&mut self.zip, &mut props, &self.zip_path_cache)
+                .map_err(xlsx_error_to_xlsb)?;
+            self.workbook_properties = Some(Box::new(props));
+        }
+        Ok(self
+            .workbook_properties
+            .as_deref()
+            .cloned()
+            .expect("workbook properties are initialized above"))
+    }
+
     #[cfg(feature = "picture")]
     fn read_pictures(&mut self) -> Result<(), XlsbError> {
         let mut pics = Vec::new();
         for i in 0..self.zip.len() {
             let mut zfile = self.zip.by_index(i)?;
-            let zname = zfile.name();
+            let zname = zfile.name()?;
             if zname.starts_with("xl/media") {
                 if let Some(ext) = zname.split('.').next_back() {
                     if [
@@ -483,6 +532,7 @@ impl<RS: Read + Seek> Reader<RS> for Xlsb<RS> {
             formats: Vec::new(),
             is_1904: false,
             metadata: Metadata::default(),
+            workbook_properties: None,
             #[cfg(feature = "picture")]
             pictures: None,
             options: XlsbOptions::default(),
@@ -712,6 +762,12 @@ where
 }
 
 fn wide_str<'a>(buf: &'a [u8], str_len: &mut usize) -> Result<Cow<'a, str>, XlsbError> {
+    if buf.len() < 4 {
+        return Err(XlsbError::WideStr {
+            ws_len: 4,
+            buf_len: buf.len(),
+        });
+    }
     let len = read_u32(buf) as usize;
     if buf.len() < 4 + len * 2 {
         return Err(XlsbError::WideStr {
@@ -1052,4 +1108,17 @@ fn check_for_password_protected<RS: Read + Seek>(reader: &mut RS) -> Result<(), 
     }
 
     Ok(())
+}
+
+fn xlsx_error_to_xlsb(e: crate::xlsx::XlsxError) -> XlsbError {
+    use crate::xlsx::XlsxError;
+    match e {
+        XlsxError::Io(e) => XlsbError::Io(e),
+        XlsxError::Zip(e) => XlsbError::Zip(e),
+        XlsxError::Vba(e) => XlsbError::Vba(e),
+        XlsxError::Xml(e) => XlsbError::Xml(e),
+        XlsxError::XmlAttr(e) => XlsbError::XmlAttr(e),
+        XlsxError::Encoding(e) => XlsbError::Xml(e.into()),
+        e => XlsbError::FileNotFound(e.to_string()),
+    }
 }
