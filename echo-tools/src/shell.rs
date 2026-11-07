@@ -842,30 +842,39 @@ fn start_sandbox_stream<'a>(
 ) -> Pin<Box<dyn Stream<Item = ToolStreamEvent> + Send + 'a>> {
     let (tx, rx) = mpsc::channel(STREAM_CHANNEL_CAPACITY);
     tokio::spawn(async move {
+        let started = Instant::now();
         let stream = tokio::select! {
             _ = tx.closed() => return,
             stream = sandbox.execute_stream(command) => stream,
         };
-        let Ok(mut stream) = stream else {
-            let message = stream
-                .err()
-                .map(|error| format!("Sandbox execution failed: {error}"))
-                .unwrap_or_else(|| "Sandbox execution failed".to_string());
-            let result = ToolResult::failure(ToolFailureCategory::Unavailable, message)
-                .with_meta("duration_ms", "0")
-                .with_meta("exit_code", "-1")
-                .with_meta(
-                    "working_dir",
-                    working_dir
-                        .as_ref()
-                        .map(|dir| dir.display().to_string())
-                        .unwrap_or_default(),
-                )
-                .with_meta("output_truncated", "false")
-                .with_meta("stdout_bytes", "0")
-                .with_meta("stderr_bytes", "0");
-            let _ = tx.send(ToolStreamEvent::Complete(result)).await;
-            return;
+        let mut stream = match stream {
+            Ok(stream) => stream,
+            Err(error) => {
+                // 默认execute_stream可能已完成整个缓冲执行后才返回Err。
+                // 已有声明原样传递；未分类错误保守处理，不据建流阶段推断未执行。
+                let declared = matches!(
+                    &error,
+                    echo_core::error::ReactError::Tool(tool)
+                        if matches!(tool.as_ref(), ToolError::RemoteFailure { .. })
+                );
+                let failure = ToolFailure::from_error(&error, !declared);
+                let result = ToolResult::error(format!("Sandbox execution failed: {error}"))
+                    .with_failure(failure)
+                    .with_meta("duration_ms", started.elapsed().as_millis().to_string())
+                    .with_meta("exit_code", "-1")
+                    .with_meta(
+                        "working_dir",
+                        working_dir
+                            .as_ref()
+                            .map(|dir| dir.display().to_string())
+                            .unwrap_or_default(),
+                    )
+                    .with_meta("output_truncated", "false")
+                    .with_meta("stdout_bytes", "0")
+                    .with_meta("stderr_bytes", "0");
+                let _ = tx.send(ToolStreamEvent::Complete(result)).await;
+                return;
+            }
         };
 
         loop {
@@ -899,7 +908,11 @@ fn start_sandbox_stream<'a>(
                         ToolFailureCategory::Permanent
                     };
                     let result = ToolResult::failure(category, failure.message())
-                        .with_meta("duration_ms", "0")
+                        // 流内失败不能推出没有副作用；输出为零也不是未执行证明。
+                        .with_failure(
+                            ToolFailure::new(category).with_side_effect(ToolSideEffect::Possible),
+                        )
+                        .with_meta("duration_ms", started.elapsed().as_millis().to_string())
                         .with_meta("exit_code", "-1")
                         .with_meta(
                             "working_dir",
@@ -1346,7 +1359,7 @@ mod tests {
         let args: Vec<_> = command.get_args().collect();
         assert_eq!(args, ["-KILL", "--", "-2443"]);
     }
-    use echo_core::sandbox::{ExecutionResult, IsolationLevel};
+    use echo_core::sandbox::{ExecutionResult, IsolationLevel, SandboxStreamFailure};
     use echo_core::tools::cell::{
         CommandCellArtifactStatus, CommandCellDelta, CommandCellError, CommandCellLaunchReceipt,
         CommandCellObservationLease, CommandCellPhase, CommandCellSnapshot, CommandCellWaitReason,
@@ -1355,6 +1368,171 @@ mod tests {
     use echo_core::tools::{ToolContext, ToolOutputChannel, ToolStreamEvent};
     use futures::StreamExt;
     use std::collections::HashMap;
+
+    struct BufferedFailureSandbox {
+        error: Mutex<Option<echo_core::error::ReactError>>,
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl SandboxExecutor for BufferedFailureSandbox {
+        fn name(&self) -> &str {
+            "buffered-failure-fixture"
+        }
+        fn isolation_level(&self) -> IsolationLevel {
+            IsolationLevel::None
+        }
+        fn is_available(&self) -> BoxFuture<'_, bool> {
+            Box::pin(async { true })
+        }
+        fn execute(&self, _command: SandboxCommand) -> BoxFuture<'_, Result<ExecutionResult>> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+            let error = self
+                .error
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .take();
+            Box::pin(async move {
+                match error {
+                    Some(error) => Err(error),
+                    None => Err(std::io::Error::other("fixture operation was replayed").into()),
+                }
+            })
+        }
+    }
+
+    fn failure_shell(
+        error: echo_core::error::ReactError,
+    ) -> (ShellTool, Arc<std::sync::atomic::AtomicUsize>) {
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let tool = ShellTool::new().with_sandbox(Arc::new(BufferedFailureSandbox {
+            error: Mutex::new(Some(error)),
+            calls: calls.clone(),
+        }));
+        (tool, calls)
+    }
+
+    #[tokio::test]
+    async fn sandbox_error_facts_preserve_buffered_declarations() -> Result<()> {
+        for expected in [
+            ToolFailure::new(ToolFailureCategory::PartialSideEffect)
+                .with_postcondition("inspect original target")
+                .with_retry_after(17),
+            ToolFailure::new(ToolFailureCategory::Unavailable),
+            ToolFailure::new(ToolFailureCategory::Transient)
+                .retryable()
+                .with_retry_after(9)
+                .with_idempotency_key("stable-fixture"),
+            ToolFailure::new(ToolFailureCategory::Permanent)
+                .with_side_effect(ToolSideEffect::Confirmed)
+                .with_postcondition("effect completed"),
+        ] {
+            let error = ToolError::RemoteFailure {
+                tool: "fixture_backend".to_string(),
+                message: "original operation failed".to_string(),
+                http_status: None,
+                failure: Box::new(expected.clone()),
+            }
+            .into();
+            let (tool, calls) = failure_shell(error);
+            let parameters =
+                HashMap::from([("command".to_string(), serde_json::json!("printf fixture"))]);
+            let result = tool
+                .execute_with_context(parameters, &ToolContext::default())
+                .await?;
+            assert!(!result.success);
+            assert_eq!(result.failure, Some(expected));
+            assert_eq!(calls.load(std::sync::atomic::Ordering::Acquire), 1);
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn sandbox_error_facts_keep_unclassified_effects_possible() -> Result<()> {
+        let error = std::io::Error::new(
+            std::io::ErrorKind::BrokenPipe,
+            "response lost after execution",
+        )
+        .into();
+        let (tool, calls) = failure_shell(error);
+        let parameters =
+            HashMap::from([("command".to_string(), serde_json::json!("printf fixture"))]);
+        let result = tool
+            .execute_with_context(parameters, &ToolContext::default())
+            .await?;
+        assert!(!result.success);
+        assert_eq!(
+            result.failure,
+            Some(ToolFailure::new(ToolFailureCategory::PartialSideEffect))
+        );
+        assert_eq!(calls.load(std::sync::atomic::Ordering::Acquire), 1);
+        Ok(())
+    }
+
+    struct FailedStreamSandbox(SandboxStreamFailure);
+    impl SandboxExecutor for FailedStreamSandbox {
+        fn name(&self) -> &str {
+            "failed-stream-fixture"
+        }
+        fn isolation_level(&self) -> IsolationLevel {
+            IsolationLevel::None
+        }
+        fn is_available(&self) -> BoxFuture<'_, bool> {
+            Box::pin(async { true })
+        }
+        fn supports_streaming(&self) -> bool {
+            true
+        }
+        fn execute(&self, _command: SandboxCommand) -> BoxFuture<'_, Result<ExecutionResult>> {
+            Box::pin(async {
+                Err(std::io::Error::other("fixture uses the original stream path").into())
+            })
+        }
+        fn execute_stream<'a>(
+            &'a self,
+            _command: SandboxCommand,
+        ) -> BoxFuture<'a, Result<Pin<Box<dyn Stream<Item = SandboxStreamEvent> + Send + 'a>>>>
+        {
+            let failure = self.0.clone();
+            Box::pin(async move {
+                let stream: Pin<Box<dyn Stream<Item = SandboxStreamEvent> + Send + 'a>> =
+                    Box::pin(futures::stream::once(async move {
+                        SandboxStreamEvent::Failed { failure }
+                    }));
+                Ok(stream)
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn sandbox_error_facts_preserve_failed_stream_effects() -> Result<()> {
+        for (failure, category) in [
+            (
+                SandboxStreamFailure::Cancelled {
+                    message: "cancelled after stream creation".into(),
+                },
+                ToolFailureCategory::Cancelled,
+            ),
+            (
+                SandboxStreamFailure::IoError {
+                    message: "reader lost after stream creation".into(),
+                },
+                ToolFailureCategory::Permanent,
+            ),
+        ] {
+            let tool = ShellTool::new().with_sandbox(Arc::new(FailedStreamSandbox(failure)));
+            let parameters =
+                HashMap::from([("command".to_string(), serde_json::json!("printf fixture"))]);
+            let result = tool
+                .execute_with_context(parameters, &ToolContext::default())
+                .await?;
+            assert!(!result.success);
+            assert_eq!(
+                result.failure,
+                Some(ToolFailure::new(category).with_side_effect(ToolSideEffect::Possible))
+            );
+        }
+        Ok(())
+    }
 
     struct TestSandbox;
 

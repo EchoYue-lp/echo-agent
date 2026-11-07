@@ -172,6 +172,11 @@ ToolResult::success("output")
 与普通 `ExecutionFailed` 构造方式不变。超时、取消继续使用已有变体；无法分类的旧错误
 沿原保守分类处理，不通过错误文案决定重试。
 
+Shell的`SandboxExecutor::execute_stream`默认适配可能先完成整个缓冲执行，再返回错误；
+建流失败不代表命令尚未开始。已有`RemoteFailure`中的`ToolFailure`原样进入结果，保留
+已知无副作用、可能/已确认副作用、恢复方式和重试提示；缺少类型化声明的错误与流内失败
+按可能副作用保守处理。耗时记录实际等待，不能把等待后失败一律记作0毫秒。
+
 provider 不新增失败重试。DDG 仍保留 HTML→Instant Answer 原策略，一次逻辑尝试
 可以包含两次 HTTP 请求。只有 ToolManager 执行有限重试，保留有效 Retry-After，
 通过原 context 取消等待；server 最低等待超过现有30秒上限时返回原失败，不提前请求。
