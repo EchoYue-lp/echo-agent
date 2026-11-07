@@ -185,16 +185,34 @@ impl FileRuntimeStateStore {
         &'a self,
         request: RuntimeCheckpointCasRequest,
     ) -> BoxFuture<'a, crate::error::Result<RuntimeCheckpointCasReceipt>> {
-        if let Err(error) = Self::validate_checkpoint_cas_request(&request) {
-            return Box::pin(async move { Err(error) });
-        }
+        // One decode of the incoming payload is reused by every later stage of
+        // this CAS (pending-transition check, owner validation, write).
+        let validation = self
+            .call_context
+            .map(|context| super::PersistenceStage::new(context, "cas_validate"));
+        let request_payload = match Self::validate_checkpoint_cas_request(&request) {
+            Ok(payload) => payload,
+            Err(error) => return Box::pin(async move { Err(error) }),
+        };
+        drop(validation);
         let runtime_state_id = request.runtime_state_id.clone();
         self.run_blocking(runtime_state_id, move |store, runtime_state_id| {
+            let span = tracing::debug_span!("runtime_checkpoint_cas", scope_hash = %format!("{:x}", Sha256::digest(request.scope_id.as_bytes())), runtime_hash = %format!("{:x}", Sha256::digest(runtime_state_id.as_bytes())));
+            let _entered = span.enter();
             let _scope = store.lock_scope(&request.scope_id)?;
             let _runtime = store.lock_runtime(&runtime_state_id)?;
             store.ensure_active_deadline("runtime checkpoint CAS after lock")?;
-            let mut scope_record = store.reconcile_scope_owner_sync(&request.scope_id)?;
-            let owner = store.read_live_runtime_owner_sync(&runtime_state_id)?;
+            let _cas_stage = store
+                .call_context
+                .map(|context| super::PersistenceStage::new(context, "cas_physical"));
+            // One owner scan serves scope reconciliation, the live-owner lookup
+            // and (when this CAS updates an existing owner) the scope-index
+            // projection below.
+            let scanned_owners = store.runtime_records_sync()?;
+            let mut scope_record = store
+                .reconcile_scope_owner_from_records_sync(&request.scope_id, &scanned_owners)?;
+            let owner = store.live_owner_from_records_sync(&runtime_state_id, &scanned_owners)?;
+            let owner_was_scanned = owner.is_some();
             if let Some(owner) = owner.as_ref()
                 && owner.scope_id != request.scope_id
             {
@@ -268,7 +286,11 @@ impl FileRuntimeStateStore {
                     status: RuntimeCheckpointCasStatus::RevisionConflict,
                 });
             }
-            Self::validate_pending_transition(owner.as_ref(), &request.checkpoint)?;
+            Self::validate_pending_transition(
+                owner.as_ref(),
+                &request.checkpoint,
+                &request_payload,
+            )?;
             let current_state_revision = current_version
                 .as_ref()
                 .map(Self::state_revision)
@@ -284,20 +306,23 @@ impl FileRuntimeStateStore {
                 revision: scope_revision,
                 lifecycle: RuntimeScopeLifecycle::Active,
             };
-            store.write_runtime_owner_sync(&RuntimeStateOwner {
-                version: RUNTIME_STATE_RECORD_VERSION,
-                runtime_state_id: runtime_state_id.clone(),
-                scope_id: request.scope_id.clone(),
-                phase: RuntimeStatePhase::Active,
-                checkpoint: Some(request.checkpoint),
-                state_version: version.clone(),
-                conversation_epoch: request.conversation_epoch,
-                scope_revision,
-                scope_lifecycle: RuntimeScopeLifecycle::Active,
-                cas_expected_state_version: Some(request.expected_state_version),
-                cas_expected_scope_revision: request.expected_scope_revision,
-                transcript_ack_proof: None,
-            })?;
+            store.write_runtime_owner_with_payload_sync(
+                &RuntimeStateOwner {
+                    version: RUNTIME_STATE_RECORD_VERSION,
+                    runtime_state_id: runtime_state_id.clone(),
+                    scope_id: request.scope_id.clone(),
+                    phase: RuntimeStatePhase::Active,
+                    checkpoint: Some(request.checkpoint),
+                    state_version: version.clone(),
+                    conversation_epoch: request.conversation_epoch,
+                    scope_revision,
+                    scope_lifecycle: RuntimeScopeLifecycle::Active,
+                    cas_expected_state_version: Some(request.expected_state_version),
+                    cas_expected_scope_revision: request.expected_scope_revision,
+                    transcript_ack_proof: None,
+                },
+                Some(&request_payload),
+            )?;
             let completed_retirements = scope_record
                 .take()
                 .map(|record| record.completed_retirements)
@@ -308,7 +333,12 @@ impl FileRuntimeStateStore {
                 current_retirement: None,
                 completed_retirements,
             })?;
-            store.repair_scope_index_best_effort(&request.scope_id);
+            // A checked-in owner keeps the same identity set, so the scan above
+            // still describes it. A brand-new owner needs one fresh scan.
+            store.repair_scope_index_with_records_best_effort(
+                &request.scope_id,
+                owner_was_scanned.then_some(scanned_owners.as_slice()),
+            );
             Ok(RuntimeCheckpointCasReceipt {
                 scope: authority,
                 runtime_state_id,
@@ -455,11 +485,38 @@ impl FileRuntimeStateStore {
     }
 
     fn validate_runtime_owner_payload(owner: &RuntimeStateOwner) -> crate::error::Result<()> {
+        Self::validate_runtime_owner_payload_with(owner, None)
+    }
+
+    /// Validate one owner record.
+    ///
+    /// `restored` is the already decoded checkpoint payload of `owner` when the
+    /// caller produced it in this operation; passing it avoids decoding the same
+    /// multi-megabyte payload a second time. Every check stays identical.
+    fn validate_runtime_owner_payload_with(
+        owner: &RuntimeStateOwner,
+        restored: Option<&super::ManagedAgentCheckpointPayload>,
+    ) -> crate::error::Result<()> {
         if owner.version != RUNTIME_STATE_RECORD_VERSION {
             return Err(Self::invalid_state(
                 "unsupported current runtime owner record version",
             ));
         }
+        // Decode at most once per record: every arm below only needs the
+        // pending projection plus the projection cursor. Retired records must
+        // not carry a checkpoint at all, so they never reach a decode.
+        let decoded = match restored {
+            Some(_) => None,
+            None => match owner.checkpoint.as_ref() {
+                Some(checkpoint)
+                    if !matches!(owner.state_version, RuntimeStateVersion::Retired { .. }) =>
+                {
+                    Some(checkpoint.restore_managed_runtime_payload()?)
+                }
+                _ => None,
+            },
+        };
+        let payload = restored.or(decoded.as_ref());
         match &owner.state_version {
             RuntimeStateVersion::Unmanaged { digest } => {
                 if owner.scope_revision != 0
@@ -483,8 +540,9 @@ impl FileRuntimeStateStore {
                             "unmanaged runtime checkpoint digest mismatch",
                         ));
                     }
-                    let payload = checkpoint.restore_managed_runtime_payload()?;
-                    if payload.pending_transcript_projection.is_some() {
+                    if payload
+                        .is_some_and(|payload| payload.pending_transcript_projection.is_some())
+                    {
                         return Err(Self::managed_state_error(
                             "pending checkpoint payload requires compare-and-save",
                         ));
@@ -497,16 +555,14 @@ impl FileRuntimeStateStore {
                         "managed runtime state lacks current revision metadata",
                     ));
                 }
-                let checkpoint = owner.checkpoint.as_ref().ok_or_else(|| {
+                owner.checkpoint.as_ref().ok_or_else(|| {
                     Self::invalid_state(format!(
                         "managed runtime state {} lost its checkpoint",
                         owner.runtime_state_id
                     ))
                 })?;
-                let payload = checkpoint.restore_managed_runtime_payload()?;
                 if payload
-                    .pending_transcript_projection
-                    .as_ref()
+                    .and_then(|payload| payload.pending_transcript_projection.as_ref())
                     .is_some_and(|pending| pending.base_runtime_revision != *revision)
                 {
                     return Err(Self::invalid_state(
@@ -533,10 +589,12 @@ impl FileRuntimeStateStore {
             }
         }
         if let Some(proof) = owner.transcript_ack_proof.as_ref() {
-            let checkpoint = owner.checkpoint.as_ref().ok_or_else(|| {
+            owner.checkpoint.as_ref().ok_or_else(|| {
                 Self::invalid_state("acknowledged runtime state is missing checkpoint")
             })?;
-            let payload = checkpoint.restore_managed_runtime_payload()?;
+            let payload_known = payload.ok_or_else(|| {
+                Self::invalid_state("acknowledged runtime state lost its checkpoint payload")
+            })?;
             if proof.payload_digest.len() != 64
                 || !proof
                     .payload_digest
@@ -545,8 +603,8 @@ impl FileRuntimeStateStore {
                 || proof.operation_id
                     != format!("transcript-projection-v1:{}", proof.payload_digest)
                 || !matches!(owner.state_version, RuntimeStateVersion::Managed { .. })
-                || payload.pending_transcript_projection.is_some()
-                || payload.transcript_projection.is_none()
+                || payload_known.pending_transcript_projection.is_some()
+                || payload_known.transcript_projection.is_none()
             {
                 return Err(Self::invalid_state(
                     "runtime transcript acknowledgement proof is corrupt",
@@ -591,9 +649,11 @@ impl FileRuntimeStateStore {
         epoch.is_none_or(|epoch| (1..=MAX_CONVERSATION_EPOCH).contains(&epoch))
     }
 
+    /// Validate one CAS request and return its decoded payload so the same
+    /// decode can be reused by the transition check and the owner write.
     fn validate_checkpoint_cas_request(
         request: &RuntimeCheckpointCasRequest,
-    ) -> crate::error::Result<()> {
+    ) -> crate::error::Result<super::ManagedAgentCheckpointPayload> {
         let _safe_scope = safe_segment(&request.scope_id)?;
         let _safe_runtime = safe_segment(&request.runtime_state_id)?;
         if request.checkpoint.conversation_id != request.runtime_state_id {
@@ -619,14 +679,14 @@ impl FileRuntimeStateStore {
                 "pending transcript projection does not match CAS scope, epoch, and cursor",
             ));
         }
-        Ok(())
+        Ok(payload)
     }
 
     fn validate_pending_transition(
         owner: Option<&RuntimeStateOwner>,
         checkpoint: &AgentCheckpoint,
+        next: &super::ManagedAgentCheckpointPayload,
     ) -> crate::error::Result<()> {
-        let next = checkpoint.restore_managed_runtime_payload()?;
         let current = match owner {
             Some(owner) if matches!(owner.state_version, RuntimeStateVersion::Managed { .. }) => {
                 Some(
@@ -660,9 +720,21 @@ impl FileRuntimeStateStore {
                 "current pending transcript revision does not match runtime authority",
             ));
         }
-        let messages_match = match current.as_ref() {
-            Some(current) => Self::serialized_eq(&current.messages, &next.messages)?,
-            None => true,
+        // Comparing ~4 MB message vectors costs two full serializations, and the
+        // result is only consumed by the pending→pending arm. Compute it only
+        // when that arm can be reached; every other arm keeps the same outcome.
+        let messages_match = if current
+            .as_ref()
+            .and_then(|payload| payload.pending_transcript_projection.as_ref())
+            .is_some()
+            && next.pending_transcript_projection.is_some()
+        {
+            match current.as_ref() {
+                Some(current) => Self::serialized_eq(&current.messages, &next.messages)?,
+                None => true,
+            }
+        } else {
+            true
         };
         match (
             current
@@ -1004,8 +1076,23 @@ impl FileRuntimeStateStore {
         scope_id: &str,
     ) -> crate::error::Result<Option<RuntimeScopeOwner>> {
         let owners = self.runtime_records_sync()?;
+        self.reconcile_scope_owner_from_records_sync(scope_id, &owners)
+    }
+
+    /// Reconcile one scope from an owner scan the caller already performed.
+    ///
+    /// A checkpoint CAS needs the same scan twice (reconcile, then the scope
+    /// index projection). Sharing one scan keeps that operation at a single
+    /// read and decode per owner while the recovery authority is unchanged: the
+    /// scan still validates every record it returns, and `_scope_index` is still
+    /// only rewritten from that scan, never trusted.
+    fn reconcile_scope_owner_from_records_sync(
+        &self,
+        scope_id: &str,
+        owners: &[RuntimeStateOwner],
+    ) -> crate::error::Result<Option<RuntimeScopeOwner>> {
         let mut record = self.read_scope_owner_sync(scope_id)?;
-        let Some(recovered) = Self::synthetic_scope_authority(scope_id, &owners) else {
+        let Some(recovered) = Self::synthetic_scope_authority(scope_id, owners) else {
             return Ok(record);
         };
         if recovered.revision == 0 {
@@ -1051,6 +1138,25 @@ impl FileRuntimeStateStore {
         Ok(record)
     }
 
+    /// Current live owner for `runtime_state_id`, reusing an existing scan.
+    ///
+    /// The scan already validated every record it returned, so a hit needs no
+    /// second read. A miss still takes the authoritative path (which also
+    /// clears an Unmanaged deleting tombstone) instead of assuming absence.
+    fn live_owner_from_records_sync(
+        &self,
+        runtime_state_id: &str,
+        owners: &[RuntimeStateOwner],
+    ) -> crate::error::Result<Option<RuntimeStateOwner>> {
+        match owners
+            .iter()
+            .find(|owner| owner.runtime_state_id == runtime_state_id)
+        {
+            Some(owner) => Ok(Some(owner.clone())),
+            None => self.read_live_runtime_owner_sync(runtime_state_id),
+        }
+    }
+
     fn read_runtime_owner_sync(
         &self,
         runtime_state_id: &str,
@@ -1063,11 +1169,28 @@ impl FileRuntimeStateStore {
         };
         let owner: RuntimeStateOwner = serde_json::from_str(&raw)
             .map_err(|error| Self::invalid_state(format!("parse {}: {error}", path.display())))?;
-        if owner.version != RUNTIME_STATE_RECORD_VERSION
-            || owner.runtime_state_id != runtime_state_id
-        {
+        if owner.runtime_state_id != runtime_state_id {
             return Err(Self::invalid_state(format!(
                 "runtime state owner identity mismatch at {}",
+                path.display()
+            )));
+        }
+        Self::validate_loaded_runtime_owner(owner, &path).map(Some)
+    }
+
+    /// Validate one already-decoded owner record.
+    ///
+    /// Splitting decode from validation is what keeps a directory scan to one
+    /// read and one decode per record: the scan previously re-read and re-parsed
+    /// every file it had just decoded. The checks themselves are unchanged, so
+    /// every record a caller may act on is still fully validated.
+    fn validate_loaded_runtime_owner(
+        owner: RuntimeStateOwner,
+        path: &std::path::Path,
+    ) -> crate::error::Result<RuntimeStateOwner> {
+        if owner.version != RUNTIME_STATE_RECORD_VERSION {
+            return Err(Self::invalid_state(format!(
+                "unsupported runtime state owner record version at {}",
                 path.display()
             )));
         }
@@ -1102,7 +1225,7 @@ impl FileRuntimeStateStore {
                 if owner
                     .checkpoint
                     .as_ref()
-                    .is_none_or(|checkpoint| checkpoint.conversation_id != runtime_state_id)
+                    .is_none_or(|checkpoint| checkpoint.conversation_id != owner.runtime_state_id)
                 {
                     return Err(Self::invalid_state(format!(
                         "active runtime state record is missing checkpoint at {}",
@@ -1129,7 +1252,7 @@ impl FileRuntimeStateStore {
             }
         }
         Self::validate_runtime_owner_payload(&owner)?;
-        Ok(Some(owner))
+        Ok(owner)
     }
 
     /// 当前Unmanaged清除崩溃切点；模式显式存在，不从旧version推断删除许可。
@@ -1149,15 +1272,32 @@ impl FileRuntimeStateStore {
     }
 
     fn write_runtime_owner_sync(&self, owner: &RuntimeStateOwner) -> crate::error::Result<()> {
-        Self::validate_runtime_owner_payload(owner)?;
+        self.write_runtime_owner_with_payload_sync(owner, None)
+    }
+
+    /// Write one owner record, reusing an already decoded payload when the
+    /// caller validated it earlier in the same operation.
+    fn write_runtime_owner_with_payload_sync(
+        &self,
+        owner: &RuntimeStateOwner,
+        payload: Option<&super::ManagedAgentCheckpointPayload>,
+    ) -> crate::error::Result<()> {
+        Self::validate_runtime_owner_payload_with(owner, payload)?;
         let _safe_scope = safe_segment(&owner.scope_id)?;
         let path = self.runtime_owner_path(&owner.runtime_state_id)?;
         let parent = path
             .parent()
             .ok_or_else(|| Self::invalid_state("runtime state owner path has no parent"))?;
         create_dir_all_durable(parent).map_err(Self::to_react_err)?;
+        let serialize = self
+            .call_context
+            .map(|context| super::PersistenceStage::new(context, "owner_serialize"));
         let raw = serde_json::to_vec_pretty(owner)
             .map_err(|error| Self::invalid_state(format!("serialize runtime owner: {error}")))?;
+        drop(serialize);
+        let _write = self
+            .call_context
+            .map(|context| super::PersistenceStage::new(context, "owner_atomic_write"));
         echo_core::utils::fs::atomic_write(&path, &raw).map_err(Self::to_react_err)
     }
 
@@ -1199,6 +1339,9 @@ impl FileRuntimeStateStore {
     }
 
     fn runtime_records_sync(&self) -> crate::error::Result<Vec<RuntimeStateOwner>> {
+        let _scan = self
+            .call_context
+            .map(|context| super::PersistenceStage::new(context, "owner_scan"));
         let root = self.base.join("_runtime_owners");
         let mut records = Vec::new();
         for entry in std::fs::read_dir(&root).map_err(Self::to_react_err)? {
@@ -1207,24 +1350,31 @@ impl FileRuntimeStateStore {
             if path.extension().and_then(|extension| extension.to_str()) != Some("json") {
                 continue;
             }
+            let read = self
+                .call_context
+                .map(|context| super::PersistenceStage::new(context, "owner_read"));
             let raw = std::fs::read_to_string(&path).map_err(Self::to_react_err)?;
+            drop(read);
+            let decode = self
+                .call_context
+                .map(|context| super::PersistenceStage::new(context, "owner_decode"));
             let record: RuntimeStateOwner = serde_json::from_str(&raw).map_err(|error| {
                 Self::invalid_state(format!("parse {}: {error}", path.display()))
             })?;
+            drop(decode);
             if self.runtime_owner_path(&record.runtime_state_id)? != path {
                 return Err(Self::invalid_state(format!(
                     "runtime state record filename does not match identity: {}",
                     path.display()
                 )));
             }
-            let validated = self
-                .read_runtime_owner_sync(&record.runtime_state_id)?
-                .ok_or_else(|| {
-                    echo_core::error::RuntimeStateError::NotFound(format!(
-                        "runtime state record disappeared: {}",
-                        path.display()
-                    ))
-                })?;
+            // Validate the decoded record instead of re-reading the file it came
+            // from: one read and one decode per owner per scan.
+            let validation = self
+                .call_context
+                .map(|context| super::PersistenceStage::new(context, "owner_payload_validate"));
+            let validated = Self::validate_loaded_runtime_owner(record, &path)?;
+            drop(validation);
             if matches!(
                 validated.state_version,
                 RuntimeStateVersion::Unmanaged { .. }
@@ -1235,6 +1385,11 @@ impl FileRuntimeStateStore {
             records.push(validated);
         }
         records.sort_by(|left, right| left.runtime_state_id.cmp(&right.runtime_state_id));
+        tracing::debug!(
+            owner_reads = records.len(),
+            owner_decodes = records.len(),
+            "runtime owner scan validated"
+        );
         Ok(records)
     }
 
@@ -1262,9 +1417,22 @@ impl FileRuntimeStateStore {
     }
 
     fn repair_scope_index_best_effort(&self, scope_id: &str) {
-        let repaired = self
-            .runtime_records_sync()
-            .and_then(|records| self.reconcile_scope_index_sync(scope_id, &records));
+        self.repair_scope_index_with_records_best_effort(scope_id, None);
+    }
+
+    /// Rewrite the scope index from `records` when the caller already has a
+    /// scan that still reflects the on-disk identity set; otherwise scan.
+    fn repair_scope_index_with_records_best_effort(
+        &self,
+        scope_id: &str,
+        records: Option<&[RuntimeStateOwner]>,
+    ) {
+        let repaired = match records {
+            Some(records) => self.reconcile_scope_index_sync(scope_id, records),
+            None => self
+                .runtime_records_sync()
+                .and_then(|records| self.reconcile_scope_index_sync(scope_id, &records)),
+        };
         if let Err(error) = repaired {
             tracing::warn!(
                 %scope_id,
@@ -1592,8 +1760,14 @@ impl RuntimeStateStore for FileRuntimeStateStore {
             let _scope = store.lock_scope(&scope_id)?;
             let _runtime = store.lock_runtime(&runtime_state_id)?;
             store.ensure_active_deadline("runtime-state load after lock")?;
-            let scope_record = store.reconcile_scope_owner_sync(&scope_id)?;
-            let Some(owner) = store.read_live_runtime_owner_sync(&runtime_state_id)? else {
+            // One owner scan answers both the scope reconciliation and the
+            // generation lookup; each record is read and decoded once.
+            let scanned_owners = store.runtime_records_sync()?;
+            let scope_record =
+                store.reconcile_scope_owner_from_records_sync(&scope_id, &scanned_owners)?;
+            let Some(owner) =
+                store.live_owner_from_records_sync(&runtime_state_id, &scanned_owners)?
+            else {
                 return Ok(None);
             };
             if owner.scope_id != scope_id {
@@ -5316,6 +5490,278 @@ mod tests {
         second
             .await
             .map_err(FileRuntimeStateStore::to_react_err)??;
+        let _ = std::fs::remove_dir_all(&tmp);
+        Ok(())
+    }
+
+    /// 显式选择的脱敏观测：只复制原 owner 到临时 Store，原文件全程只读。
+    #[tokio::test]
+    #[ignore = "requires explicit ECHO_RELIABILITY_SAMPLE, runs only in a frozen profile window"]
+    async fn isolated_real_checkpoint_cold_warm_profile() -> crate::error::Result<()> {
+        let sample = std::env::var("ECHO_RELIABILITY_SAMPLE")
+            .map_err(|error| FileRuntimeStateStore::invalid_state(error.to_string()))?;
+        let bytes = std::fs::read(sample).map_err(FileRuntimeStateStore::to_react_err)?;
+        assert!(bytes.len() >= 9_500_000);
+        let source: RuntimeStateOwner = serde_json::from_slice(&bytes)
+            .map_err(|error| FileRuntimeStateStore::invalid_state(error.to_string()))?;
+        let original_payload = source
+            .checkpoint
+            .as_ref()
+            .ok_or_else(|| FileRuntimeStateStore::invalid_state("sample checkpoint missing"))?
+            .messages_json
+            .clone();
+        let temp = tempfile::tempdir().map_err(FileRuntimeStateStore::to_react_err)?;
+        let store = FileRuntimeStateStore::new(temp.path())?;
+        std::fs::write(store.runtime_owner_path(&source.runtime_state_id)?, &bytes)
+            .map_err(FileRuntimeStateStore::to_react_err)?;
+        for label in ["cold", "warm"] {
+            let started = std::time::Instant::now();
+            let call =
+                crate::memory::PersistenceCallContext::with_timeout(Duration::from_secs(10))?;
+            let loaded = store
+                .load_runtime_state_with_context(call, &source.scope_id, &source.runtime_state_id)
+                .await?
+                .ok_or_else(|| FileRuntimeStateStore::invalid_state("sample owner missing"))?;
+            let mut checkpoint = loaded
+                .checkpoint
+                .ok_or_else(|| FileRuntimeStateStore::invalid_state("sample checkpoint missing"))?;
+            checkpoint.timestamp += chrono::Duration::milliseconds(1);
+            let expected_state_version = match loaded.version {
+                RuntimeStateVersion::Managed { revision } => {
+                    RuntimeStateExpectedVersion::Managed { revision }
+                }
+                _ => {
+                    return Err(FileRuntimeStateStore::invalid_state(
+                        "sample must be managed",
+                    ));
+                }
+            };
+            let receipt = store
+                .compare_and_save_checkpoint_with_context(
+                    call,
+                    RuntimeCheckpointCasRequest {
+                        managed_import: None,
+                        scope_id: source.scope_id.clone(),
+                        runtime_state_id: source.runtime_state_id.clone(),
+                        conversation_epoch: source.conversation_epoch,
+                        expected_scope_revision: loaded.scope.revision,
+                        expected_state_version,
+                        checkpoint,
+                    },
+                )
+                .await?;
+            assert_eq!(receipt.status, RuntimeCheckpointCasStatus::Applied);
+            let elapsed = started.elapsed();
+            eprintln!(
+                "REAL_CHECKPOINT_PROFILE phase={label} bytes={} elapsed_ms={}",
+                bytes.len(),
+                elapsed.as_millis()
+            );
+            assert!(elapsed < Duration::from_secs(10));
+            let saved = store
+                .get_checkpoint(&source.runtime_state_id)
+                .await?
+                .ok_or_else(|| FileRuntimeStateStore::invalid_state("saved checkpoint missing"))?;
+            assert!(
+                saved.messages_json == original_payload,
+                "raw/approved payload changed"
+            );
+        }
+        // 完整 coordinator 的新 scope 不继承原投影 Store；只加载原消息，
+        // 不执行其中任何工具。raw/approved 原件应逐字段保持。
+        let full = tempfile::tempdir().map_err(FileRuntimeStateStore::to_react_err)?;
+        let runtime = Arc::new(FileRuntimeStateStore::new(full.path())?);
+        let conversations = Arc::new(crate::memory::FileConversationStore::new(
+            full.path().join("conversations"),
+        )?);
+        let messages = source
+            .checkpoint
+            .as_ref()
+            .ok_or_else(|| FileRuntimeStateStore::invalid_state("sample checkpoint missing"))?
+            .restore_runtime_payload()?
+            .messages;
+        let original_messages = serde_json::to_value(&messages)
+            .map_err(|e| FileRuntimeStateStore::invalid_state(e.to_string()))?;
+        let mut agent = crate::agent::ReactAgent::new(
+            crate::agent::AgentConfig::new("fixture", "fixture", "fixture")
+                .conversation_id(&source.runtime_state_id),
+        );
+        agent.set_state_store(runtime.clone());
+        agent.set_conversation_store(conversations);
+        agent.memory.context.lock().await.set_messages(messages);
+        let snapshot = crate::agent::AgentRunSnapshot::from_agent(&agent);
+        tracing::subscriber::set_global_default(
+            tracing_subscriber::fmt()
+                .with_max_level(tracing::Level::DEBUG)
+                .with_ansi(false)
+                .with_writer(std::io::stderr)
+                .finish(),
+        )
+        .map_err(|error| FileRuntimeStateStore::invalid_state(error.to_string()))?;
+        for label in ["coordinator-cold", "coordinator-warm"] {
+            let started = std::time::Instant::now();
+            let result = snapshot
+                .save_transcript_projection(&agent.memory.context, None)
+                .await?;
+            eprintln!(
+                "REAL_CHECKPOINT_PROFILE phase={label} bytes={} elapsed_ms={} status={:?}",
+                bytes.len(),
+                started.elapsed().as_millis(),
+                result.status
+            );
+            assert_eq!(
+                result.status,
+                crate::memory::TranscriptProjectionSettlementStatus::Settled
+            );
+            assert!(started.elapsed() < Duration::from_secs(10));
+            let saved = runtime
+                .get_checkpoint(&source.runtime_state_id)
+                .await?
+                .ok_or_else(|| FileRuntimeStateStore::invalid_state("saved checkpoint missing"))?;
+            assert!(
+                serde_json::to_value(saved.restore_runtime_payload()?.messages)
+                    .map_err(|e| FileRuntimeStateStore::invalid_state(e.to_string()))?
+                    == original_messages,
+                "raw/approved message fields changed"
+            );
+        }
+        Ok(())
+    }
+
+    /// Synthesize a checkpoint with the production sample's rough shape: 130
+    /// messages whose payload reaches several megabytes, plus a transcript
+    /// cursor with many projected entries. Content is synthetic so the test
+    /// carries no user text.
+    fn large_checkpoint(
+        runtime_state_id: &str,
+        generation: usize,
+    ) -> crate::error::Result<AgentCheckpoint> {
+        let mut messages = Vec::with_capacity(130);
+        messages.push(crate::llm::types::Message::system(
+            "large-context-fixture".to_string(),
+        ));
+        for index in 0..129_usize {
+            let body = format!("{index:04}").repeat(20_000);
+            messages.push(if index % 2 == 0 {
+                crate::llm::types::Message::user(body)
+            } else {
+                crate::llm::types::Message::assistant(body)
+            });
+        }
+        let payload_bytes: usize = messages
+            .iter()
+            .filter_map(|message| serde_json::to_string(message).ok())
+            .map(|encoded| encoded.len())
+            .sum();
+        assert!(
+            payload_bytes >= 9_500_000,
+            "large-context fixture is too small: {payload_bytes} bytes"
+        );
+        let mut checkpoint = checkpoint(runtime_state_id, "large");
+        checkpoint.messages_json = AgentCheckpoint::serialize_payload(messages, None)?;
+        // Keep successive generations distinguishable without changing shape.
+        checkpoint.timestamp += chrono::Duration::milliseconds(
+            i64::try_from(generation)
+                .map_err(|e| FileRuntimeStateStore::invalid_state(e.to_string()))?,
+        );
+        Ok(checkpoint)
+    }
+
+    fn cas_request(
+        scope_id: &str,
+        runtime_state_id: &str,
+        checkpoint: AgentCheckpoint,
+        expected_scope_revision: u64,
+        expected_state_version: RuntimeStateExpectedVersion,
+    ) -> RuntimeCheckpointCasRequest {
+        RuntimeCheckpointCasRequest {
+            managed_import: None,
+            scope_id: scope_id.to_string(),
+            runtime_state_id: runtime_state_id.to_string(),
+            conversation_epoch: Some(1),
+            expected_scope_revision,
+            expected_state_version,
+            checkpoint,
+        }
+    }
+
+    /// Representative large-context save: create plus update of a multi-megabyte
+    /// checkpoint must stay inside the declared ten-second save budget, and the
+    /// scope projection must still describe exactly the owners on disk.
+    #[tokio::test]
+    async fn large_context_checkpoint_cas_settles_within_the_save_budget()
+    -> crate::error::Result<()> {
+        let tmp = tmp_base();
+        let store = FileRuntimeStateStore::new(&tmp)?;
+        // Unrelated scopes stay large too: the scan must decode them once, not
+        // reject or skip them silently.
+        for unrelated in ["scope-b", "scope-c"] {
+            let checkpoint = large_checkpoint(unrelated, 0)?;
+            let receipt = store
+                .compare_and_save_checkpoint(cas_request(
+                    unrelated,
+                    unrelated,
+                    checkpoint,
+                    0,
+                    RuntimeStateExpectedVersion::Absent,
+                ))
+                .await?;
+            assert_eq!(receipt.status, RuntimeCheckpointCasStatus::Applied);
+        }
+
+        let created_at = std::time::Instant::now();
+        let created = store
+            .compare_and_save_checkpoint(cas_request(
+                "scope-a",
+                "runtime-a",
+                large_checkpoint("runtime-a", 0)?,
+                0,
+                RuntimeStateExpectedVersion::Absent,
+            ))
+            .await?;
+        let create_elapsed = created_at.elapsed();
+        assert_eq!(created.status, RuntimeCheckpointCasStatus::Applied);
+        assert_eq!(created.scope.revision, 1);
+
+        let update_started_at = std::time::Instant::now();
+        let updated = store
+            .compare_and_save_checkpoint(cas_request(
+                "scope-a",
+                "runtime-a",
+                large_checkpoint("runtime-a", 1)?,
+                created.scope.revision,
+                RuntimeStateExpectedVersion::Managed { revision: 1 },
+            ))
+            .await?;
+        let update_elapsed = update_started_at.elapsed();
+        assert_eq!(updated.status, RuntimeCheckpointCasStatus::Applied);
+        assert_eq!(
+            updated.version,
+            RuntimeStateVersion::Managed { revision: 2 }
+        );
+
+        // The declared budget is ten seconds under the stated hardware/load.
+        assert!(
+            create_elapsed + update_elapsed < Duration::from_secs(10),
+            "large-context save took {create_elapsed:?} + {update_elapsed:?}"
+        );
+        eprintln!("large-context save: create={create_elapsed:?} update={update_elapsed:?}");
+
+        // The projection is rewritten from the same scan the CAS used, and it
+        // still lists exactly the owner that exists.
+        let index: RuntimeStateScopeIndex = serde_json::from_slice(
+            &std::fs::read(store.scope_index_path("scope-a")?)
+                .map_err(FileRuntimeStateStore::to_react_err)?,
+        )
+        .map_err(|error| {
+            FileRuntimeStateStore::invalid_state(format!("parse scope index: {error}"))
+        })?;
+        assert_eq!(
+            index.runtime_state_ids,
+            BTreeSet::from(["runtime-a".to_string()])
+        );
+
+        assert_eq!(store.runtime_records_sync()?.len(), 3);
         let _ = std::fs::remove_dir_all(&tmp);
         Ok(())
     }

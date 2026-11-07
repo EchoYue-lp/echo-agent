@@ -99,13 +99,13 @@ async fn cancel_aware<T>(
 // Only canonical started/draining calls use this helper. Their configured
 // deadline requests cooperative cancellation; it never drops the original
 // execution or its permit. Ordinary bounded ToolManager calls stay unchanged.
-async fn await_started_execution<T>(
-    execution: impl std::future::Future<Output = Result<T>>,
+async fn await_started_execution(
+    execution: impl std::future::Future<Output = Result<ToolResult>>,
     ctx: &ToolContext,
     timeout: Option<Duration>,
     tool_name: &str,
     completed: Option<&std::sync::atomic::AtomicBool>,
-) -> Result<T> {
+) -> Result<ToolResult> {
     let Some(timeout) = timeout else {
         return execution.await;
     };
@@ -128,6 +128,14 @@ async fn await_started_execution<T>(
             match execution.await {
                 Err(error @ ReactError::ExecutionNotSettled { .. }) => Err(error),
                 result if completed_first => result,
+                // A successful result that arrived *after* the caller's budget
+                // expired is still observed knowledge: for a background launch
+                // it is the accepted cell receipt. Downgrading it to Timeout
+                // would report "not created" about a cell the supervisor owns.
+                Ok(result) if tool_name == "shell" && result.success && result.data.as_ref().is_some_and(|data| {
+                    serde_json::from_value::<echo_core::tools::cell::CommandCellLaunchReceipt>(data.clone())
+                        .is_ok_and(|receipt| !receipt.cell_id.is_empty() && receipt.deadline > receipt.accepted_at)
+                }) => Ok(result),
                 _ => Err(ToolError::Timeout(tool_name.to_string()).into()),
             }
         }
@@ -1944,6 +1952,39 @@ mod execute_with_context_tests {
             },
         };
         joined.map_err(|error| ReactError::Other(error.to_string()))
+    }
+
+    #[tokio::test]
+    async fn accepted_background_receipt_survives_observer_timeout() -> Result<()> {
+        let ctx = ToolContext {
+            cancel: Some(Arc::new(tokio_util::sync::CancellationToken::new())),
+            ..Default::default()
+        };
+        let receipt: echo_core::tools::cell::CommandCellLaunchReceipt = serde_json::from_value(json!({
+            "cell_id": "accepted-original-cell", "accepted_at": "2026-11-07T00:00:00Z", "deadline": "2026-11-07T00:00:10Z"
+        })).map_err(|e| ReactError::Other(e.to_string()))?;
+        let result = await_started_execution(
+            async {
+                tokio::time::sleep(Duration::from_millis(30)).await;
+                Ok(ToolResult::success_json(
+                    serde_json::to_value(&receipt).map_err(|e| ReactError::Other(e.to_string()))?,
+                ))
+            },
+            &ctx,
+            Some(Duration::from_millis(1)),
+            "shell",
+            None,
+        )
+        .await?;
+        assert!(result.success);
+        assert_eq!(
+            result.data.and_then(|data| serde_json::from_value::<
+                echo_core::tools::cell::CommandCellLaunchReceipt,
+            >(data)
+            .ok()),
+            Some(receipt)
+        );
+        Ok(())
     }
 
     #[tokio::test]

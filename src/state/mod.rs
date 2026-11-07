@@ -22,6 +22,44 @@ use sha2::{Digest, Sha256};
 
 const RUNTIME_STATE_OPERATION_SCHEMA_VERSION: u16 = 1;
 
+/// 仅记录阶段与预算；不包含正文，也不把离开阶段当成提交成功。
+/// Drop 在错误和调用方撤回时同样记录，物理提交仍以原 Store 回执为准。
+pub(crate) struct PersistenceStage {
+    stage: &'static str,
+    context: crate::memory::PersistenceCallContext,
+    started: std::time::Instant,
+}
+
+impl PersistenceStage {
+    pub(crate) fn new(context: crate::memory::PersistenceCallContext, stage: &'static str) -> Self {
+        tracing::debug!(
+            stage,
+            deadline_ms = context.absolute_deadline_unix_ms,
+            "persistence stage entered"
+        );
+        Self {
+            stage,
+            context,
+            started: std::time::Instant::now(),
+        }
+    }
+}
+
+impl Drop for PersistenceStage {
+    fn drop(&mut self) {
+        tracing::debug!(
+            stage = self.stage,
+            elapsed_us = self.started.elapsed().as_micros(),
+            remaining_ms = self
+                .context
+                .remaining_duration()
+                .unwrap_or_default()
+                .as_millis(),
+            "persistence stage left"
+        );
+    }
+}
+
 /// Sequenced event journal and checkpoint-reducer primitives.
 ///
 /// Checkpoints include a [`JournalIdentity`](crate::state::journal::JournalIdentity);
@@ -1867,12 +1905,15 @@ async fn dispatch_transcript_projection(
             "pending transcript revision does not match runtime authority".to_string(),
         )));
     }
+    tracing::debug!(operation_id = %pending.batch.operation_id, "transcript operation settlement");
+    let apply_stage = PersistenceStage::new(budget.context, "transcript_apply");
     let apply = tokio::time::timeout_at(
         budget.effect_deadline,
         conversation_store
             .apply_transcript_projection_with_context(budget.context, pending.batch.clone()),
     )
     .await;
+    drop(apply_stage);
     let projection_receipt = match apply {
         Err(_) => {
             let detail = "transcript apply deadline elapsed with unknown outcome";
@@ -1979,6 +2020,7 @@ async fn dispatch_transcript_projection(
             "managed transcript acknowledgement is missing conversation epoch".to_string(),
         )
     })?;
+    let _ack_stage = PersistenceStage::new(budget.context, "transcript_ack");
     let ack = tokio::time::timeout_at(
         budget.effect_deadline,
         runtime_state_store.acknowledge_transcript_projection_with_context(

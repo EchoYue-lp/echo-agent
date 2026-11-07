@@ -1147,6 +1147,7 @@ impl<'a> AgentPersistenceCoordinator<'a> {
         store: &dyn crate::memory::ConversationStore,
         conversation_id: &str,
     ) -> crate::error::Result<crate::memory::ConversationProjectionEpochReceipt> {
+        let _stage = crate::state::PersistenceStage::new(self.call_context, "epoch");
         tokio::time::timeout_at(
             self.deadline,
             store.ensure_projection_epoch_with_context(
@@ -1191,15 +1192,7 @@ impl<'a> AgentPersistenceCoordinator<'a> {
         crate::state::RuntimeStateExpectedVersion,
         Option<crate::state::ManagedRuntimeStateSnapshot>,
     )> {
-        let scope_load = store.load_scope_authority_with_context(self.call_context, scope_id);
-        let scope = if await_physical_settlement {
-            scope_load.await?
-        } else {
-            tokio::time::timeout_at(self.deadline, scope_load)
-                .await
-                .map_err(|_| persistence_deadline_error("runtime scope load"))??
-        };
-        let scope_revision = scope.map(|scope| scope.revision).unwrap_or(0);
+        let _stage = crate::state::PersistenceStage::new(self.call_context, "runtime_load");
         let state_load =
             store.load_runtime_state_with_context(self.call_context, scope_id, runtime_state_id);
         let current = if await_physical_settlement {
@@ -1208,6 +1201,26 @@ impl<'a> AgentPersistenceCoordinator<'a> {
             tokio::time::timeout_at(self.deadline, state_load)
                 .await
                 .map_err(|_| persistence_deadline_error("runtime generation load"))??
+        };
+        // A loaded runtime snapshot already carries the reconciled scope
+        // authority, so the save path does not query the same authority twice.
+        // "Absent" still takes the authoritative scope query: there is no
+        // snapshot to read it from, and an empty scope may still be bound to a
+        // revision by an existing scope record.
+        let scope_revision = match current.as_ref() {
+            Some(state) => state.scope.revision,
+            None => {
+                let scope_load =
+                    store.load_scope_authority_with_context(self.call_context, scope_id);
+                let scope = if await_physical_settlement {
+                    scope_load.await?
+                } else {
+                    tokio::time::timeout_at(self.deadline, scope_load)
+                        .await
+                        .map_err(|_| persistence_deadline_error("runtime scope load"))??
+                };
+                scope.map(|scope| scope.revision).unwrap_or(0)
+            }
         };
         let expected = match current.as_ref().map(|state| &state.version) {
             None | Some(crate::state::RuntimeStateVersion::Absent) => {
@@ -1241,7 +1254,9 @@ impl<'a> AgentPersistenceCoordinator<'a> {
         cursor: Option<crate::state::TranscriptProjectionCheckpoint>,
         pending: Option<crate::state::PendingTranscriptProjection>,
     ) -> crate::error::Result<crate::state::AgentCheckpoint> {
+        let freeze = crate::state::PersistenceStage::new(self.call_context, "freeze");
         let messages = context.lock().await.messages().to_vec();
+        drop(freeze);
         self.build_frozen_checkpoint(messages, blocked_reason, cursor, pending)
     }
 
@@ -1258,6 +1273,7 @@ impl<'a> AgentPersistenceCoordinator<'a> {
             .runtime_state_id
             .as_ref()
             .ok_or_else(|| persistence_configuration_error("missing runtime-state identity"))?;
+        let _stage = crate::state::PersistenceStage::new(self.call_context, "serialize");
         let messages_json =
             crate::state::AgentCheckpoint::serialize_managed_payload(messages, cursor, pending)?;
         Ok(crate::state::AgentCheckpoint {
@@ -1382,28 +1398,38 @@ impl<'a> AgentPersistenceCoordinator<'a> {
         let checkpoint = self
             .build_checkpoint(context, blocked_reason, Some(cursor.clone()), None)
             .await?;
+        self.commit_frozen_view(
+            runtime_store.as_ref(),
+            crate::state::RuntimeCheckpointCasRequest {
+                managed_import: None,
+                scope_id: scope_id.to_string(),
+                runtime_state_id: runtime_state_id.to_string(),
+                conversation_epoch: Some(epoch.authority.epoch),
+                expected_scope_revision: scope_revision,
+                expected_state_version: expected,
+                checkpoint,
+            },
+            cursor,
+        )
+        .await
+    }
+
+    async fn commit_frozen_view(
+        &self,
+        runtime_store: &dyn crate::state::RuntimeStateStore,
+        request: crate::state::RuntimeCheckpointCasRequest,
+        cursor: crate::state::TranscriptProjectionCheckpoint,
+    ) -> crate::error::Result<()> {
+        let runtime_state_id = request.runtime_state_id.clone();
         let mut in_memory_cursor = self.snapshot.transcript_projection_cursor.lock().await;
         let mut version = self.snapshot.runtime_state_version.lock().await;
-        let receipt = self
-            .save_frozen_checkpoint(
-                runtime_store.as_ref(),
-                crate::state::RuntimeCheckpointCasRequest {
-                    managed_import: None,
-                    scope_id: scope_id.to_string(),
-                    runtime_state_id: runtime_state_id.to_string(),
-                    conversation_epoch: Some(epoch.authority.epoch),
-                    expected_scope_revision: scope_revision,
-                    expected_state_version: expected,
-                    checkpoint,
-                },
-            )
-            .await?;
+        let receipt = self.save_frozen_checkpoint(runtime_store, request).await?;
         in_memory_cursor.restore(cursor);
         *version = Some(receipt.version);
         drop(version);
         drop(in_memory_cursor);
         self.snapshot
-            .record_checkpoint_event(runtime_state_id)
+            .record_checkpoint_event(&runtime_state_id)
             .await;
         Ok(())
     }
@@ -1423,6 +1449,7 @@ impl<'a> AgentPersistenceCoordinator<'a> {
         request: crate::state::RuntimeCheckpointCasRequest,
         await_physical_settlement: bool,
     ) -> crate::error::Result<crate::state::RuntimeCheckpointCasReceipt> {
+        let _stage = crate::state::PersistenceStage::new(self.call_context, "checkpoint_cas");
         let operation =
             runtime_store.compare_and_save_checkpoint_with_context(self.call_context, request);
         // 新runtime-only versioned路径须等原Store真实结算；同一deadline/receipt校验，
@@ -1492,57 +1519,64 @@ impl<'a> AgentPersistenceCoordinator<'a> {
         let (scope_revision, expected, current) = self
             .current_runtime_state(runtime_store.as_ref(), scope_id, runtime_state_id)
             .await?;
+        let payload_validation =
+            crate::state::PersistenceStage::new(self.call_context, "payload_validate");
+        let current_payload = current
+            .as_ref()
+            .and_then(|state| state.checkpoint.as_ref())
+            .map(crate::state::AgentCheckpoint::restore_managed_runtime_payload)
+            .transpose()?;
+        drop(payload_validation);
         if let Some(state) = current.as_ref()
-            && let Some(checkpoint) = state.checkpoint.as_ref()
+            && current_payload
+                .as_ref()
+                .is_some_and(|payload| payload.pending_transcript_projection.is_some())
         {
-            let payload = checkpoint.restore_managed_runtime_payload()?;
-            if payload.pending_transcript_projection.is_some() {
-                let prior = crate::state::settle_loaded_pending_transcript_projection(
-                    conversation_store.as_ref(),
-                    runtime_store.as_ref(),
-                    scope_id,
-                    runtime_state_id,
-                    state.clone(),
-                    crate::state::TranscriptProjectionDispatch::RetryDurablePending,
-                    self.call_context,
-                )
-                .await?
-                .settlement;
-                if prior.status != crate::memory::TranscriptProjectionSettlementStatus::Settled {
-                    return Ok(prior);
-                }
-                *self.snapshot.runtime_state_version.lock().await = None;
-                return Ok(settlement(
-                    crate::memory::TranscriptProjectionSettlementStatus::Blocked,
-                    None,
-                    Some(scope_id.to_string()),
-                    Some(generation_id.to_string()),
-                    0,
-                    Some(crate::memory::TranscriptProjectionErrorClass::RevisionConflict),
-                    Some(
-                        "runtime pending settled; rehydrate context before a new projection"
-                            .to_string(),
-                    ),
-                ));
+            let prior = crate::state::settle_loaded_pending_transcript_projection(
+                conversation_store.as_ref(),
+                runtime_store.as_ref(),
+                scope_id,
+                runtime_state_id,
+                state.clone(),
+                crate::state::TranscriptProjectionDispatch::RetryDurablePending,
+                self.call_context,
+            )
+            .await?
+            .settlement;
+            if prior.status != crate::memory::TranscriptProjectionSettlementStatus::Settled {
+                return Ok(prior);
             }
+            *self.snapshot.runtime_state_version.lock().await = None;
+            return Ok(settlement(
+                crate::memory::TranscriptProjectionSettlementStatus::Blocked,
+                None,
+                Some(scope_id.to_string()),
+                Some(generation_id.to_string()),
+                0,
+                Some(crate::memory::TranscriptProjectionErrorClass::RevisionConflict),
+                Some(
+                    "runtime pending settled; rehydrate context before a new projection"
+                        .to_string(),
+                ),
+            ));
         }
         self.require_hydrated_base(current.as_ref()).await?;
 
+        let freeze = crate::state::PersistenceStage::new(self.call_context, "freeze");
         let all_messages = context.lock().await.messages().to_vec();
+        drop(freeze);
+        let project = crate::state::PersistenceStage::new(self.call_context, "project");
         let visible_messages = filter_user_visible_transcript(&all_messages);
         let projected = crate::memory::project_messages(scope_id, &visible_messages)?;
+        drop(visible_messages);
+        drop(project);
         {
             let prepare_attempt = 1_u32;
-            let cursor_before = match current.as_ref().and_then(|state| state.checkpoint.as_ref()) {
-                Some(checkpoint) => checkpoint
-                    .restore_managed_runtime_payload()?
-                    .transcript_projection
-                    .unwrap_or_else(|| crate::state::TranscriptProjectionCheckpoint {
-                        context_only: None,
-                        generation_id: generation_id.to_string(),
-                        next_ordinal: 0,
-                        projected: Vec::new(),
-                    }),
+            let cursor_before = match current_payload
+                .as_ref()
+                .and_then(|payload| payload.transcript_projection.clone())
+            {
+                Some(cursor) => cursor,
                 None => self
                     .snapshot
                     .transcript_projection_cursor
@@ -1574,8 +1608,28 @@ impl<'a> AgentPersistenceCoordinator<'a> {
                 new_messages.push(message);
             }
             if new_messages.is_empty() {
-                self.save_checkpoint(context, blocked_reason.clone(), Some(cursor_after))
-                    .await?;
+                // 已完成 epoch/load/校验与冻结，CAS 仍检查原预期版本；
+                // 不为无新增投影再次扫描 owner 或冻结同一上下文。
+                let checkpoint = self.build_frozen_checkpoint(
+                    all_messages,
+                    blocked_reason.clone(),
+                    Some(cursor_after.clone()),
+                    None,
+                )?;
+                self.commit_frozen_view(
+                    runtime_store.as_ref(),
+                    crate::state::RuntimeCheckpointCasRequest {
+                        managed_import: None,
+                        scope_id: scope_id.to_string(),
+                        runtime_state_id: runtime_state_id.to_string(),
+                        conversation_epoch: Some(epoch.authority.epoch),
+                        expected_scope_revision: scope_revision,
+                        expected_state_version: expected,
+                        checkpoint,
+                    },
+                    cursor_after,
+                )
+                .await?;
                 return Ok(settlement(
                     crate::memory::TranscriptProjectionSettlementStatus::Settled,
                     None,
@@ -1604,14 +1658,16 @@ impl<'a> AgentPersistenceCoordinator<'a> {
                 last_attempt_class: None,
                 last_error: None,
             };
-            let checkpoint = self
-                .build_checkpoint(
-                    context,
-                    blocked_reason.clone(),
-                    Some(cursor_before),
-                    Some(pending.clone()),
-                )
-                .await?;
+            // 投影和 checkpoint 必须使用同一次冻结；期间不再次取得 Context
+            // 锁，否则并发更新可能让 pending batch 与恢复正文来自不同视图。
+            let checkpoint = self.build_frozen_checkpoint(
+                all_messages,
+                blocked_reason.clone(),
+                Some(cursor_before),
+                Some(pending.clone()),
+            )?;
+            let prepare_stage =
+                crate::state::PersistenceStage::new(self.call_context, "prepare_cas");
             let prepare_receipt = tokio::time::timeout_at(
                 self.deadline,
                 runtime_store.compare_and_save_checkpoint_with_context(
@@ -1629,6 +1685,7 @@ impl<'a> AgentPersistenceCoordinator<'a> {
             )
             .await
             .map_err(|_| persistence_deadline_error("pending checkpoint prepare"))??;
+            drop(prepare_stage);
             match prepare_receipt.status {
                 crate::state::RuntimeCheckpointCasStatus::Applied
                 | crate::state::RuntimeCheckpointCasStatus::AlreadyCurrent => {
@@ -1640,6 +1697,8 @@ impl<'a> AgentPersistenceCoordinator<'a> {
                         version: prepare_receipt.version,
                         checkpoint: Some(checkpoint),
                     };
+                    let _apply_ack =
+                        crate::state::PersistenceStage::new(self.call_context, "apply_ack");
                     let outcome = crate::state::settle_loaded_pending_transcript_projection(
                         conversation_store.as_ref(),
                         runtime_store.as_ref(),

@@ -51,6 +51,95 @@ pub struct CommandCellOwner {
     pub call_id: Option<String>,
 }
 
+/// Admission-only context for one background launch.
+///
+/// The framework observes this while it waits for bounded tracked capacity and
+/// the manager admission lock. It deliberately does **not** govern an accepted
+/// cell's lifetime — that stays with [`CommandCellRequest::cancel`] plus the
+/// cell deadline. Keeping the two apart is what lets a caller withdraw before
+/// acceptance (no process, no leaked slot) without killing a cell that was
+/// already accepted and whose receipt the caller may still be waiting for.
+#[derive(Clone, Default)]
+pub struct CommandCellAdmission {
+    /// Cancelled when the launching invocation no longer wants the cell, for
+    /// example an outer tool-call budget that expired. A Turn token may bound
+    /// admission, but must not become the accepted cell's lifetime token.
+    pub cancel: Option<Arc<CancellationToken>>,
+    /// Absolute admission budget. When it elapses the launch fails with
+    /// [`CommandCellError::CapacityDeadline`] and no process is created.
+    pub deadline: Option<std::time::Instant>,
+}
+
+impl fmt::Debug for CommandCellAdmission {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("CommandCellAdmission")
+            .field(
+                "cancel",
+                &self.cancel.as_ref().map(|_| "<CancellationToken>"),
+            )
+            .field("deadline", &self.deadline)
+            .finish()
+    }
+}
+
+/// One admitted product resource, for example a process-wide shell slot.
+///
+/// The cell supervisor holds this from successful admission until the terminal
+/// drain, so a product policy that limits concurrent processes cannot be
+/// released while the admitted process still runs.
+#[must_use]
+pub struct CommandCellResourceLease {
+    release: Option<Box<dyn FnOnce() + Send + 'static>>,
+}
+
+impl CommandCellResourceLease {
+    /// Wrap one already-acquired product resource; `release` runs exactly once
+    /// when the lease is dropped.
+    pub fn new(release: impl FnOnce() + Send + 'static) -> Self {
+        Self {
+            release: Some(Box::new(release)),
+        }
+    }
+}
+
+impl fmt::Debug for CommandCellResourceLease {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CommandCellResourceLease")
+            .finish_non_exhaustive()
+    }
+}
+
+impl Drop for CommandCellResourceLease {
+    fn drop(&mut self) {
+        if let Some(release) = self.release.take() {
+            release();
+        }
+    }
+}
+
+/// Asynchronous product resource admission for a background cell.
+///
+/// The framework owns *when* admission happens: after the cell was accepted and
+/// queued, before the process is spawned. The application owns the policy (for
+/// a desktop host, a process-wide shell ceiling). Implementations must observe
+/// `cancel` and `deadline`, must not block the caller, and must not create a
+/// side effect when they fail.
+pub trait CommandCellResourceAdmission: Send + Sync {
+    /// Await one product resource for `cell_id`.
+    ///
+    /// Failure must leave nothing acquired; `Cancelled` and `CapacityDeadline`
+    /// mean the cell never ran, other variants are reported as a launch
+    /// failure. The returned lease must be retained until the cell's terminal
+    /// drain.
+    fn admit<'a>(
+        &'a self,
+        cell_id: &'a str,
+        cancel: &'a CancellationToken,
+        deadline: std::time::Instant,
+    ) -> BoxFuture<'a, std::result::Result<CommandCellResourceLease, CommandCellError>>;
+}
+
 /// Launch request for a background command cell.
 ///
 /// The caller (e.g. `ShellTool`) is responsible for security validation
@@ -77,6 +166,12 @@ pub struct CommandCellRequest {
     /// Turn; products with pause/resume semantics should stop cells explicitly
     /// on terminal run cancellation.
     pub cancel: Option<Arc<CancellationToken>>,
+    /// Admission-only cancellation and budget. See [`CommandCellAdmission`].
+    pub admission: CommandCellAdmission,
+    /// Optional asynchronous product resource admission. The runner awaits it
+    /// after the cell is queued and before the process is spawned, and keeps
+    /// the returned lease until the terminal drain.
+    pub resource_admission: Option<Arc<dyn CommandCellResourceAdmission>>,
     /// Opaque application correlation metadata.
     pub owner: CommandCellOwner,
     /// Complete-output spill policy inherited from the tool context.
@@ -100,6 +195,11 @@ impl fmt::Debug for CommandCellRequest {
             .field(
                 "cancel",
                 &self.cancel.as_ref().map(|_| "<CancellationToken>"),
+            )
+            .field("admission", &self.admission)
+            .field(
+                "resource_admission",
+                &self.resource_admission.as_ref().map(|_| "<Admission>"),
             )
             .field("owner", &self.owner)
             .field("output_artifacts", &self.output_artifacts)
@@ -337,6 +437,13 @@ impl Drop for CommandCellObservationLease {
 /// returns within the caller's yield budget.
 pub trait CommandCellRegistry: Send + Sync {
     /// Register and start a background command cell asynchronously.
+    ///
+    /// Waiting for bounded tracked capacity and the manager admission lock must
+    /// honour [`CommandCellRequest::admission`]; withdrawal before preparation
+    /// leaves no cell or process. Product resources are acquired after acceptance
+    /// under the independent cell lifetime and deadline. Once accepted, the receipt is the
+    /// caller's durable handle: a later outer observation budget expiring must
+    /// not be reported as "the cell was never created".
     fn launch(
         &self,
         request: CommandCellRequest,

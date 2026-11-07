@@ -10,7 +10,8 @@ use echo_core::tools::artifact::{
     ToolOutputArtifactIdentity, ToolOutputArtifactRef, ToolOutputArtifactWriter,
 };
 use echo_core::tools::cell::{
-    CommandCellError, CommandCellOwner, CommandCellRegistry, CommandCellRequest,
+    CommandCellAdmission, CommandCellError, CommandCellOwner, CommandCellRegistry,
+    CommandCellRequest,
 };
 use echo_core::tools::permission::ToolPermission;
 use echo_core::tools::{
@@ -321,6 +322,14 @@ impl ShellTool {
             }
         }
 
+        // 即使普通 ToolManager 直接丢弃超时 Future、且调用方没有 token，
+        // 也撤回尚未交接的启动；已接纳 cell 使用独立 lifetime，不受此 guard 影响。
+        let admission_cancel = ctx
+            .cancel
+            .as_ref()
+            .map(|token| token.child_token())
+            .unwrap_or_default();
+        let _admission_guard = admission_cancel.clone().drop_guard();
         let request = CommandCellRequest {
             command: command.to_string(),
             working_dir: ctx
@@ -335,6 +344,16 @@ impl ShellTool {
             // that distinguish pause from cancel stop owned cells explicitly
             // by run identity instead of inheriting the Turn token here.
             cancel: None,
+            // Admission *is* bound to this invocation: once the caller's tool
+            // budget expires there is no point creating the cell, and the
+            // caller must not be told "unknown" about a cell nobody owns.
+            admission: CommandCellAdmission {
+                cancel: Some(Arc::new(admission_cancel)),
+                deadline: None,
+            },
+            // The registry supplies the product resource policy; the tool
+            // carries no product-specific ceiling.
+            resource_admission: None,
             owner: CommandCellOwner {
                 conversation_id: ctx.conversation_id.clone(),
                 run_id: ctx.run_id.clone(),
@@ -1573,6 +1592,7 @@ mod tests {
     #[derive(Default)]
     struct CapturingCellRegistry {
         request: Mutex<Option<CommandCellRequest>>,
+        pending: bool,
     }
 
     impl CommandCellRegistry for CapturingCellRegistry {
@@ -1585,7 +1605,11 @@ mod tests {
                 .request
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(request);
-            Box::pin(async {
+            let pending = self.pending;
+            Box::pin(async move {
+                if pending {
+                    return std::future::pending().await;
+                }
                 let accepted_at = chrono::Utc::now();
                 Ok(CommandCellLaunchReceipt {
                     cell_id: "captured-cell".to_string(),
@@ -1643,6 +1667,37 @@ mod tests {
         fn shutdown(&self) -> BoxFuture<'_, std::result::Result<(), CommandCellError>> {
             Box::pin(async { Ok(()) })
         }
+    }
+
+    #[tokio::test]
+    async fn dropped_background_launch_with_no_parent_token_withdraws_admission() -> Result<()> {
+        let registry = Arc::new(CapturingCellRegistry {
+            request: Mutex::new(None),
+            pending: true,
+        });
+        let tool = ShellTool::new().with_cell_launcher(registry.clone());
+        let context = ToolContext::default();
+        let result = tokio::time::timeout(
+            std::time::Duration::from_millis(20),
+            tool.execute_with_context(
+                HashMap::from([
+                    ("command".to_string(), serde_json::json!("echo admission")),
+                    ("background".to_string(), serde_json::json!(true)),
+                ]),
+                &context,
+            ),
+        )
+        .await;
+        assert!(result.is_err());
+        let request = registry.request.lock().unwrap_or_else(|e| e.into_inner());
+        assert!(
+            request
+                .as_ref()
+                .and_then(|r| r.admission.cancel.as_ref())
+                .is_some_and(|token| token.is_cancelled())
+        );
+        assert!(request.as_ref().is_some_and(|r| r.cancel.is_none()));
+        Ok(())
     }
 
     #[test]

@@ -21,9 +21,10 @@ use echo_core::sandbox::{
 use echo_core::tools::ToolOutputChannel;
 use echo_core::tools::artifact::{ToolOutputArtifactRef, ToolOutputArtifactWriter};
 use echo_core::tools::cell::{
-    CommandCellArtifactStatus, CommandCellDelta, CommandCellError, CommandCellLaunchReceipt,
-    CommandCellObservationLease, CommandCellPhase, CommandCellRegistry, CommandCellRequest,
-    CommandCellSnapshot, CommandCellTerminalCause, CommandCellWaitReason,
+    CommandCellAdmission, CommandCellArtifactStatus, CommandCellDelta, CommandCellError,
+    CommandCellLaunchReceipt, CommandCellObservationLease, CommandCellPhase, CommandCellRegistry,
+    CommandCellRequest, CommandCellResourceAdmission, CommandCellSnapshot,
+    CommandCellTerminalCause, CommandCellWaitReason,
 };
 use echo_core::utils::utf8::IncrementalUtf8Decoder;
 use futures::StreamExt;
@@ -340,6 +341,8 @@ pub struct CommandCellHandle {
     observation_leases: AtomicU64,
     /// Total tracked-capacity permit, held until final entry removal.
     _tracked_permit: Mutex<Option<OwnedSemaphorePermit>>,
+    // 原观察 lease 对应持久化 owner；失败债务未结算时不能提前放行下一进程。
+    product_lease: Mutex<Option<echo_core::tools::InvocationResourceGuard>>,
     /// Monotonic registration order for bounded terminal retention.
     sequence: u64,
     #[cfg(test)]
@@ -356,6 +359,15 @@ impl CommandCellHandle {
     /// Whether the cell has reached a terminal phase (sync, lock-free).
     fn is_terminal(&self) -> bool {
         self.terminal_flag.load(Ordering::Acquire)
+    }
+
+    fn release_product_resource_if_settled(&self) {
+        if self.is_terminal() && self.observation_leases.load(Ordering::Acquire) == 0 {
+            self.product_lease
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .take();
+        }
     }
 
     /// Current state (phase + terminal cause), cheap to clone.
@@ -636,12 +648,33 @@ impl BackgroundCommandManager {
         let tracked_permit = tokio::select! {
             biased;
             _ = self.shutdown.cancelled() => return Err(CommandCellError::Shutdown),
+            // Admission-only: withdrawing here leaves no cell and no process.
+            _ = request_cancelled(request.admission.cancel.as_ref()) => {
+                return Err(CommandCellError::Cancelled);
+            }
+            _ = admission_deadline_elapsed(request.admission.deadline) => {
+                return Err(CommandCellError::CapacityDeadline);
+            }
             _ = request_cancelled(request.cancel.as_ref()) => return Err(CommandCellError::Cancelled),
             _ = tokio::time::sleep_until(deadline) => return Err(CommandCellError::CapacityDeadline),
             result = &mut acquire => result.map_err(|_| CommandCellError::Shutdown)?,
         };
 
-        let _admission = self.admission.lock().await;
+        // The admission lock is part of admission, so a caller that has already
+        // given up must not wait for it and then publish a cell nobody observes.
+        let _admission = tokio::select! {
+            biased;
+            _ = self.shutdown.cancelled() => return Err(CommandCellError::Shutdown),
+            _ = request_cancelled(request.admission.cancel.as_ref()) => {
+                return Err(CommandCellError::Cancelled);
+            }
+            _ = admission_deadline_elapsed(request.admission.deadline) => {
+                return Err(CommandCellError::CapacityDeadline);
+            }
+            _ = request_cancelled(request.cancel.as_ref()) => return Err(CommandCellError::Cancelled),
+            _ = tokio::time::sleep_until(deadline) => return Err(CommandCellError::CapacityDeadline),
+            guard = self.admission.lock() => guard,
+        };
         if self.shutting_down.load(Ordering::Acquire) {
             return Err(CommandCellError::Shutdown);
         }
@@ -694,6 +727,7 @@ impl BackgroundCommandManager {
             waiter_leases: AtomicU64::new(0),
             observation_leases: AtomicU64::new(0),
             _tracked_permit: Mutex::new(Some(tracked_permit)),
+            product_lease: Mutex::new(None),
             sequence: self.next_sequence.fetch_add(1, Ordering::Relaxed),
             #[cfg(test)]
             artifact_finalize_hook: Mutex::new(None),
@@ -710,6 +744,7 @@ impl BackgroundCommandManager {
             sandbox: request.executor.or_else(|| self.sandbox.clone()),
             resource_guards: request.resource_guards,
             owner_cancel: request.cancel,
+            resource_admission: request.resource_admission,
             max_retained: self.config.max_retained_output_bytes,
         };
         let (action_tx, action_rx) = oneshot::channel();
@@ -737,6 +772,8 @@ impl BackgroundCommandManager {
         Ok(CommandCellReservation {
             manager_id: self.manager_id,
             receipt,
+            admission: request.admission,
+            deadline,
             action: Some(action_tx),
         })
     }
@@ -751,7 +788,31 @@ impl BackgroundCommandManager {
                 message: "prepared reservation belongs to another manager".to_string(),
             });
         }
-        let _admission = self.admission.lock().await;
+        // Prepared 的持久化可能已耗尽调用预算；发出 Start 前仍可撤回。
+        let _admission = tokio::select! {
+            biased;
+            _ = self.shutdown.cancelled() => return Err(CommandCellError::Shutdown),
+            _ = request_cancelled(reservation.admission.cancel.as_ref()) => return Err(CommandCellError::Cancelled),
+            _ = admission_deadline_elapsed(reservation.admission.deadline) => return Err(CommandCellError::CapacityDeadline),
+            _ = tokio::time::sleep_until(reservation.deadline) => return Err(CommandCellError::CapacityDeadline),
+            guard = self.admission.lock() => guard,
+        };
+        if reservation
+            .admission
+            .cancel
+            .as_ref()
+            .is_some_and(|cancel| cancel.is_cancelled())
+        {
+            return Err(CommandCellError::Cancelled);
+        }
+        if reservation.deadline <= Instant::now()
+            || reservation
+                .admission
+                .deadline
+                .is_some_and(|deadline| deadline <= std::time::Instant::now())
+        {
+            return Err(CommandCellError::CapacityDeadline);
+        }
         if self.shutting_down.load(Ordering::Acquire) {
             return Err(CommandCellError::Shutdown);
         }
@@ -837,6 +898,8 @@ impl BackgroundCommandManager {
 pub struct CommandCellReservation {
     manager_id: uuid::Uuid,
     receipt: CommandCellLaunchReceipt,
+    admission: CommandCellAdmission,
+    deadline: Instant,
     action: Option<oneshot::Sender<PreparedCellAction>>,
 }
 
@@ -1025,6 +1088,7 @@ impl CommandCellRegistry for BackgroundCommandManager {
         Ok(CommandCellObservationLease::new(cell_id, move || {
             if let Some(handle) = weak_handle.upgrade() {
                 handle.observation_leases.fetch_sub(1, Ordering::AcqRel);
+                handle.release_product_resource_if_settled();
             }
             prune_terminal_history(&cells, terminal_history);
         }))
@@ -1087,6 +1151,14 @@ impl Drop for BackgroundCommandManager {
 async fn request_cancelled(cancel: Option<&Arc<CancellationToken>>) {
     match cancel {
         Some(cancel) => cancel.cancelled().await,
+        None => std::future::pending().await,
+    }
+}
+
+/// Resolves when an admission-only budget elapses; never resolves without one.
+async fn admission_deadline_elapsed(deadline: Option<std::time::Instant>) {
+    match deadline {
+        Some(deadline) => tokio::time::sleep_until(Instant::from_std(deadline)).await,
         None => std::future::pending().await,
     }
 }
@@ -1164,6 +1236,7 @@ async fn supervise_prepared_cell(
         terminal_message: outcome.message,
     };
     handle.terminal_flag.store(true, Ordering::Release);
+    handle.release_product_resource_if_settled();
     handle.notify.notify_waiters();
     prune_terminal_history(&cells, terminal_history);
     tracing::info!(
@@ -1190,6 +1263,8 @@ struct CellRunSpec {
     sandbox: Option<Arc<dyn SandboxExecutor>>,
     resource_guards: Vec<echo_core::tools::InvocationResourceGuard>,
     owner_cancel: Option<Arc<CancellationToken>>,
+    /// Product resource policy awaited in the Queued phase, before any process.
+    resource_admission: Option<Arc<dyn CommandCellResourceAdmission>>,
     max_retained: usize,
 }
 
@@ -1254,14 +1329,58 @@ async fn run_cell(
     spec: CellRunSpec,
 ) -> CellOutcome {
     let CellRunSpec {
-        resource_guards,
+        mut resource_guards,
         command,
         working_dir,
         deadline,
         sandbox,
         owner_cancel,
+        resource_admission,
         max_retained,
     } = spec;
+    // Product resource policy (e.g. a process-wide shell ceiling) is awaited
+    // here, in the Queued phase, so `launch` can hand back the receipt without
+    // waiting for it. Cancellation and the cell deadline both interrupt this
+    // wait before any process exists.
+    let product_lease = match resource_admission {
+        Some(admission) => {
+            let admitted = admission.admit(&handle.cell_id, &handle.cancel, deadline.into());
+            tokio::pin!(admitted);
+            match tokio::select! {
+                biased;
+                _ = cancellation_requested(&handle.cancel, owner_cancel.as_ref()) => {
+                    return CellOutcome::cancelled();
+                }
+                _ = wait_for_deadline(deadline) => {
+                    return CellOutcome::timed_out();
+                }
+                result = &mut admitted => result,
+            } {
+                Ok(lease) => Some(lease),
+                Err(CommandCellError::Cancelled) => return CellOutcome::cancelled(),
+                Err(CommandCellError::CapacityDeadline) => return CellOutcome::timed_out(),
+                Err(error) => {
+                    return CellOutcome::runtime_failure(
+                        CommandCellTerminalCause::LaunchFailed,
+                        format!("product resource admission failed: {error}"),
+                    );
+                }
+            }
+        }
+        None => None,
+    };
+    // 同一个已取得的许可同时进入原 backend 的资源链。远端返回有界 Unknown
+    // 时，manager/观察结束不代表原物理操作结束；原 backend 保有的 guard
+    // 继续阻止配额提前释放。Mutex 只把 Send 的释放动作包装为现有 guard 所需的 Sync。
+    let product_guard = product_lease
+        .map(|lease| echo_core::tools::InvocationResourceGuard::new(Mutex::new(lease)));
+    if let Some(guard) = product_guard.as_ref() {
+        resource_guards.push(guard.clone());
+    }
+    *handle
+        .product_lease
+        .lock()
+        .unwrap_or_else(|error| error.into_inner()) = product_guard;
     // 并发许可: 满则排队等待(不阻塞 launch 调用方)。取消必须能打断
     // 排队本身,不能等前一个小时级命令释放许可后才进入终态。
     let acquire = semaphore.acquire_owned();
@@ -1915,7 +2034,9 @@ fn process_group_kill_command(pid: u32) -> std::process::Command {
 mod tests {
     use super::*;
     use echo_core::sandbox::{ExecutionResult, IsolationLevel};
-    use echo_core::tools::cell::CommandCellRegistry;
+    use echo_core::tools::cell::{
+        CommandCellAdmission, CommandCellRegistry, CommandCellResourceLease,
+    };
 
     #[cfg(unix)]
     #[test]
@@ -2150,9 +2271,54 @@ mod tests {
             waiter_leases: AtomicU64::new(0),
             observation_leases: AtomicU64::new(0),
             _tracked_permit: Mutex::new(None),
+            product_lease: Mutex::new(None),
             sequence,
             artifact_finalize_hook: Mutex::new(None),
         })
+    }
+
+    /// Admission policy test double: records the admit call and holds the
+    /// returned lease until `release` fires (or returns `cancelled`).
+    struct GatedResourceAdmission {
+        entered: Notify,
+        release: Notify,
+        cancelled: AtomicBool,
+        held: AtomicBool,
+    }
+
+    impl GatedResourceAdmission {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                entered: Notify::new(),
+                release: Notify::new(),
+                cancelled: AtomicBool::new(false),
+                held: AtomicBool::new(false),
+            })
+        }
+    }
+
+    impl CommandCellResourceAdmission for GatedResourceAdmission {
+        fn admit<'a>(
+            &'a self,
+            _cell_id: &'a str,
+            cancel: &'a CancellationToken,
+            _deadline: std::time::Instant,
+        ) -> BoxFuture<'a, std::result::Result<CommandCellResourceLease, CommandCellError>>
+        {
+            Box::pin(async move {
+                self.entered.notify_one();
+                tokio::select! {
+                    _ = cancel.cancelled() => {
+                        self.cancelled.store(true, Ordering::SeqCst);
+                        Err(CommandCellError::Cancelled)
+                    }
+                    _ = self.release.notified() => {
+                        self.held.store(true, Ordering::SeqCst);
+                        Ok(CommandCellResourceLease::new(|| {}))
+                    }
+                }
+            })
+        }
     }
 
     fn request(command: &str) -> CommandCellRequest {
@@ -2615,6 +2781,7 @@ mod tests {
                 sandbox: None,
                 resource_guards: Vec::new(),
                 owner_cancel: None,
+                resource_admission: None,
                 max_retained: 1024,
             },
         )
@@ -2889,6 +3056,102 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn withdrawn_admission_leaves_no_cell_and_no_process() -> std::result::Result<(), String>
+    {
+        let manager = manager();
+        let cancel = Arc::new(CancellationToken::new());
+        cancel.cancel();
+        let mut launch = request("printf admission-withdrawn");
+        launch.admission = CommandCellAdmission {
+            cancel: Some(cancel.clone()),
+            deadline: None,
+        };
+        let error = manager
+            .launch(launch)
+            .await
+            .err()
+            .ok_or_else(|| "a withdrawn admission must not be accepted".to_string())?;
+        assert_eq!(error, CommandCellError::Cancelled);
+        assert_eq!(manager.cells.len(), 0);
+        assert_eq!(
+            manager.tracked.available_permits(),
+            BackgroundCommandManagerConfig::default()
+                .max_concurrent
+                .saturating_add(BackgroundCommandManagerConfig::default().max_terminal_history)
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn accepted_cell_returns_receipt_before_product_admission_completes()
+    -> std::result::Result<(), String> {
+        let manager = Arc::new(manager());
+        let admission = GatedResourceAdmission::new();
+        let mut launch = request("printf product-admission");
+        launch.resource_admission = Some(admission.clone());
+        let launched = tokio::spawn({
+            let manager = manager.clone();
+            async move { manager.launch(launch).await }
+        });
+        // The product slot is still held, yet the receipt and Queued phase must
+        // already be observable: a launch call never waits for the slot.
+        tokio::time::timeout(Duration::from_secs(1), admission.entered.notified())
+            .await
+            .map_err(|_| "product admission was not awaited".to_string())?;
+        let joined = tokio::time::timeout(Duration::from_secs(1), launched)
+            .await
+            .map_err(|_| "launch waited for product admission".to_string())?
+            .map_err(|error| error.to_string())?;
+        let receipt = joined.map_err(|error| error.to_string())?;
+        let queued = manager
+            .wait(&receipt.cell_id, 0, 5)
+            .await
+            .map_err(|error| error.to_string())?;
+        assert_eq!(queued.snapshot.phase, CommandCellPhase::Queued);
+        assert_eq!(queued.snapshot.exit_code, None);
+        assert!(!admission.held.load(Ordering::SeqCst));
+        admission.release.notify_one();
+        let (_, terminal) = drain_to_terminal(&manager, &receipt.cell_id).await;
+        assert_eq!(terminal.snapshot.phase, CommandCellPhase::Succeeded);
+        assert!(admission.held.load(Ordering::SeqCst));
+        manager
+            .shutdown()
+            .await
+            .map_err(|error| error.to_string())?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn cancelled_cell_settles_while_product_admission_is_pending()
+    -> std::result::Result<(), String> {
+        let manager = manager();
+        let admission = GatedResourceAdmission::new();
+        let owner_cancel = Arc::new(CancellationToken::new());
+        let mut launch = request("printf product-admission-cancel");
+        launch.resource_admission = Some(admission.clone());
+        launch.cancel = Some(owner_cancel.clone());
+        let receipt = manager
+            .launch(launch)
+            .await
+            .map_err(|error| error.to_string())?;
+        tokio::time::timeout(Duration::from_secs(1), admission.entered.notified())
+            .await
+            .map_err(|_| "product admission was not awaited".to_string())?;
+        owner_cancel.cancel();
+        let (_, terminal) = drain_to_terminal(&manager, &receipt.cell_id).await;
+        assert_eq!(terminal.snapshot.phase, CommandCellPhase::Cancelled);
+        // The pending admission is dropped by the supervisor's cancellation
+        // arm, so no product resource is ever acquired for a cancelled cell.
+        assert!(!admission.held.load(Ordering::SeqCst));
+        assert!(!admission.cancelled.load(Ordering::SeqCst));
+        manager
+            .shutdown()
+            .await
+            .map_err(|error| error.to_string())?;
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn total_tracked_capacity_backpressures_prepared_launches()
     -> std::result::Result<(), String> {
         let manager = Arc::new(BackgroundCommandManager::new(
@@ -2931,6 +3194,244 @@ mod tests {
             .shutdown()
             .await
             .map_err(|error| error.to_string())?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn saturated_admission_cancel_and_deadline_never_create_a_late_cell()
+    -> std::result::Result<(), String> {
+        for expired in [false, true] {
+            let manager = Arc::new(BackgroundCommandManager::new(
+                BackgroundCommandManagerConfig {
+                    max_concurrent: 1,
+                    max_terminal_history: 1,
+                    ..Default::default()
+                },
+            )?);
+            let first = manager
+                .prepare_launch(request("first"))
+                .await
+                .map_err(|e| e.to_string())?;
+            let second = manager
+                .prepare_launch(request("second"))
+                .await
+                .map_err(|e| e.to_string())?;
+            let cancel = Arc::new(CancellationToken::new());
+            let mut third = request("must-never-start");
+            third.admission.cancel = Some(cancel.clone());
+            if expired {
+                third.admission.deadline =
+                    std::time::Instant::now().checked_add(Duration::from_millis(20));
+            }
+            let pending = tokio::spawn({
+                let manager = manager.clone();
+                async move { manager.launch(third).await }
+            });
+            tokio::task::yield_now().await;
+            if !expired {
+                cancel.cancel();
+            }
+            let result = tokio::time::timeout(Duration::from_secs(1), pending)
+                .await
+                .map_err(|e| e.to_string())?
+                .map_err(|e| e.to_string())?;
+            assert_eq!(
+                result.err(),
+                Some(if expired {
+                    CommandCellError::CapacityDeadline
+                } else {
+                    CommandCellError::Cancelled
+                })
+            );
+            assert_eq!(manager.cells.len(), 2);
+            drop(first);
+            drop(second);
+            manager.shutdown().await.map_err(|e| e.to_string())?;
+            assert!(manager.cells.len() <= 2);
+            assert!(manager.cells.iter().all(|cell| cell.is_terminal()));
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn prepared_admission_can_withdraw_before_start() -> std::result::Result<(), String> {
+        let manager = manager();
+        let cancel = Arc::new(CancellationToken::new());
+        let mut launch = request("must-never-start");
+        launch.admission.cancel = Some(cancel.clone());
+        let reservation = manager
+            .prepare_launch(launch)
+            .await
+            .map_err(|e| e.to_string())?;
+        let id = reservation.receipt().cell_id.clone();
+        cancel.cancel();
+        assert_eq!(
+            manager.start_prepared(reservation).await.err(),
+            Some(CommandCellError::Cancelled)
+        );
+        let (_, terminal) = drain_to_terminal(&manager, &id).await;
+        assert_eq!(
+            terminal.snapshot.terminal_cause,
+            Some(CommandCellTerminalCause::LaunchFailed)
+        );
+        manager.shutdown().await.map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn product_resource_stays_owned_until_terminal_observer_settles()
+    -> std::result::Result<(), String> {
+        let manager = manager();
+        let admission = GatedResourceAdmission::new();
+        let mut launch = request("exit 101");
+        launch.resource_admission = Some(admission.clone());
+        let prepared = manager
+            .prepare_launch(launch)
+            .await
+            .map_err(|e| e.to_string())?;
+        let id = prepared.receipt().cell_id.clone();
+        let observation = manager.observe(&id).map_err(|e| e.to_string())?;
+        let _receipt = manager
+            .start_prepared(prepared)
+            .await
+            .map_err(|e| e.to_string())?;
+        admission.release.notify_one();
+        let (_, terminal) = drain_to_terminal(&manager, &id).await;
+        assert_eq!(terminal.snapshot.exit_code, Some(101));
+        let handle = manager
+            .cells
+            .get(&id)
+            .ok_or_else(|| "cell disappeared".to_string())?
+            .clone();
+        assert!(
+            handle
+                .product_lease
+                .lock()
+                .map_err(|e| e.to_string())?
+                .is_some()
+        );
+        drop(observation);
+        assert!(
+            handle
+                .product_lease
+                .lock()
+                .map_err(|e| e.to_string())?
+                .is_none()
+        );
+        manager.shutdown().await.map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn bounded_unknown_backend_retains_product_resource_in_original_physical_owner()
+    -> std::result::Result<(), String> {
+        // 对应 ProjectSshSandbox 的真实合同：观察返回 Unknown，原资源 owner
+        // 仍持有 SandboxCommand.resource_guards，直到原物理操作结算。
+        struct OriginalUnknownOwner {
+            guards: Mutex<Vec<echo_core::tools::InvocationResourceGuard>>,
+        }
+        impl SandboxExecutor for OriginalUnknownOwner {
+            fn name(&self) -> &str {
+                "original-unknown-owner"
+            }
+            fn isolation_level(&self) -> echo_core::sandbox::IsolationLevel {
+                echo_core::sandbox::IsolationLevel::None
+            }
+            fn is_available(&self) -> BoxFuture<'_, bool> {
+                Box::pin(async { true })
+            }
+            fn execute(
+                &self,
+                command: SandboxCommand,
+            ) -> BoxFuture<'_, echo_core::error::Result<echo_core::sandbox::ExecutionResult>>
+            {
+                *self
+                    .guards
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner()) = command.resource_guards;
+                Box::pin(async {
+                    // 与 ProjectSshSandbox 的 bounded Unknown 完全同型，
+                    // 不修改生产分类器来迁就夹具。
+                    Err(echo_core::error::ToolError::RemoteFailure {
+                        tool: "project_ssh".to_string(),
+                        message: "original remote physical operation is still unknown".to_string(),
+                        http_status: None,
+                        failure: Box::new(echo_core::tools::ToolFailure::new(
+                            echo_core::tools::ToolFailureCategory::PartialSideEffect,
+                        )),
+                    }
+                    .into())
+                })
+            }
+            fn execute_with_limits(
+                &self,
+                command: SandboxCommand,
+                _limits: echo_core::sandbox::ResourceLimits,
+            ) -> BoxFuture<'_, echo_core::error::Result<echo_core::sandbox::ExecutionResult>>
+            {
+                self.execute(command)
+            }
+        }
+        struct ProductAdmission(Arc<Semaphore>);
+        impl CommandCellResourceAdmission for ProductAdmission {
+            fn admit<'a>(
+                &'a self,
+                _cell_id: &'a str,
+                _cancel: &'a CancellationToken,
+                _deadline: std::time::Instant,
+            ) -> BoxFuture<'a, std::result::Result<CommandCellResourceLease, CommandCellError>>
+            {
+                Box::pin(async move {
+                    let permit = self
+                        .0
+                        .clone()
+                        .acquire_owned()
+                        .await
+                        .map_err(|_| CommandCellError::Shutdown)?;
+                    Ok(CommandCellResourceLease::new(move || drop(permit)))
+                })
+            }
+        }
+        let backend = Arc::new(OriginalUnknownOwner {
+            guards: Mutex::new(Vec::new()),
+        });
+        let manager = BackgroundCommandManager::new_with_sandbox(
+            BackgroundCommandManagerConfig::default(),
+            backend.clone(),
+        )?;
+        let resource = Arc::new(Semaphore::new(1));
+        let mut launch = request("bounded-unknown-owned-operation");
+        launch.resource_admission = Some(Arc::new(ProductAdmission(resource.clone())));
+        let prepared = manager
+            .prepare_launch(launch)
+            .await
+            .map_err(|e| e.to_string())?;
+        let id = prepared.receipt().cell_id.clone();
+        let observation = manager.observe(&id).map_err(|e| e.to_string())?;
+        let _receipt = manager
+            .start_prepared(prepared)
+            .await
+            .map_err(|e| e.to_string())?;
+        let (_, terminal) = drain_to_terminal(&manager, &id).await;
+        assert_eq!(terminal.snapshot.exit_code, None);
+        assert_eq!(
+            terminal.snapshot.terminal_cause,
+            Some(CommandCellTerminalCause::WaitFailed)
+        );
+        drop(observation);
+        let while_unknown = resource.available_permits();
+        backend
+            .guards
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clear();
+        let after_original_settlement = resource.available_permits();
+        manager.shutdown().await.map_err(|e| e.to_string())?;
+        assert_eq!(
+            while_unknown, 0,
+            "bounded unknown observation released the original physical owner's product resource"
+        );
+        assert_eq!(after_original_settlement, 1);
         Ok(())
     }
 

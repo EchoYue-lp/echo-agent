@@ -264,3 +264,7 @@ Trace 与 Journal 都可能包含按时间排列的事件，但职责不同：
 该字段随 Message 手写 serde、既有 MessageProjectionMeta、FileConversationStore、managed import 和冷恢复一起保留；工具 ID/name 必须显式存在且与投影相等。没有该字段不恢复旧控制工具兼容，不放宽当前 canonical marker 校验。snapshot 和请求重建仍使用同一 Message，不新建错误观察 store。
 
 Provider 只在原生支持的边界转换错误位，不能把它或服务同名 execution_status 扩展升级为运行时结束权威。SDK 基础字段与三语言消费由其独立 owner/consumers 组合，不能由框架局部测试推断消费者已验收。
+
+### 同次保存的工作复用与分段观测
+
+FileRuntimeStateStore 的 owner 扫描直接验证刚解码的记录，不再次读取同一文件；CAS 重用请求 payload 的已解析结果。Coordinator 复用 runtime snapshot 的 scope revision，Absent 仍查权威；投影与 checkpoint 共用一次冻结，Context 锁不跨 I/O。原十秒共享预算、文件格式、原件、fsync、CAS/epoch/退休围栏和未知结果恢复保持原合同。debug tracing 的 persistence stage 记录各段单调耗时和剩余预算，阶段离开不表示写入成功。详见 [ADR 0107](../adr/0107-command-cell-admission-and-save-work.md)。

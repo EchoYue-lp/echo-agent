@@ -185,3 +185,7 @@ watcher 持有 retention lease、复用返回的 byte cursor，并且只在 type
 ```
 Text exported: /path/input.txt -> /path/output.txt
 ```
+
+### 后台启动的接纳边界
+
+`CommandCellRequest.admission` 控制接纳前取消与预算；`cancel` 独立控制已接纳 cell 的生命周期。产品可通过 `resource_admission` 向原 Queued runner 提供异步资源政策，启动回执不等待产品槽。期限从 accepted_at 起算，包含排队；显式停止和 shutdown 沿原 supervisor 结算。保有 terminal observation lease 的消费者须在持久事实结算后释放 lease。详见 [ADR 0107](../adr/0107-command-cell-admission-and-save-work.md)。

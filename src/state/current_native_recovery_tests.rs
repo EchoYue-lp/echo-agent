@@ -614,19 +614,37 @@ async fn runtime_only_deadline_waits_for_actual_scope_load_runtime_load_and_cas_
             .persistence_settlement_timeout(Duration::from_millis(250))
             .llm_client(Arc::new(crate::testing::MockLlmClient::new()))
             .build()?;
-        agent
-            .resume_from_state_store_scope(SCOPE, RUNTIME, None)
-            .await?;
+        assert!(
+            agent
+                .resume_from_state_store_scope(SCOPE, RUNTIME, None)
+                .await?
+                .is_some()
+        );
+        if phase == "scope_load" {
+            // 隔离故障切点：先真实 hydrate Managed，再让其物理 runtime 缺失。
+            // runtime-only 的 Absent 新实例走 legacy save，不能用于这个 gate。
+            // 原 scope owner 保留，验证缺失 generation 仍查询权威且不能被迟到保存复活。
+            std::fs::remove_file(&path)?;
+            assert!(inner.load_runtime_state(SCOPE, RUNTIME).await?.is_none());
+            assert!(inner.load_scope_authority(SCOPE).await?.is_some());
+        }
         let snapshot = crate::agent::snapshot::AgentRunSnapshot::from_agent_with_invocation(
             &agent,
             &invocation(),
         );
         let context = agent.context().clone();
-        let original = std::fs::read(&path)?;
+        let original = if path.try_exists()? {
+            Some(std::fs::read(&path)?)
+        } else {
+            None
+        };
+        let scope_before = inner.load_scope_authority(SCOPE).await?;
         armed.store(true, Ordering::SeqCst);
         let mut saving =
             tokio::spawn(async move { snapshot.save_runtime_checkpoint(&context, None).await });
-        at_barrier(&entered).await?;
+        at_barrier(&entered)
+            .await
+            .map_err(|error| fixture_error(format!("phase={phase}: {error}")))?;
         // 观察同一原future跨过其原deadline仍等实际Store结算，不把deadline当物理receipt。
         let prematurely_finished =
             tokio::time::timeout(Duration::from_millis(500), &mut saving).await;
@@ -647,7 +665,17 @@ async fn runtime_only_deadline_waits_for_actual_scope_load_runtime_load_and_cas_
             completed.is_err(),
             "原deadline未延长，真实Store迟到后仍拒新写"
         );
-        assert_eq!(std::fs::read(path)?, original);
+        let after = if path.try_exists()? {
+            Some(std::fs::read(&path)?)
+        } else {
+            None
+        };
+        assert_eq!(after, original, "失败不得创建或改写原 owner");
+        assert_eq!(
+            inner.load_scope_authority(SCOPE).await?,
+            scope_before,
+            "迟到保存不得推进原 scope authority"
+        );
     }
     Ok(())
 }
