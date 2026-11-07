@@ -40,9 +40,9 @@ pub use echo_core::agent::{
     AgentSteerReceipt, AgentSteerState, AgentSteerTurnOutcome, AssistantMessageBlock,
     AssistantPhase, AssistantTextDelta, BudgetDecision, CancellationToken, EventEnvelope, EventId,
     EventIdentity, ExecutionStatus, ExecutionStatusKind, ExecutionUsage, InterventionCallback,
-    InterventionResult, StepType, StreamId, ToolInvocation, ToolInvocationRewrite,
-    ToolVisibilityPolicy, envelope_event_stream, envelope_event_stream_after,
-    validate_envelope_trajectory, validate_event_trajectory,
+    InterventionResult, ModelCallObservation, ModelCallOutcome, StepType, StreamId, ToolInvocation,
+    ToolInvocationRewrite, ToolVisibilityPolicy, envelope_event_stream,
+    envelope_event_stream_after, validate_envelope_trajectory, validate_event_trajectory,
 };
 
 #[cfg(feature = "eval")]

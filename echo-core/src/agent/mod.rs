@@ -61,6 +61,50 @@ impl ExecutionUsage {
     }
 }
 
+/// 原模型调用的观察结果，不授予 Agent/TaskRun 终态。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelCallOutcome {
+    Completed,
+    Failed,
+    Cancelled,
+}
+
+/// 与原 provider usage 一起发布的可选客户端计时。
+///
+/// call_id 与 attempt_id 是本地调用/流身份，不能回填 ProviderOutputSource.request_id。
+/// 所有时刻为同一请求单调时钟的相对毫秒，不使用 UI 收到批准块的时刻。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelCallObservation {
+    pub call_id: String,
+    pub attempt_id: String,
+    pub outcome: ModelCallOutcome,
+    pub request_duration_ms: u64,
+    pub first_output_ms: Option<u64>,
+    pub last_output_ms: Option<u64>,
+    pub output_samples: u64,
+    pub timing_comparable: bool,
+}
+
+impl ModelCallObservation {
+    /// 只核算同一已完成尝试的可比较输出；总请求耗时不是解码分母。
+    pub fn observed_output_tokens_per_second(&self, completion_tokens: u64) -> Option<f64> {
+        if self.outcome != ModelCallOutcome::Completed
+            || !self.timing_comparable
+            || self.output_samples < 2
+            || completion_tokens == 0
+        {
+            return None;
+        }
+        let last = self.last_output_ms?;
+        if last > self.request_duration_ms {
+            return None;
+        }
+        let duration = last.checked_sub(self.first_output_ms?)?;
+        (duration > 0).then_some(completion_tokens as f64 * 1000.0 / duration as f64)
+    }
+}
+
 /// Typed failure returned when a caller tries to steer an active agent turn.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AgentSteerError {
@@ -580,6 +624,9 @@ pub enum AgentEvent {
         cache_creation_prompt_tokens: usize,
         /// Whether the provider response contained usage metadata.
         usage_reported: bool,
+        /// 缺失表示该 producer 没有可证明的调用关联/计时，不得按零耗时处理。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        observation: Option<ModelCallObservation>,
     },
     /// A run budget crossed a behavior boundary.
     BudgetDecision {
@@ -922,7 +969,7 @@ impl AgentEvent {
     /// ```
     /// use echo_core::agent::AgentEvent;
     ///
-    /// assert!(AgentEvent::ToolBatchEnd.is_checkpoint());
+    /// assert!(AgentEvent::Cancelled.is_checkpoint());
     /// assert!(AgentEvent::FinalAnswer("done".into()).is_checkpoint());
     /// assert!(!AgentEvent::FinalAnswer("body".into()).is_execution_terminal());
     /// ```
@@ -950,7 +997,84 @@ impl AgentEvent {
 
 #[cfg(test)]
 mod accounting_tests {
-    use super::AgentEvent;
+    use super::{AgentEvent, ModelCallObservation, ModelCallOutcome};
+
+    #[test]
+    fn missing_model_observation_round_trips_without_inventing_timing()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let original = serde_json::json!({"type":"llm_usage","data":{
+            "model":"fixture","prompt_tokens":100,"completion_tokens":50,"total_tokens":150,
+            "cached_prompt_tokens":80,"cache_creation_prompt_tokens":0,"usage_reported":true
+        }});
+        let event: AgentEvent = serde_json::from_value(original.clone())?;
+        assert!(matches!(
+            &event,
+            AgentEvent::LlmUsage {
+                observation: None,
+                ..
+            }
+        ));
+        assert_eq!(serde_json::to_value(&event)?, original);
+        assert_eq!(event.tokens_used(), Some(150));
+        assert!(!event.is_execution_terminal());
+        Ok(())
+    }
+
+    #[test]
+    fn observed_speed_requires_complete_comparable_multi_sample_output()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let observation = ModelCallObservation {
+            call_id: "logical-call".into(),
+            attempt_id: "stream-attempt".into(),
+            outcome: ModelCallOutcome::Completed,
+            request_duration_ms: 2200,
+            first_output_ms: Some(200),
+            last_output_ms: Some(1200),
+            output_samples: 2,
+            timing_comparable: true,
+        };
+        assert_eq!(
+            observation.observed_output_tokens_per_second(100),
+            Some(100.0)
+        );
+        let restored: ModelCallObservation =
+            serde_json::from_value(serde_json::to_value(&observation)?)?;
+        assert_eq!(restored, observation);
+        for invalid in [
+            ModelCallObservation {
+                outcome: ModelCallOutcome::Failed,
+                ..observation.clone()
+            },
+            ModelCallObservation {
+                timing_comparable: false,
+                ..observation.clone()
+            },
+            ModelCallObservation {
+                output_samples: 1,
+                ..observation.clone()
+            },
+            ModelCallObservation {
+                first_output_ms: None,
+                ..observation.clone()
+            },
+            ModelCallObservation {
+                last_output_ms: Some(200),
+                ..observation.clone()
+            },
+            ModelCallObservation {
+                last_output_ms: Some(100),
+                ..observation.clone()
+            },
+            ModelCallObservation {
+                last_output_ms: Some(2300),
+                ..observation.clone()
+            },
+        ] {
+            assert_eq!(invalid.observed_output_tokens_per_second(100), None);
+        }
+        assert_eq!(observation.observed_output_tokens_per_second(0), None);
+        Ok(())
+    }
 
     #[test]
     fn native_model_final_block_is_not_execution_terminal_or_safe_point() {
@@ -983,6 +1107,7 @@ mod accounting_tests {
             cached_prompt_tokens: 0,
             cache_creation_prompt_tokens: 0,
             usage_reported: true,
+            observation: None,
         };
         assert_eq!(event.total_tokens(), Some(usize::MAX));
         assert_eq!(event.tokens_used(), Some(usize::MAX));

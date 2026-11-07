@@ -163,11 +163,11 @@ pub(crate) async fn run_think(
             context.protected_token_estimate(),
         )
     };
-    let llm_started = Instant::now();
     // One request identity is shared by every native assistant block emitted
     // below. Consumers can therefore reconstruct provider order without
     // guessing from text or from the legacy ThinkStart/ThinkEnd projection.
     let request_id = uuid::Uuid::new_v4().to_string();
+    let mut output_timing = ModelOutputTiming::default();
     let mut block_sequence = 0_u64;
     yield_event_or!(
         tx,
@@ -184,13 +184,14 @@ pub(crate) async fn run_think(
         ),
         ThinkOutcome::Abandoned
     );
-    let mut llm_stream = match create_llm_stream(snap, request).await {
-        Ok(stream) => Box::pin(stream),
+    let observed = match create_llm_stream(snap, request, tx, &request_id).await {
+        Ok(observed) => observed,
         Err(error) => {
             let cancelled_at_failure = snap
                 .cancel_token
                 .as_ref()
                 .is_some_and(crate::agent::CancellationToken::is_cancelled);
+            // 原 call_fn 已逐次记录实际尝试；最终重试错误不再重复记账。
             super::retain_provider_response_observation(
                 context,
                 super::incomplete_response_observation(&error),
@@ -227,6 +228,9 @@ pub(crate) async fn run_think(
             });
         }
     };
+    let llm_started = observed.started;
+    output_timing.attempt_id = Some(observed.attempt_id);
+    let mut llm_stream = observed.stream;
     let mut content_buffer = String::new();
     let mut reasoning_buffer = String::new();
     let mut reasoning_blocks = Vec::new();
@@ -234,6 +238,7 @@ pub(crate) async fn run_think(
     let mut tool_call_map: super::super::processor::ToolCallFragments = HashMap::new();
     let mut last_usage = None;
     let mut provider_response = None;
+    let mut reported_usage = None;
     let mut finish_reason = None::<String>;
     let mut legacy_reasoning_open = false;
 
@@ -246,6 +251,10 @@ pub(crate) async fn run_think(
                     None => std::future::pending().await,
                 }
             } => {
+                output_timing.finished = Some(elapsed_millis(llm_started));
+                observe_failed_model_usage(
+                    snap, tx, last_usage.as_ref().or(reported_usage.as_ref()), provider_response.as_ref(), &request_id, (&output_timing, llm_started), crate::agent::ModelCallOutcome::Cancelled,
+                ).await;
                 super::retain_provider_response_observation(context, provider_response.as_ref()).await;
                 super::finalize::settle_terminal_projection(
                     snap,
@@ -266,6 +275,7 @@ pub(crate) async fn run_think(
             next = llm_stream.next() => next,
         };
         let Some(cr) = next else {
+            output_timing.finished = Some(elapsed_millis(llm_started));
             break;
         };
         let observation_error = match &cr {
@@ -275,7 +285,13 @@ pub(crate) async fn run_think(
                     .provider_response
                     .as_ref()
                     .and_then(|observation| {
-                        observe_provider_response(&mut provider_response, observation).err()
+                        if let Err(error) =
+                            observe_provider_response(&mut provider_response, observation)
+                        {
+                            return Some(error);
+                        }
+                        update_reported_usage(snap, observation, &mut reported_usage);
+                        None
                     })
             }),
             Err(_) => None,
@@ -284,6 +300,7 @@ pub(crate) async fn run_think(
         let chunk = match cr {
             Ok(chunk) => chunk,
             Err(error) => {
+                output_timing.finished = Some(elapsed_millis(llm_started));
                 let cancelled_at_failure = snap
                     .cancel_token
                     .as_ref()
@@ -295,6 +312,23 @@ pub(crate) async fn run_think(
                     // 错误本身仍是首因；foreign尾部观察拒绝覆盖本请求，诊断不带原件。
                     tracing::warn!(error = %rejected, "Rejected incomplete response metadata; original failure retained");
                 }
+                if let Some(observation) = provider_response.as_ref() {
+                    update_reported_usage(snap, observation, &mut reported_usage);
+                }
+                observe_failed_model_usage(
+                    snap,
+                    tx,
+                    last_usage.as_ref().or(reported_usage.as_ref()),
+                    provider_response.as_ref(),
+                    &request_id,
+                    (&output_timing, llm_started),
+                    if cancelled_at_failure {
+                        crate::agent::ModelCallOutcome::Cancelled
+                    } else {
+                        crate::agent::ModelCallOutcome::Failed
+                    },
+                )
+                .await;
                 super::retain_provider_response_observation(context, provider_response.as_ref())
                     .await;
                 let terminal = AgentEvent::from_error("react_loop", &error)?;
@@ -349,6 +383,7 @@ pub(crate) async fn run_think(
                 });
             }
         };
+        output_timing.observe(&chunk, elapsed_millis(llm_started));
         for reason in chunk
             .choices
             .iter()
@@ -427,6 +462,16 @@ pub(crate) async fn run_think(
     match finish_reason.as_deref() {
         Some("stop" | "tool_calls" | "function_call" | "continue") => {}
         Some(reason) => {
+            observe_failed_model_usage(
+                snap,
+                tx,
+                last_usage.as_ref().or(reported_usage.as_ref()),
+                provider_response.as_ref(),
+                &request_id,
+                (&output_timing, llm_started),
+                crate::agent::ModelCallOutcome::Failed,
+            )
+            .await;
             let error = incomplete_model_response(
                 &content_buffer,
                 &reasoning_buffer,
@@ -451,6 +496,16 @@ pub(crate) async fn run_think(
             });
         }
         None => {
+            observe_failed_model_usage(
+                snap,
+                tx,
+                last_usage.as_ref().or(reported_usage.as_ref()),
+                provider_response.as_ref(),
+                &request_id,
+                (&output_timing, llm_started),
+                crate::agent::ModelCallOutcome::Failed,
+            )
+            .await;
             let error = incomplete_model_response(
                 &content_buffer,
                 &reasoning_buffer,
@@ -702,6 +757,12 @@ pub(crate) async fn run_think(
             cached_prompt_tokens,
             cache_creation_prompt_tokens,
             usage_reported,
+            observation: Some(output_timing.observation(
+                &request_id,
+                last_usage.as_ref(),
+                llm_started,
+                crate::agent::ModelCallOutcome::Completed,
+            )),
         },
         {
             super::retain_provider_response_observation(context, provider_response.as_ref()).await;
@@ -723,6 +784,184 @@ pub(crate) async fn run_think(
         ct,
         usage_reported,
     })))
+}
+
+fn elapsed_millis(started: Instant) -> u64 {
+    u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
+}
+
+#[derive(Default)]
+struct ModelOutputTiming {
+    first: Option<u64>,
+    last: Option<u64>,
+    samples: u64,
+    reasoning_seen: bool,
+    incomparable: bool,
+    attempt_id: Option<String>,
+    finished: Option<u64>,
+}
+
+impl ModelOutputTiming {
+    fn observe(&mut self, chunk: &crate::llm::types::ChatCompletionChunk, elapsed_ms: u64) {
+        let mut output = false;
+        if chunk.choices.len() > 1 {
+            self.incomparable = true;
+        }
+        for choice in &chunk.choices {
+            let delta = &choice.delta;
+            let reasoning = delta
+                .reasoning_content
+                .as_ref()
+                .is_some_and(|text| !text.is_empty());
+            self.reasoning_seen |= reasoning;
+            output |= reasoning || delta.content.as_ref().is_some_and(|text| !text.is_empty());
+            output |= delta
+                .tool_calls
+                .as_deref()
+                .unwrap_or_default()
+                .iter()
+                .any(|call| {
+                    call.function.as_ref().is_some_and(|function| {
+                        function.name.as_ref().is_some_and(|text| !text.is_empty())
+                            || function
+                                .arguments
+                                .as_ref()
+                                .is_some_and(|text| !text.is_empty())
+                    })
+                });
+            for block in delta.assistant_blocks.as_deref().unwrap_or_default() {
+                if self.attempt_id.is_none() && !block.request_id.trim().is_empty() {
+                    self.attempt_id = Some(block.request_id.clone());
+                }
+                if block.complete
+                    && let Some(reasoning) = &block.reasoning
+                {
+                    self.observe_reasoning(reasoning);
+                }
+                output |= !block.delta.is_empty();
+                if block.phase == echo_core::agent::AssistantPhase::Reasoning
+                    && !block.delta.is_empty()
+                {
+                    self.reasoning_seen = true;
+                }
+            }
+            for reasoning in delta.reasoning_blocks.as_deref().unwrap_or_default() {
+                self.observe_reasoning(reasoning);
+            }
+        }
+        if output {
+            self.first.get_or_insert(elapsed_ms);
+            self.last = Some(elapsed_ms);
+            self.samples = self.samples.saturating_add(1);
+        }
+    }
+
+    fn observe_reasoning(&mut self, reasoning: &ReasoningBlock) {
+        match reasoning {
+            ReasoningBlock::Redacted { .. } | ReasoningBlock::Opaque { .. } => {
+                self.incomparable = true
+            }
+            ReasoningBlock::Signed { thinking, .. }
+                if !thinking.is_empty() && !self.reasoning_seen =>
+            {
+                // 完整签名块可能只在结尾到达，不能把它当作整个推理的生成计时。
+                self.incomparable = true;
+            }
+            _ => {}
+        }
+    }
+
+    fn observation(
+        &self,
+        call_id: &str,
+        usage: Option<&crate::llm::types::Usage>,
+        started: Instant,
+        outcome: crate::agent::ModelCallOutcome,
+    ) -> crate::agent::ModelCallObservation {
+        let hidden_reasoning = usage
+            .and_then(|usage| usage.output_tokens_details.as_ref())
+            .and_then(|details| details.reasoning_tokens)
+            .is_some_and(|tokens| tokens > 0)
+            && !self.reasoning_seen;
+        crate::agent::ModelCallObservation {
+            call_id: call_id.to_string(),
+            attempt_id: self
+                .attempt_id
+                .clone()
+                .unwrap_or_else(|| call_id.to_string()),
+            outcome,
+            request_duration_ms: self.finished.unwrap_or_else(|| elapsed_millis(started)),
+            first_output_ms: self.first,
+            last_output_ms: self.last,
+            output_samples: self.samples,
+            timing_comparable: usage.is_some() && !self.incomparable && !hidden_reasoning,
+        }
+    }
+}
+
+fn update_reported_usage(
+    snap: &AgentRunSnapshot,
+    observation: &crate::llm::types::ProviderResponseMetadata,
+    previous: &mut Option<crate::llm::types::Usage>,
+) {
+    let Some(client) = snap.llm_client.as_ref() else {
+        return;
+    };
+    match client.reported_usage(observation, previous.as_ref()) {
+        Ok(Some(usage)) => *previous = Some(usage),
+        Ok(None) => {}
+        Err(_) => tracing::warn!("Rejected reported usage snapshot; original source retained"),
+    }
+}
+
+async fn observe_failed_model_usage(
+    snap: &AgentRunSnapshot,
+    tx: &mpsc::Sender<Result<AgentEvent>>,
+    usage: Option<&crate::llm::types::Usage>,
+    metadata: Option<&crate::llm::types::ProviderResponseMetadata>,
+    call_id: &str,
+    clock: (&ModelOutputTiming, Instant),
+    outcome: crate::agent::ModelCallOutcome,
+) {
+    let (timing, started) = clock;
+    let reported = usage.cloned().or_else(|| {
+        let client = snap.llm_client.as_ref()?;
+        match client.reported_usage(metadata?, None) {
+            Ok(usage) => usage,
+            Err(_) => {
+                // 观测失败不能替换原 provider 错误或在日志中回显原件。
+                tracing::warn!("Rejected reported usage observation; original outcome retained");
+                None
+            }
+        }
+    });
+    let usage = reported.as_ref();
+    // 失败不抹去已报告用量；只追加原usage观察，原错误及运行结算仍沿原路径。
+    if let Some(usage) = usage {
+        snap.token_tracker.record_usage(usage);
+    }
+    let prompt_tokens = usage
+        .map(|usage| usage.effective_prompt_tokens() as usize)
+        .unwrap_or(0);
+    let completion_tokens = usage.and_then(|usage| usage.completion_tokens).unwrap_or(0) as usize;
+    let _ = tx
+        .send(Ok(AgentEvent::LlmUsage {
+            model: snap.config.model_name.clone(),
+            prompt_tokens,
+            completion_tokens,
+            total_tokens: usage
+                .map(|usage| usage.effective_total_tokens() as usize)
+                .unwrap_or(0),
+            cached_prompt_tokens: usage
+                .map(|usage| usage.cached_prompt_tokens() as usize)
+                .unwrap_or(0),
+            cache_creation_prompt_tokens: usage
+                .map(|usage| usage.cache_creation_prompt_tokens() as usize)
+                .unwrap_or(0),
+            usage_reported: usage.is_some(),
+            observation: Some(timing.observation(call_id, usage, started, outcome)),
+        }))
+        .await;
 }
 
 fn observe_provider_response(
@@ -907,14 +1146,18 @@ fn build_llm_request(
 }
 
 /// Create a streaming LLM call wrapped in retry / circuit-breaker policy.
+pub(crate) struct ObservedModelStream {
+    stream: futures::stream::BoxStream<'static, Result<crate::llm::types::ChatCompletionChunk>>,
+    attempt_id: String,
+    started: Instant,
+}
+
 pub(crate) async fn create_llm_stream(
     snap: &AgentRunSnapshot,
     request: crate::llm::ChatRequest,
-) -> Result<
-    std::pin::Pin<
-        Box<dyn futures::Stream<Item = Result<crate::llm::types::ChatCompletionChunk>> + Send>,
-    >,
-> {
+    tx: &mpsc::Sender<Result<AgentEvent>>,
+    call_id: &str,
+) -> Result<ObservedModelStream> {
     if request
         .response_format
         .as_ref()
@@ -944,7 +1187,7 @@ pub(crate) async fn create_llm_stream(
         type ChunkStream = std::pin::Pin<
             Box<dyn futures::Stream<Item = Result<crate::llm::types::ChatCompletionChunk>> + Send>,
         >;
-        let stream: ChunkStream = super::super::retry::retry_llm_call(
+        let stream = super::super::retry::retry_llm_call(
             &snap.config.agent_name,
             snap.config.llm_max_retries,
             snap.config.llm_retry_delay_ms,
@@ -953,14 +1196,22 @@ pub(crate) async fn create_llm_stream(
             || {
                 let llm_client = llm_client.clone();
                 let request = request.clone();
+                let call_id = call_id.to_string();
                 async move {
-                    // 公开Agent返回形式不决定HTTP传输。默认保持原流式调用；显式
-                    // 非流式仅把同provider完整响应适配成一个输入块，后续校验/工具/结算共用。
-                    let inner: futures::stream::BoxStream<'static, Result<crate::llm::ChatChunk>> =
-                        if snap.config.model_streaming {
+                    let started = Instant::now();
+                    let attempt_id = uuid::Uuid::new_v4().to_string();
+                    let mut obtained_usage = None;
+                    let result: Result<ChunkStream> = async {
+                        // 公开Agent返回形式不决定HTTP传输。默认保持原流式调用；显式
+                        // 非流式仅把同provider完整响应适配成一个输入块，后续校验/工具/结算共用。
+                        let inner: futures::stream::BoxStream<
+                            'static,
+                            Result<crate::llm::ChatChunk>,
+                        > = if snap.config.model_streaming {
                             llm_client.chat_stream(request).await?
                         } else {
                             let response = llm_client.chat(request).await?;
+                            obtained_usage = response.usage.clone();
                             let message = response.message;
                             let tool_calls = message
                                 .tool_calls
@@ -1005,21 +1256,57 @@ pub(crate) async fn create_llm_stream(
                             };
                             Box::pin(futures::stream::iter([Ok(chunk)]))
                         };
-                    // Adapt the trait's flattened ChatChunk back into the
-                    // ChatCompletionChunk shape consumed by the think phase.
-                    // Both originate from the same stream, so no information is lost.
-                    let mapped = inner.map(|chunk_result| {
-                        chunk_result.map(|c| crate::llm::types::ChatCompletionChunk {
-                            id: String::new(),
-                            choices: vec![crate::llm::types::ChunkChoice {
-                                delta: c.delta,
-                                finish_reason: c.finish_reason,
-                                index: 0,
-                            }],
-                            usage: c.usage,
-                        })
-                    });
-                    Ok(Box::pin(mapped) as ChunkStream)
+                        // Adapt the trait's flattened ChatChunk back into the
+                        // ChatCompletionChunk shape consumed by the think phase.
+                        // Both originate from the same stream, so no information is lost.
+                        let mapped = inner.map(|chunk_result| {
+                            chunk_result.map(|c| crate::llm::types::ChatCompletionChunk {
+                                id: String::new(),
+                                choices: vec![crate::llm::types::ChunkChoice {
+                                    delta: c.delta,
+                                    finish_reason: c.finish_reason,
+                                    index: 0,
+                                }],
+                                usage: c.usage,
+                            })
+                        });
+                        Ok(Box::pin(mapped) as ChunkStream)
+                    }
+                    .await;
+                    match result {
+                        Ok(stream) => Ok(ObservedModelStream {
+                            stream,
+                            attempt_id,
+                            started,
+                        }),
+                        Err(error) => {
+                            let timing = ModelOutputTiming {
+                                attempt_id: Some(attempt_id),
+                                finished: Some(elapsed_millis(started)),
+                                ..ModelOutputTiming::default()
+                            };
+                            let outcome = if snap
+                                .cancel_token
+                                .as_ref()
+                                .is_some_and(crate::agent::CancellationToken::is_cancelled)
+                            {
+                                crate::agent::ModelCallOutcome::Cancelled
+                            } else {
+                                crate::agent::ModelCallOutcome::Failed
+                            };
+                            observe_failed_model_usage(
+                                snap,
+                                tx,
+                                obtained_usage.as_ref(),
+                                super::incomplete_response_observation(&error),
+                                &call_id,
+                                (&timing, started),
+                                outcome,
+                            )
+                            .await;
+                            Err(error)
+                        }
+                    }
                 }
             },
         )
@@ -1310,6 +1597,667 @@ mod tests {
     use crate::llm::types::{ImageUrl, ResponseFormat, Usage};
     use crate::testing::{MockLlmClient, MockTool};
     use echo_core::tokenizer::HeuristicTokenizer;
+
+    async fn reported_usage_http_fixture(
+        responses: Vec<(u16, String)>,
+        hold_last: bool,
+    ) -> Result<(
+        String,
+        crate::agent::CancellationToken,
+        tokio::task::JoinHandle<Result<usize>>,
+    )> {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let endpoint = format!("http://{}", listener.local_addr()?);
+        let release = crate::agent::CancellationToken::new();
+        let server_release = release.clone();
+        let total = responses.len();
+        let server = tokio::spawn(async move {
+            tokio::time::timeout(std::time::Duration::from_secs(8), async move {
+                let mut count = 0_usize;
+                for (status, body) in responses {
+                    let (mut socket, _) = listener.accept().await?;
+                    let mut bytes = Vec::new();
+                    let mut chunk = [0_u8; 4096];
+                    loop {
+                        let read = socket.read(&mut chunk).await?;
+                        if read == 0 || bytes.len() > 2_000_000 {
+                            return Err(crate::error::ReactError::Other("usage fixture incomplete HTTP input".into()));
+                        }
+                        bytes.extend_from_slice(chunk.get(..read).unwrap_or_default());
+                        let Some(end) = bytes.windows(4).position(|value| value == b"\r\n\r\n") else { continue; };
+                        let headers = String::from_utf8_lossy(bytes.get(..end).unwrap_or_default());
+                        let length = headers.lines().filter_map(|line| line.split_once(':'))
+                            .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
+                            .and_then(|(_, value)| value.trim().parse::<usize>().ok())
+                            .ok_or_else(|| crate::error::ReactError::Other("usage fixture missing content length".into()))?;
+                        if bytes.len() >= end.saturating_add(4).saturating_add(length) { break; }
+                    }
+                    count = count.saturating_add(1);
+                    let hold = hold_last && count == total;
+                    let content_type = if status == 200 { "text/event-stream" } else { "application/json" };
+                    let length = if hold { String::new() } else { format!("Content-Length: {}\r\n", body.len()) };
+                    let response = format!("HTTP/1.1 {status} Fixture\r\nContent-Type: {content_type}\r\n{length}Connection: close\r\n\r\n{body}");
+                    socket.write_all(response.as_bytes()).await?;
+                    socket.flush().await?;
+                    if hold { server_release.cancelled().await; }
+                }
+                Ok(count)
+            }).await.map_err(|_| crate::error::ReactError::Other("usage fixture HTTP watchdog".into()))?
+        });
+        Ok((endpoint, release, server))
+    }
+
+    fn reported_usage_agent(
+        endpoint: String,
+        protocol: crate::llm::LlmApiProtocol,
+    ) -> Result<crate::agent::ReactAgent> {
+        let path = match protocol {
+            crate::llm::LlmApiProtocol::Anthropic => "messages",
+            crate::llm::LlmApiProtocol::Responses => "responses",
+            crate::llm::LlmApiProtocol::ChatCompletions => "chat/completions",
+        };
+        let config = crate::llm::LlmConfig::for_provider(
+            "usage-fixture",
+            format!("{endpoint}/v1/{path}"),
+            "fixture-key",
+            "fixture-model",
+            protocol,
+        )?;
+        let mut agent = ReactAgentBuilder::new()
+            .llm_config(config)
+            .auto_project_rules(false)
+            .max_iterations(2)
+            .build()?;
+        agent.config_mut().llm_max_retries = 0;
+        agent.config_mut().llm_retry_delay_ms = 0;
+        Ok(agent)
+    }
+
+    async fn reported_usage_collect(agent: &crate::agent::ReactAgent) -> Result<Vec<AgentEvent>> {
+        use crate::agent::Agent;
+        let stream = agent.chat_stream("核对用量观测").await?;
+        let events: Vec<Result<AgentEvent>> =
+            tokio::time::timeout(std::time::Duration::from_secs(6), stream.collect())
+                .await
+                .map_err(|_| {
+                    crate::error::ReactError::Other("usage fixture model watchdog".into())
+                })?;
+        events.into_iter().collect()
+    }
+
+    fn failed_usage_fact(events: &[AgentEvent]) -> Result<(usize, usize, usize, bool)> {
+        let usages = events
+            .iter()
+            .filter_map(|event| match event {
+                AgentEvent::LlmUsage {
+                    prompt_tokens,
+                    completion_tokens,
+                    cached_prompt_tokens,
+                    usage_reported,
+                    observation: Some(observation),
+                    ..
+                } => Some((
+                    *prompt_tokens,
+                    *completion_tokens,
+                    *cached_prompt_tokens,
+                    *usage_reported,
+                    observation,
+                )),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(usages.len(), 1, "一次真实失败/取消只能有一笔消费观察");
+        let (input, output, cached, reported, observation) = usages
+            .first()
+            .ok_or_else(|| crate::error::ReactError::Other("usage fact missing".into()))?;
+        assert_ne!(
+            observation.outcome,
+            crate::agent::ModelCallOutcome::Completed
+        );
+        assert_eq!(
+            observation
+                .observed_output_tokens_per_second(u64::try_from(*output).unwrap_or(u64::MAX)),
+            None
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, AgentEvent::FinalAnswer(_)))
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, AgentEvent::ExecutionStatus(status)
+            if status.status == echo_core::agent::ExecutionStatusKind::Settled))
+        );
+        Ok((*input, *output, *cached, *reported))
+    }
+
+    #[tokio::test]
+    async fn model_call_reported_usage_anthropic_eof_preserves_missing_and_reported_zero()
+    -> Result<()> {
+        for usage in [
+            None,
+            Some(serde_json::json!({"input_tokens":0,"output_tokens":0})),
+            Some(
+                serde_json::json!({"input_tokens":10,"output_tokens":2,"cache_read_input_tokens":7,"cache_creation_input_tokens":3}),
+            ),
+        ] {
+            let mut message = serde_json::json!({"id":"native-anthropic","type":"message","role":"assistant","model":"fixture-model","content":[]});
+            if let Some(usage) = &usage {
+                message["usage"] = usage.clone();
+            }
+            let body = format!(
+                "data: {}\n\n",
+                serde_json::json!({"type":"message_start","message":message})
+            );
+            let (endpoint, _, server) =
+                reported_usage_http_fixture(vec![(200, body)], false).await?;
+            let agent = reported_usage_agent(endpoint, crate::llm::LlmApiProtocol::Anthropic)?;
+            let events = reported_usage_collect(&agent).await?;
+            let value = failed_usage_fact(&events)?;
+            assert_eq!(
+                value,
+                if usage.is_none() {
+                    (0, 0, 0, false)
+                } else if usage
+                    .as_ref()
+                    .and_then(|v| v.get("input_tokens"))
+                    .and_then(serde_json::Value::as_u64)
+                    == Some(0)
+                {
+                    (0, 0, 0, true)
+                } else {
+                    (20, 2, 7, true)
+                }
+            );
+            assert!(
+                events
+                    .iter()
+                    .any(|event| matches!(event, AgentEvent::Error { .. }))
+            );
+            assert_eq!(
+                server
+                    .await
+                    .map_err(|error| crate::error::ReactError::Other(error.to_string()))??,
+                1
+            );
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn model_call_reported_usage_responses_incomplete_and_chat_eof_keep_cost() -> Result<()> {
+        let scenarios = [
+            (
+                crate::llm::LlmApiProtocol::Responses,
+                format!(
+                    "data: {}\n\n",
+                    serde_json::json!({"type":"response.incomplete","response":{"id":"native-response","status":"incomplete","output":[],"usage":{"input_tokens":30,"output_tokens":4,"total_tokens":34,"input_tokens_details":{"cached_tokens":5}}}})
+                ),
+                (30, 4, 5, true),
+            ),
+            (
+                crate::llm::LlmApiProtocol::ChatCompletions,
+                format!(
+                    "data: {}\n\n",
+                    serde_json::json!({"id":"native-chat","choices":[],"usage":{"prompt_tokens":12,"completion_tokens":7,"total_tokens":19,"prompt_tokens_details":{"cached_tokens":3}}})
+                ),
+                (12, 7, 3, true),
+            ),
+        ];
+        for (protocol, body, expected) in scenarios {
+            let (endpoint, _, server) =
+                reported_usage_http_fixture(vec![(200, body)], false).await?;
+            let agent = reported_usage_agent(endpoint, protocol)?;
+            let events = reported_usage_collect(&agent).await?;
+            assert_eq!(failed_usage_fact(&events)?, expected);
+            assert!(
+                events
+                    .iter()
+                    .any(|event| matches!(event, AgentEvent::Error { .. }))
+            );
+            assert_eq!(
+                server
+                    .await
+                    .map_err(|error| crate::error::ReactError::Other(error.to_string()))??,
+                1
+            );
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn model_call_reported_usage_anthropic_provider_error_keeps_original_failure()
+    -> Result<()> {
+        let body = format!(
+            "data: {}\n\ndata: {}\n\n",
+            serde_json::json!({"type":"message_start","message":{"id":"native-error","type":"message","role":"assistant","model":"fixture-model","content":[],"usage":{"input_tokens":10,"output_tokens":2}}}),
+            serde_json::json!({"type":"error","error":{"type":"overloaded_error","message":"usage fixture original error"}})
+        );
+        let (endpoint, _, server) = reported_usage_http_fixture(vec![(200, body)], false).await?;
+        let agent = reported_usage_agent(endpoint, crate::llm::LlmApiProtocol::Anthropic)?;
+        let events = reported_usage_collect(&agent).await?;
+        assert_eq!(failed_usage_fact(&events)?, (10, 2, 0, true));
+        assert!(events.iter().any(|event| matches!(event,AgentEvent::Error {message,..} if message.contains("usage fixture original error"))));
+        assert_eq!(
+            server
+                .await
+                .map_err(|error| crate::error::ReactError::Other(error.to_string()))??,
+            1
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn model_call_reported_usage_cancel_retains_received_snapshot() -> Result<()> {
+        use crate::agent::Agent;
+        for with_null_delta in [false, true] {
+            let mut body = format!(
+                "data: {}\n\n",
+                serde_json::json!({"type":"message_start","message":{"id":"native-cancel","type":"message","role":"assistant","model":"fixture-model","content":[],"usage":{"input_tokens":10,"output_tokens":0}}})
+            );
+            if with_null_delta {
+                body.push_str(&format!("data: {}\n\n",
+                serde_json::json!({"type":"message_delta","delta":{"stop_reason":null},"usage":{"input_tokens":null,"output_tokens":7}})));
+            }
+            let (endpoint, release, server) =
+                reported_usage_http_fixture(vec![(200, body)], true).await?;
+            let config = crate::llm::LlmConfig::for_provider(
+                "usage-fixture",
+                format!("{endpoint}/v1/messages"),
+                "fixture-key",
+                "fixture-model",
+                crate::llm::LlmApiProtocol::Anthropic,
+            )?;
+            let inner: Arc<dyn crate::llm::LlmClient> = Arc::from(config.build_client()?);
+            let cancel = crate::agent::CancellationToken::new();
+            let mut agent = ReactAgentBuilder::new()
+                .configured_llm_client(
+                    Arc::new(UsageSourceReadBarrier {
+                        inner,
+                        cancel: cancel.clone(),
+                        after_metadata: if with_null_delta { 2 } else { 1 },
+                    }),
+                    config,
+                )
+                .auto_project_rules(false)
+                .max_iterations(2)
+                .build()?;
+            agent.config_mut().llm_max_retries = 0;
+            let stream = agent.chat_stream_with_cancel("取消观测", cancel).await?;
+            let results: Vec<Result<AgentEvent>> =
+                tokio::time::timeout(std::time::Duration::from_secs(6), stream.collect())
+                    .await
+                    .map_err(|_| crate::error::ReactError::Other("usage cancel watchdog".into()))?;
+            release.cancel();
+            let events = results.into_iter().collect::<Result<Vec<_>>>()?;
+            assert_eq!(
+                failed_usage_fact(&events)?,
+                if with_null_delta {
+                    (10, 7, 0, true)
+                } else {
+                    (10, 0, 0, true)
+                }
+            );
+            assert!(
+                events
+                    .iter()
+                    .any(|event| matches!(event, AgentEvent::Cancelled))
+            );
+            assert_eq!(
+                server
+                    .await
+                    .map_err(|error| crate::error::ReactError::Other(error.to_string()))??,
+                1
+            );
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn model_call_reported_usage_retry_records_one_call_three_attempts_and_final_once()
+    -> Result<()> {
+        let body = format!(
+            "data: {}\n\ndata: {}\n\ndata: {}\n\ndata: [DONE]\n\n",
+            serde_json::json!({"id":"native-retry","choices":[{"index":0,"delta":{"role":"assistant","content":"重试完成"},"finish_reason":null}]}),
+            serde_json::json!({"id":"native-retry","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}),
+            serde_json::json!({"id":"native-retry","choices":[],"usage":{"prompt_tokens":30,"completion_tokens":5,"total_tokens":35}})
+        );
+        let failure =
+            serde_json::json!({"error":{"type":"overloaded_error","message":"retry fixture"}})
+                .to_string();
+        let (endpoint, _, server) = reported_usage_http_fixture(
+            vec![(503, failure.clone()), (503, failure), (200, body)],
+            false,
+        )
+        .await?;
+        let mut agent =
+            reported_usage_agent(endpoint, crate::llm::LlmApiProtocol::ChatCompletions)?;
+        agent.config_mut().llm_max_retries = 2;
+        let events = reported_usage_collect(&agent).await?;
+        let usages = events
+            .iter()
+            .filter_map(|event| match event {
+                AgentEvent::LlmUsage {
+                    prompt_tokens,
+                    completion_tokens,
+                    usage_reported,
+                    observation: Some(observation),
+                    ..
+                } => Some((
+                    *prompt_tokens,
+                    *completion_tokens,
+                    *usage_reported,
+                    observation,
+                )),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(usages.len(), 3);
+        assert_eq!(
+            usages
+                .iter()
+                .map(|(_, _, _, v)| &v.call_id)
+                .collect::<std::collections::HashSet<_>>()
+                .len(),
+            1
+        );
+        assert_eq!(
+            usages
+                .iter()
+                .map(|(_, _, _, v)| &v.attempt_id)
+                .collect::<std::collections::HashSet<_>>()
+                .len(),
+            3
+        );
+        assert_eq!(
+            usages
+                .iter()
+                .filter(|(_, _, reported, _)| *reported)
+                .count(),
+            1
+        );
+        assert_eq!(
+            usages
+                .iter()
+                .map(|(input, output, _, _)| input.saturating_add(*output))
+                .sum::<usize>(),
+            35
+        );
+        assert_eq!(
+            usages.last().map(|(_, _, _, v)| v.outcome),
+            Some(crate::agent::ModelCallOutcome::Completed)
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, AgentEvent::FinalAnswer(_)))
+                .count(),
+            1
+        );
+        assert_eq!(
+            server
+                .await
+                .map_err(|error| crate::error::ReactError::Other(error.to_string()))??,
+            3
+        );
+        Ok(())
+    }
+
+    struct UsageSourceReadBarrier {
+        inner: Arc<dyn crate::llm::LlmClient>,
+        cancel: crate::agent::CancellationToken,
+        after_metadata: usize,
+    }
+
+    impl crate::llm::LlmClient for UsageSourceReadBarrier {
+        fn chat(
+            &self,
+            request: crate::llm::ChatRequest,
+        ) -> futures::future::BoxFuture<'_, Result<crate::llm::ChatResponse>> {
+            self.inner.chat(request)
+        }
+        fn chat_stream(
+            &self,
+            request: crate::llm::ChatRequest,
+        ) -> futures::future::BoxFuture<
+            '_,
+            Result<futures::stream::BoxStream<'static, Result<crate::llm::ChatChunk>>>,
+        > {
+            let cancel = self.cancel.clone();
+            let after_metadata = self.after_metadata;
+            Box::pin(async move {
+                let inner = self.inner.chat_stream(request).await?;
+                let mut observed = 0_usize;
+                let stream = inner.inspect(move |sample| {
+                    if sample
+                        .as_ref()
+                        .ok()
+                        .and_then(|chunk| chunk.delta.provider_response.as_ref())
+                        .is_some_and(|metadata| metadata.usage.is_some())
+                    {
+                        observed = observed.saturating_add(1);
+                        // 只在真实源poll已经Ready的metadata上触发；不等待Guard后公开正文。
+                        if observed == after_metadata {
+                            cancel.cancel();
+                        }
+                    }
+                });
+                Ok(Box::pin(stream)
+                    as futures::stream::BoxStream<
+                        'static,
+                        Result<crate::llm::ChatChunk>,
+                    >)
+            })
+        }
+        fn model_name(&self) -> &str {
+            self.inner.model_name()
+        }
+        fn provider_name(&self) -> Option<&str> {
+            self.inner.provider_name()
+        }
+        fn reported_usage(
+            &self,
+            observation: &crate::llm::types::ProviderResponseMetadata,
+            previous: Option<&Usage>,
+        ) -> Result<Option<Usage>> {
+            self.inner.reported_usage(observation, previous)
+        }
+        fn protocol_capabilities(
+            &self,
+        ) -> echo_core::llm::capabilities::ProviderCapabilityOverride {
+            self.inner.protocol_capabilities()
+        }
+        fn model_profile_resolution(&self) -> echo_core::llm::capabilities::ModelProfileResolution {
+            self.inner.model_profile_resolution()
+        }
+        fn capabilities(&self) -> echo_core::llm::capabilities::ProviderCapabilities {
+            self.inner.capabilities()
+        }
+    }
+
+    #[tokio::test]
+    async fn model_call_reported_usage_anthropic_null_snapshots_keep_original_accumulation()
+    -> Result<()> {
+        for (input, cache, expected) in [
+            (
+                serde_json::Value::Null,
+                serde_json::Value::Null,
+                (10, 7, 5, true),
+            ),
+            (serde_json::json!(0), serde_json::json!(0), (0, 7, 0, true)),
+        ] {
+            let body = format!(
+                "data: {}\n\ndata: {}\n\n",
+                serde_json::json!({"type":"message_start","message":{"id":"native-null","type":"message","role":"assistant","model":"fixture-model","content":[],"usage":{"input_tokens":2,"output_tokens":0,"cache_read_input_tokens":5,"cache_creation_input_tokens":3}}}),
+                serde_json::json!({"type":"message_delta","delta":{"stop_reason":null},"usage":{"input_tokens":input,"output_tokens":7,"cache_read_input_tokens":cache,"cache_creation_input_tokens":cache}})
+            );
+            let (endpoint, _, server) =
+                reported_usage_http_fixture(vec![(200, body)], false).await?;
+            let agent = reported_usage_agent(endpoint, crate::llm::LlmApiProtocol::Anthropic)?;
+            let events = reported_usage_collect(&agent).await?;
+            assert_eq!(failed_usage_fact(&events)?, expected);
+            assert_eq!(
+                server
+                    .await
+                    .map_err(|error| crate::error::ReactError::Other(error.to_string()))??,
+                1
+            );
+        }
+        Ok(())
+    }
+
+    fn timing_chunk(
+        delta: serde_json::Value,
+    ) -> std::result::Result<crate::llm::types::ChatCompletionChunk, serde_json::Error> {
+        serde_json::from_value(serde_json::json!({"choices":[{"index":0,"delta":delta}]}))
+    }
+
+    #[test]
+    fn model_output_timing_ignores_metadata_and_uses_original_stream_interval()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let mut timing = ModelOutputTiming::default();
+        timing.observe(&timing_chunk(serde_json::json!({"role":"assistant"}))?, 10);
+        assert_eq!(timing.samples, 0);
+        timing.observe(&timing_chunk(serde_json::json!({"content":"先检查"}))?, 200);
+        timing.observe(
+            &timing_chunk(serde_json::json!({"content":"后验证"}))?,
+            1200,
+        );
+        timing.observe(&timing_chunk(serde_json::json!({}))?, 1250);
+        timing.finished = Some(1250);
+        let usage = Usage {
+            prompt_tokens: Some(50),
+            completion_tokens: Some(100),
+            ..Default::default()
+        };
+        let observation = timing.observation(
+            "logical-call",
+            Some(&usage),
+            Instant::now(),
+            crate::agent::ModelCallOutcome::Completed,
+        );
+        assert_eq!(observation.first_output_ms, Some(200));
+        assert_eq!(observation.last_output_ms, Some(1200));
+        assert_eq!(observation.request_duration_ms, 1250);
+        assert_eq!(observation.output_samples, 2);
+        assert_eq!(
+            observation.observed_output_tokens_per_second(100),
+            Some(100.0)
+        );
+        assert_eq!(
+            timing
+                .observation(
+                    "logical-call",
+                    None,
+                    Instant::now(),
+                    crate::agent::ModelCallOutcome::Completed
+                )
+                .observed_output_tokens_per_second(100),
+            None
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn model_output_timing_keeps_tool_output_and_refuses_unobserved_reasoning()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let mut timing = ModelOutputTiming::default();
+        timing.observe(
+            &timing_chunk(serde_json::json!({"tool_calls":[{"index":0,"id":"native-call"}]}))?,
+            10,
+        );
+        assert_eq!(timing.samples, 0);
+        timing.observe(
+            &timing_chunk(
+                serde_json::json!({"tool_calls":[{"index":0,"function":{"arguments":"{"}}]}),
+            )?,
+            100,
+        );
+        timing.observe(
+            &timing_chunk(
+                serde_json::json!({"tool_calls":[{"index":0,"function":{"arguments":"}"}}]}),
+            )?,
+            1100,
+        );
+        timing.finished = Some(1150);
+        let usage = Usage {
+            completion_tokens: Some(100),
+            ..Default::default()
+        };
+        assert_eq!(
+            timing
+                .observation(
+                    "call",
+                    Some(&usage),
+                    Instant::now(),
+                    crate::agent::ModelCallOutcome::Completed
+                )
+                .observed_output_tokens_per_second(100),
+            Some(100.0)
+        );
+        timing.observe(
+            &timing_chunk(serde_json::json!({"reasoning_blocks":[{
+                "type":"opaque","provider":"responses","id":"original","data":"opaque","summary":[]
+            }]}))?,
+            1150,
+        );
+        assert_eq!(
+            timing
+                .observation(
+                    "call",
+                    Some(&usage),
+                    Instant::now(),
+                    crate::agent::ModelCallOutcome::Completed
+                )
+                .observed_output_tokens_per_second(100),
+            None
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn failed_model_usage_preserves_reported_consumption_without_publishing_terminal()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let agent =
+            crate::agent::ReactAgent::new(crate::agent::AgentConfig::new("model", "usage", "sys"));
+        let snapshot = AgentRunSnapshot::from_agent(&agent);
+        let (tx, mut rx) = mpsc::channel(4);
+        let usage = Usage {
+            prompt_tokens: Some(50),
+            completion_tokens: Some(5),
+            total_tokens: Some(55),
+            ..Default::default()
+        };
+        observe_failed_model_usage(
+            &snapshot,
+            &tx,
+            Some(&usage),
+            None,
+            "logical-call",
+            (&ModelOutputTiming::default(), Instant::now()),
+            crate::agent::ModelCallOutcome::Failed,
+        )
+        .await;
+        let event = rx.try_recv()??;
+        assert_eq!(event.tokens_used(), Some(55));
+        assert!(!event.is_execution_terminal());
+        assert!(matches!(
+            event,
+            AgentEvent::LlmUsage {
+                usage_reported: true,
+                observation: Some(crate::agent::ModelCallObservation {
+                    outcome: crate::agent::ModelCallOutcome::Failed,
+                    ..
+                }),
+                ..
+            }
+        ));
+        assert!(rx.try_recv().is_err());
+        Ok(())
+    }
 
     struct BlockPartialOutput;
 

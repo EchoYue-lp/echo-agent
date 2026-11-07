@@ -361,6 +361,31 @@ impl LlmClient for ResponsesClient {
         self.config.provider_name.as_deref()
     }
 
+    fn reported_usage(
+        &self,
+        observation: &ProviderResponseMetadata,
+        _previous: Option<&Usage>,
+    ) -> Result<Option<Usage>> {
+        if observation.protocol != echo_core::llm::LlmApiProtocol::Responses
+            || observation.provider
+                != self
+                    .config
+                    .provider_name
+                    .as_deref()
+                    .unwrap_or("openai_responses")
+        {
+            return Ok(None);
+        }
+        let Some(raw) = observation.usage.as_ref().filter(|raw| {
+            raw.is_object() && !raw.as_object().is_none_or(|fields| fields.is_empty())
+        }) else {
+            return Ok(None);
+        };
+        let usage = serde_json::from_value::<ResponsesUsage>(raw.clone())
+            .map_err(|_| invalid_response("reported Responses usage is not representable"))?;
+        Ok(Some(Usage::from(usage)))
+    }
+
     fn protocol_capabilities(&self) -> ProviderCapabilityOverride {
         ProviderCapabilityOverride::openai_responses_protocol()
     }
@@ -3403,6 +3428,45 @@ fn required_u32(value: &Value, key: &str, context: &str) -> Result<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reported_usage_observation_keeps_source_absence_and_reported_zero() -> Result<()> {
+        let client = ResponsesClient::new(LlmConfig::for_provider(
+            "usage-fixture",
+            "https://example.invalid/v1/responses",
+            "fixture-key",
+            "fixture-model",
+            echo_core::llm::LlmApiProtocol::Responses,
+        )?)?;
+        let mut observation: echo_core::llm::types::ProviderResponseMetadata =
+            serde_json::from_value(serde_json::json!({
+                "protocol":"responses", "provider":"usage-fixture", "request_id":"native-original",
+                "usage":{"input_tokens":0,"output_tokens":0,"total_tokens":0}
+            }))?;
+        let original = serde_json::to_value(&observation)?;
+        assert_eq!(
+            client
+                .reported_usage(&observation, None)?
+                .map(|usage| usage.effective_total_tokens()),
+            Some(0)
+        );
+        assert_eq!(
+            serde_json::to_value(&observation)?,
+            original,
+            "不改raw/native观察"
+        );
+        observation.provider = "foreign-provider".into();
+        assert!(client.reported_usage(&observation, None)?.is_none());
+        observation.provider = "usage-fixture".into();
+        observation.usage = None;
+        assert!(client.reported_usage(&observation, None)?.is_none());
+        observation.usage = Some(serde_json::json!({}));
+        assert!(client.reported_usage(&observation, None)?.is_none());
+        observation.usage = Some(serde_json::Value::Null);
+        assert!(client.reported_usage(&observation, None)?.is_none());
+        Ok(())
+    }
+
     use echo_core::llm::types::{FunctionSpec, ImageUrl};
 
     fn test_config() -> LlmConfig {

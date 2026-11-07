@@ -1629,6 +1629,7 @@ mod tests {
             cached_prompt_tokens: 0,
             cache_creation_prompt_tokens: 0,
             usage_reported: true,
+            observation: None,
         }
     }
 
@@ -4316,6 +4317,7 @@ mod canonical_turn_kernel_contract_tests {
                 cached_prompt_tokens: 0,
                 cache_creation_prompt_tokens: 0,
                 usage_reported: true,
+                observation: None,
             }),
             Ok(AgentEvent::FinalAnswer("中文🙂".into())),
             Ok(status("native-source", ExecutionStatusKind::Settled, 1)),
@@ -4484,6 +4486,7 @@ mod canonical_turn_kernel_contract_tests {
                 cached_prompt_tokens: 0,
                 cache_creation_prompt_tokens: 0,
                 usage_reported: true,
+                observation: None,
             },
         )?;
         let prefix_bytes =
@@ -4548,6 +4551,7 @@ mod canonical_turn_kernel_contract_tests {
                     cached_prompt_tokens: 0,
                     cache_creation_prompt_tokens: 0,
                     usage_reported: true,
+                    observation: None,
                 }),
                 Ok(status("late-source", ExecutionStatusKind::Started, 0)),
                 Ok(AgentEvent::FinalAnswer("late body".into())),

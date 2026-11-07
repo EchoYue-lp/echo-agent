@@ -734,6 +734,34 @@ impl LlmClient for OpenAiClient {
         self.config.provider_name.as_deref()
     }
 
+    fn reported_usage(
+        &self,
+        observation: &echo_core::llm::types::ProviderResponseMetadata,
+        _previous: Option<&echo_core::llm::types::Usage>,
+    ) -> Result<Option<echo_core::llm::types::Usage>> {
+        if observation.protocol != echo_core::llm::LlmApiProtocol::ChatCompletions
+            || observation.provider
+                != self
+                    .config
+                    .provider_name
+                    .as_deref()
+                    .unwrap_or("openai_compatible")
+        {
+            return Ok(None);
+        }
+        let Some(raw) = observation.usage.as_ref().filter(|raw| raw.is_object()) else {
+            return Ok(None);
+        };
+        let usage =
+            serde_json::from_value::<echo_core::llm::types::Usage>(raw.clone()).map_err(|_| {
+                LlmError::InvalidResponse("reported Chat usage is not representable".into())
+            })?;
+        Ok((usage.prompt_tokens.is_some()
+            || usage.completion_tokens.is_some()
+            || usage.total_tokens.is_some())
+        .then_some(usage))
+    }
+
     fn protocol_capabilities(&self) -> ProviderCapabilityOverride {
         ProviderCapabilityOverride::openai_chat_protocol()
     }
@@ -756,6 +784,45 @@ impl LlmClient for OpenAiClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reported_usage_observation_keeps_source_absence_and_reported_zero() -> Result<()> {
+        let client = OpenAiClient::new(LlmConfig::for_provider(
+            "usage-fixture",
+            "https://example.invalid/v1/chat/completions",
+            "fixture-key",
+            "fixture-model",
+            echo_core::llm::LlmApiProtocol::ChatCompletions,
+        )?)?;
+        let mut observation: echo_core::llm::types::ProviderResponseMetadata =
+            serde_json::from_value(serde_json::json!({
+                "protocol":"chat_completions", "provider":"usage-fixture", "request_id":"native-original",
+                "usage":{"prompt_tokens":0,"completion_tokens":0,"total_tokens":0}
+            }))?;
+        let original = serde_json::to_value(&observation)?;
+        assert_eq!(
+            client
+                .reported_usage(&observation, None)?
+                .map(|usage| usage.effective_total_tokens()),
+            Some(0)
+        );
+        assert_eq!(
+            serde_json::to_value(&observation)?,
+            original,
+            "不改raw/native观察"
+        );
+        observation.provider = "foreign-provider".into();
+        assert!(client.reported_usage(&observation, None)?.is_none());
+        observation.provider = "usage-fixture".into();
+        observation.usage = None;
+        assert!(client.reported_usage(&observation, None)?.is_none());
+        observation.usage = Some(serde_json::json!({}));
+        assert!(client.reported_usage(&observation, None)?.is_none());
+        observation.usage = Some(serde_json::Value::Null);
+        assert!(client.reported_usage(&observation, None)?.is_none());
+        Ok(())
+    }
+
     use base64::Engine as _;
     use echo_core::llm::types::ChatCompletionChunk;
 

@@ -1088,6 +1088,29 @@ impl LlmClient for AnthropicClient {
         Some(&self.provider_name)
     }
 
+    fn reported_usage(
+        &self,
+        observation: &ProviderResponseMetadata,
+        previous: Option<&Usage>,
+    ) -> Result<Option<Usage>> {
+        if observation.protocol != LlmApiProtocol::Anthropic
+            || observation.provider != self.provider_name
+        {
+            return Ok(None);
+        }
+        let Some(raw) = observation.usage.as_ref().filter(|raw| raw.is_object()) else {
+            return Ok(None);
+        };
+        let mut usage = previous.cloned().unwrap_or_default();
+        // 原metadata已经合并累积字段；复用stream的规范化器，只替换出现的计数。
+        merge_reported_anthropic_usage(&mut usage, raw, true)?;
+        Ok((usage.prompt_tokens.is_some()
+            || usage.completion_tokens.is_some()
+            || usage.cache_read_input_tokens.is_some()
+            || usage.cache_creation_input_tokens.is_some())
+        .then_some(usage))
+    }
+
     fn protocol_capabilities(&self) -> ProviderCapabilityOverride {
         let mut capabilities = ProviderCapabilityOverride::anthropic_protocol();
         capabilities.supports_tool_choice_none = Some(true);
@@ -1900,6 +1923,39 @@ struct AnthropicUsage {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reported_usage_observation_keeps_source_absence_and_reported_zero() -> Result<()> {
+        let client = AnthropicClient::new("fixture-key", "fixture-model");
+        let mut observation: echo_core::llm::types::ProviderResponseMetadata =
+            serde_json::from_value(serde_json::json!({
+                "protocol":"anthropic", "provider":"anthropic", "request_id":"native-original",
+                "usage":{"input_tokens":0,"output_tokens":0}
+            }))?;
+        let original = serde_json::to_value(&observation)?;
+        assert_eq!(
+            client
+                .reported_usage(&observation, None)?
+                .map(|usage| usage.effective_total_tokens()),
+            Some(0)
+        );
+        assert_eq!(
+            serde_json::to_value(&observation)?,
+            original,
+            "不改raw/native观察"
+        );
+        observation.provider = "foreign-provider".into();
+        assert!(client.reported_usage(&observation, None)?.is_none());
+        observation.provider = "anthropic".into();
+        observation.usage = None;
+        assert!(client.reported_usage(&observation, None)?.is_none());
+        observation.usage = Some(serde_json::json!({}));
+        assert!(client.reported_usage(&observation, None)?.is_none());
+        observation.usage = Some(serde_json::Value::Null);
+        assert!(client.reported_usage(&observation, None)?.is_none());
+        Ok(())
+    }
+
     use base64::Engine as _;
 
     fn text_message(text: &str) -> AnthropicMessage {
@@ -1923,6 +1979,34 @@ mod tests {
                 | ContentBlock::Other => false,
             }),
         }
+    }
+
+    #[test]
+    fn reported_usage_observation_matches_original_merge_across_nullable_snapshots() -> Result<()> {
+        let client = AnthropicClient::new("fixture-key", "fixture-model");
+        let mut original = Usage::default();
+        let mut previous = None;
+        for raw in [
+            serde_json::json!({"input_tokens":2,"output_tokens":0,"cache_read_input_tokens":5,"cache_creation_input_tokens":3}),
+            serde_json::json!({"input_tokens":null,"output_tokens":7,"cache_read_input_tokens":null,"cache_creation_input_tokens":null}),
+            serde_json::json!({"input_tokens":0,"output_tokens":7,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}),
+        ] {
+            merge_reported_anthropic_usage(&mut original, &raw, true)?;
+            let metadata = serde_json::from_value(
+                serde_json::json!({"protocol":"anthropic","provider":"anthropic","request_id":"native","usage":raw}),
+            )?;
+            let observed = client.reported_usage(&metadata, previous.as_ref())?;
+            assert_eq!(
+                serde_json::to_value(&observed)?,
+                serde_json::to_value(Some(&original))?
+            );
+            previous = observed;
+        }
+        assert_eq!(
+            previous.map(|usage| usage.effective_prompt_tokens()),
+            Some(0)
+        );
+        Ok(())
     }
 
     #[test]
@@ -2469,6 +2553,55 @@ struct NativeAnthropicStream {
     observed_blocks: Vec<AssistantMessageBlock>,
 }
 
+fn merge_reported_anthropic_usage(
+    usage: &mut Usage,
+    value: &serde_json::Value,
+    from_delta: bool,
+) -> Result<()> {
+    if !from_delta && value.is_object() {
+        serde_json::from_value::<AnthropicUsage>(value.clone()).map_err(|error| {
+            LlmError::InvalidResponse(format!("Anthropic message_start usage invalid: {error}"))
+        })?;
+    }
+    let read = |name: &str| -> Result<Option<u32>> {
+        match value.get(name) {
+            None => Ok(None),
+            Some(serde_json::Value::Null)
+                if name.starts_with("cache_") || (from_delta && name == "input_tokens") =>
+            {
+                Ok(None)
+            }
+            Some(value) => value
+                .as_u64()
+                .and_then(|number| u32::try_from(number).ok())
+                .map(Some)
+                .ok_or_else(|| {
+                    LlmError::InvalidResponse(format!(
+                        "Anthropic usage.{name} is not representable as u32"
+                    ))
+                    .into()
+                }),
+        }
+    };
+    if let Some(count) = read("input_tokens")? {
+        usage.prompt_tokens = Some(count);
+    }
+    if let Some(count) = read("output_tokens")? {
+        usage.completion_tokens = Some(count);
+    }
+    if let Some(count) = read("cache_creation_input_tokens")? {
+        usage.cache_creation_input_tokens = Some(count);
+    }
+    if let Some(count) = read("cache_read_input_tokens")? {
+        usage.cache_read_input_tokens = Some(count);
+    }
+    usage.total_tokens = usage
+        .prompt_tokens
+        .zip(usage.completion_tokens)
+        .map(|(input, output)| input.saturating_add(output));
+    Ok(())
+}
+
 impl NativeAnthropicStream {
     fn native_request_id(&self) -> Option<&str> {
         self.provider_response
@@ -2716,49 +2849,7 @@ impl NativeAnthropicStream {
     }
 
     fn merge_usage(&mut self, value: &serde_json::Value, from_delta: bool) -> Result<()> {
-        if !from_delta && value.is_object() {
-            serde_json::from_value::<AnthropicUsage>(value.clone()).map_err(|error| {
-                LlmError::InvalidResponse(format!("Anthropic message_start usage invalid: {error}"))
-            })?;
-        }
-        let read = |name: &str| -> Result<Option<u32>> {
-            match value.get(name) {
-                None => Ok(None),
-                Some(serde_json::Value::Null)
-                    if name.starts_with("cache_") || (from_delta && name == "input_tokens") =>
-                {
-                    Ok(None)
-                }
-                Some(value) => value
-                    .as_u64()
-                    .and_then(|number| u32::try_from(number).ok())
-                    .map(Some)
-                    .ok_or_else(|| {
-                        LlmError::InvalidResponse(format!(
-                            "Anthropic usage.{name} is not representable as u32"
-                        ))
-                        .into()
-                    }),
-            }
-        };
-        if let Some(count) = read("input_tokens")? {
-            self.usage.prompt_tokens = Some(count);
-        }
-        if let Some(count) = read("output_tokens")? {
-            self.usage.completion_tokens = Some(count);
-        }
-        if let Some(count) = read("cache_creation_input_tokens")? {
-            self.usage.cache_creation_input_tokens = Some(count);
-        }
-        if let Some(count) = read("cache_read_input_tokens")? {
-            self.usage.cache_read_input_tokens = Some(count);
-        }
-        self.usage.total_tokens = self
-            .usage
-            .prompt_tokens
-            .zip(self.usage.completion_tokens)
-            .map(|(input, output)| input.saturating_add(output));
-        Ok(())
+        merge_reported_anthropic_usage(&mut self.usage, value, from_delta)
     }
 
     fn map(&mut self, mut event: serde_json::Value) -> Result<Vec<ChatChunk>> {

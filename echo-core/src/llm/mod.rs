@@ -446,6 +446,19 @@ pub trait LlmClient: Send + Sync {
         None
     }
 
+    /// 读取同一 adapter 已接纳的用量快照；不产生请求、终态或第二次计费事件。
+    ///
+    /// 原 `ChatChunk::usage` 仍保留最终屏障。调用者先核验 observation 的原来源，
+    /// 实现再核对自身协议/provider，复用原规范化器；未实现或缺计数返回 None，
+    /// 与已报告 Some(0) 不同。代理 client 应转发到原 client，不自行解析 vendor JSON。
+    fn reported_usage(
+        &self,
+        _observation: &types::ProviderResponseMetadata,
+        _previous: Option<&types::Usage>,
+    ) -> Result<Option<types::Usage>> {
+        Ok(None)
+    }
+
     /// Immutable wire behavior implemented by this client adapter.
     fn protocol_capabilities(&self) -> capabilities::ProviderCapabilityOverride {
         capabilities::ProviderCapabilityOverride::default()
@@ -506,6 +519,16 @@ mod client_capability_tests {
 
     struct UnknownClient;
     struct DeclaredClient;
+
+    #[test]
+    fn reported_usage_default_is_unknown_even_when_raw_metadata_contains_zero() -> Result<()> {
+        let observation = serde_json::from_value(serde_json::json!({
+            "protocol":"chat_completions", "provider":"unknown-client",
+            "usage":{"prompt_tokens":0,"completion_tokens":0,"total_tokens":0}
+        }))?;
+        assert!(UnknownClient.reported_usage(&observation, None)?.is_none());
+        Ok(())
+    }
 
     #[test]
     fn implicit_temperature_is_opt_in_for_simple_chat_options() {

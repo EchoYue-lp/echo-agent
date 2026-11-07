@@ -3028,6 +3028,7 @@ impl SubagentExecutor {
                         cached_prompt_tokens: cpt,
                         cache_creation_prompt_tokens: ccpt,
                         usage_reported,
+                        ..
                     } => {
                         prompt_tokens = prompt_tokens.saturating_add(pt);
                         completion_tokens = completion_tokens.saturating_add(ct);
@@ -9302,7 +9303,7 @@ mod canonical_consumer_tests {
                     if let Some(kind)=unsettled.filter(|kind|*kind!="duplicate") {
                         yield Err(ReactError::ExecutionNotSettled {run_id:"native-run".into(),execution_id:Some(if kind=="foreign" {"foreign"} else {"native-execution"}.into())});
                     }
-                    yield Ok(AgentEvent::LlmUsage { model:"fixture".into(), prompt_tokens:3, completion_tokens:2, total_tokens:5, cached_prompt_tokens:0, cache_creation_prompt_tokens:0, usage_reported:true });
+                    yield Ok(AgentEvent::LlmUsage { model:"fixture".into(), prompt_tokens:3, completion_tokens:2, total_tokens:5, cached_prompt_tokens:0, cache_creation_prompt_tokens:0, usage_reported:true, observation: None, });
                     let final_text=if safe_final_only {"Guard确认的安全结果"} else {"最终结果"};
                     yield Ok(AgentEvent::FinalAnswer(final_text.into()));
                     let mut terminal=status(ExecutionStatusKind::Settled,1);
