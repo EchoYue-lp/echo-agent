@@ -2450,8 +2450,9 @@ mod tests {
         let store = FileConversationStore::new(&base)?;
         assert_eq!(std::fs::read(&manifest_path)?, manifest_bytes);
         assert_eq!(std::fs::read(&log_path)?, bytes);
-        assert_eq!(store.conv_path(id)?, manifest_path);
-        assert_eq!(store.message_log_path(id, 1)?, log_path);
+        // Store 的 authority 使用物理路径；临时目录可能经由符号链接进入。
+        assert_eq!(store.conv_path(id)?, manifest_path.canonicalize()?);
+        assert_eq!(store.message_log_path(id, 1)?, log_path.canonicalize()?);
         assert_eq!(
             store
                 .list_conversations(ConversationFilter::default())
