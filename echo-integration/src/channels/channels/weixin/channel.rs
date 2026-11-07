@@ -15,7 +15,7 @@ use echo_core::{
     memory::store::Store,
 };
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     fmt,
     sync::{
         Arc,
@@ -538,6 +538,14 @@ struct PendingIngress {
 
 type PendingReceipts = HashMap<String, PendingIngress>;
 
+// 这里只保留原 frontier 内未获回执的诊断元数据，数量由原
+// MAX_PENDING_RECEIPTS 约束；不拥有准入、调度或恢复权。
+type WeixinAdmissionObservations = BTreeMap<String, String>;
+
+fn first_admission_error(observations: &WeixinAdmissionObservations) -> Option<String> {
+    observations.values().next().cloned()
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn poll_loop(
     api: WeixinApi,
@@ -555,21 +563,37 @@ async fn poll_loop(
     // Only real admission calls live here. Their original permits are held
     // until return, even after ACK; the durable host owns queued DATA and its
     // bounded claimed long responses, rather than a transport future per input.
-    let mut tasks = JoinSet::new();
+    let mut tasks: JoinSet<(
+        String,
+        String,
+        std::result::Result<(), WeixinAdmissionFailure>,
+    )> = JoinSet::new();
     let mut pending: PendingReceipts = HashMap::new();
     let mut acknowledged = HashSet::new();
     // Ephemeral receipt frontier only; durable execution/dedup remains in the handler owner.
     // Keep unknown IDs even if the next server response omits them.
     let mut frontier = HashSet::new();
     let mut failure = None;
+    // The original poll owner retains the last admission failure until a real
+    // durable admission succeeds. A later Ready poll alone never clears it.
+    let mut admission_failure = WeixinAdmissionObservations::new();
+    let mut observed_admission = None;
     loop {
-        reap_receipts(&mut pending, &mut acknowledged);
-        while let Some(result) = tasks.try_join_next() {
-            if result.is_err() {
-                failure = Some(error("Weixin admission task ended abnormally"));
-                break;
-            }
-        }
+        reap_receipts(&mut pending, &mut acknowledged, &mut admission_failure);
+        reap_admissions(
+            &mut tasks,
+            &mut failure,
+            &mut admission_failure,
+            &frontier,
+            &acknowledged,
+            &transport,
+        );
+        publish_admission_observation(
+            &transport,
+            &mut observed_admission,
+            &admission_failure,
+            &cancel,
+        );
         if failure.is_some() || cancel.is_cancelled() {
             break;
         }
@@ -593,7 +617,7 @@ async fn poll_loop(
             WeixinPollStatus::Accepted => transport.publish(
                 ChannelTransportPhase::Ready,
                 Some(ChannelTransportEvidence::WeixinAuthenticatedPoll),
-                None,
+                first_admission_error(&admission_failure),
             ),
             WeixinPollStatus::SessionExpired => {
                 delivery.accepting.store(false, Ordering::Release);
@@ -644,7 +668,11 @@ async fn poll_loop(
             let identity = match encode_target(&credentials.account_id, &message.peer) {
                 Ok(target) => format!("{target}:{}", message.message_id),
                 Err(_) => {
-                    failure = Some(error("Weixin poll contains an invalid peer identity"));
+                    note_poll_failure(
+                        &transport,
+                        &mut failure,
+                        "Weixin poll contains an invalid peer identity",
+                    );
                     batch_unknown = true;
                     break;
                 }
@@ -662,7 +690,8 @@ async fn poll_loop(
             // application's peer policy. EKO applies its scanner policy at
             // its original handler boundary before any session/Agent effect.
             if message.group_id.is_some() {
-                transport.publish(ChannelTransportPhase::Ready, Some(ChannelTransportEvidence::WeixinAuthenticatedPoll), Some("Weixin message rejected without Agent execution: only direct text is supported".into()));
+                admission_failure.remove(&identity);
+                transport.publish(ChannelTransportPhase::Ready, Some(ChannelTransportEvidence::WeixinAuthenticatedPoll), first_admission_error(&admission_failure).or_else(|| Some("Weixin message rejected without Agent execution: only direct text is supported".into())));
                 acknowledged.insert(identity);
                 continue;
             }
@@ -671,14 +700,23 @@ async fn poll_loop(
             } else {
                 normal_slots.clone()
             };
-            reap_receipts(&mut pending, &mut acknowledged);
+            reap_receipts(&mut pending, &mut acknowledged, &mut admission_failure);
             // Reap completed task metadata before every spawn, not only once
             // per server page. An ACK is independent of physical task exit.
-            while let Some(result) = tasks.try_join_next() {
-                if result.is_err() {
-                    failure = Some(error("Weixin admission task ended abnormally"));
-                }
-            }
+            reap_admissions(
+                &mut tasks,
+                &mut failure,
+                &mut admission_failure,
+                &frontier,
+                &acknowledged,
+                &transport,
+            );
+            publish_admission_observation(
+                &transport,
+                &mut observed_admission,
+                &admission_failure,
+                &cancel,
+            );
             if failure.is_some() {
                 batch_unknown = true;
                 break;
@@ -698,18 +736,33 @@ async fn poll_loop(
                 Ok(context) => context,
                 Err(_) => {
                     batch_unknown = true;
+                    record_admission_failure(
+                        &mut admission_failure,
+                        &frontier,
+                        &acknowledged,
+                        identity.clone(),
+                        &message.message_id,
+                        WeixinAdmissionFailure::ContextPreparation,
+                    );
+                    publish_admission_observation(
+                        &transport,
+                        &mut observed_admission,
+                        &admission_failure,
+                        &cancel,
+                    );
                     continue;
                 }
             };
             let (publisher, received) = channel_ingress_receipt();
-            pending.insert(identity, PendingIngress { receipt: received });
+            pending.insert(identity.clone(), PendingIngress { receipt: received });
             let request_handler = handler.clone();
             let request_delivery = delivery.clone();
             let request_cancel = cancel.child_token();
             let account_id = credentials.account_id.clone();
+            let provider_message_id = message.message_id.clone();
             tasks.spawn(async move {
                 let _admission_permit = permit;
-                drive_request(
+                let result = drive_request(
                     request_handler,
                     request_delivery,
                     request_cancel,
@@ -719,12 +772,13 @@ async fn poll_loop(
                     publisher,
                 )
                 .await;
+                (identity, provider_message_id, result)
             });
         }
         // Waiting for original durable facts never waits for a model/response.
         let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
         loop {
-            reap_receipts(&mut pending, &mut acknowledged);
+            reap_receipts(&mut pending, &mut acknowledged, &mut admission_failure);
             if batch_ids.iter().all(|id| acknowledged.contains(id))
                 || tokio::time::Instant::now() >= deadline
                 || cancel.is_cancelled()
@@ -748,10 +802,12 @@ async fn poll_loop(
                 transport.publish(
                     ChannelTransportPhase::Ready,
                     Some(ChannelTransportEvidence::WeixinAuthenticatedPoll),
-                    Some(
+                    first_admission_error(&admission_failure).or_else(|| {
+                        Some(
                         "Weixin poll omitted its next cursor; original receipt frontier retained"
                             .into(),
-                    ),
+                    )
+                    }),
                 );
             }
         }
@@ -759,18 +815,140 @@ async fn poll_loop(
     // Stop the same service child before joining every real admission call.
     cancel.cancel();
     while let Some(result) = tasks.join_next().await {
-        if result.is_err() {
-            failure = Some(error("Weixin admission task failed during shutdown"));
+        match result {
+            Err(_) => note_poll_failure(
+                &transport,
+                &mut failure,
+                "Weixin admission task failed during shutdown",
+            ),
+            Ok((identity, provider_message_id, Err(kind))) => {
+                record_admission_failure(
+                    &mut admission_failure,
+                    &frontier,
+                    &acknowledged,
+                    identity,
+                    &provider_message_id,
+                    kind,
+                );
+            }
+            Ok((_, _, Ok(()))) => {}
         }
     }
-    observation.finish();
+    // 已关闭接收准入，不因迟到的普通调用错误重发新的 Ready 观察。
+    // 原异常捕获点已立即发布 Unknown；取消、句柄及物理 join 责任不变。
     match failure {
         Some(error) => Err(error),
-        None => Ok(()),
+        None => {
+            observation.finish();
+            Ok(())
+        }
     }
 }
 
-fn reap_receipts(pending: &mut PendingReceipts, acknowledged: &mut HashSet<String>) {
+fn note_poll_failure(
+    transport: &TransportStatus,
+    failure: &mut Option<ReactError>,
+    reason: &'static str,
+) {
+    *failure = Some(error(reason));
+    // 故障事实在捕获时发布，不等待其它调用的物理效果结算；原 JoinSet、
+    // 许可、取消与 join 责任继续由 poll owner 保留。
+    transport.publish(
+        ChannelTransportPhase::Unknown,
+        None,
+        Some(reason.to_string()),
+    );
+}
+
+fn reap_admissions(
+    tasks: &mut JoinSet<(
+        String,
+        String,
+        std::result::Result<(), WeixinAdmissionFailure>,
+    )>,
+    failure: &mut Option<echo_core::error::ReactError>,
+    admission_failure: &mut WeixinAdmissionObservations,
+    frontier: &HashSet<String>,
+    acknowledged: &HashSet<String>,
+    transport: &TransportStatus,
+) {
+    while let Some(result) = tasks.try_join_next() {
+        match result {
+            Err(_) => {
+                note_poll_failure(transport, failure, "Weixin admission task ended abnormally")
+            }
+            Ok((identity, provider_message_id, Err(kind))) => {
+                record_admission_failure(
+                    admission_failure,
+                    frontier,
+                    acknowledged,
+                    identity,
+                    &provider_message_id,
+                    kind,
+                );
+            }
+            // 返回 Ok 不证明发布了持久回执，更不能解决另一条消息的失败。
+            // 只由 reap_receipts 消费同一 frontier 身份的真实回执清除此观察。
+            Ok((_, _, Ok(()))) => {}
+        }
+    }
+}
+
+fn record_admission_failure(
+    observations: &mut WeixinAdmissionObservations,
+    frontier: &HashSet<String>,
+    acknowledged: &HashSet<String>,
+    identity: String,
+    provider_message_id: &str,
+    kind: WeixinAdmissionFailure,
+) {
+    if frontier.contains(&identity) && !acknowledged.contains(&identity) {
+        observations.insert(
+            identity,
+            admission_failure_message(kind, provider_message_id),
+        );
+    } else {
+        // 已有持久回执或已推进 cursor 的调用仍可能晚到失败。保留调用失败
+        // 观察，但不能把已准入消息重新说成未准入或重新加入 frontier。
+        let correlation: String = provider_message_id.chars().take(64).collect();
+        tracing::warn!(
+            category = kind.category(),
+            provider_message_id = %correlation,
+            "Weixin admission call failed after its original durable receipt"
+        );
+    }
+}
+
+fn publish_admission_observation(
+    transport: &TransportStatus,
+    observed: &mut Option<String>,
+    current: &WeixinAdmissionObservations,
+    cancel: &CancellationToken,
+) {
+    if cancel.is_cancelled() {
+        return;
+    }
+    let current = first_admission_error(current);
+    if *observed == current {
+        return;
+    }
+    let snapshot = transport.subscribe().borrow().clone();
+    // 准入诊断只能补充已确认的传输观察。关闭时的迟到调用不能把认证过期、
+    // 断连或尚未连接的传输提升为 Ready，也不能覆盖原来的传输失败原因。
+    if snapshot.phase != ChannelTransportPhase::Ready
+        || snapshot.evidence != Some(ChannelTransportEvidence::WeixinAuthenticatedPoll)
+    {
+        return;
+    }
+    *observed = current.clone();
+    transport.publish(snapshot.phase, snapshot.evidence, current);
+}
+
+fn reap_receipts(
+    pending: &mut PendingReceipts,
+    acknowledged: &mut HashSet<String>,
+    admission_failure: &mut WeixinAdmissionObservations,
+) {
     pending.retain(|id, ingress| match ingress.receipt.try_recv() {
         Ok(
             ChannelIngressDisposition::DurableInput
@@ -779,11 +957,43 @@ fn reap_receipts(pending: &mut PendingReceipts, acknowledged: &mut HashSet<Strin
             | ChannelIngressDisposition::ControlRecoveryRequired,
         ) => {
             acknowledged.insert(id.clone());
+            admission_failure.remove(id);
             false
         }
         Err(tokio::sync::oneshot::error::TryRecvError::Empty) => true,
         Err(tokio::sync::oneshot::error::TryRecvError::Closed) => false,
     });
+}
+
+/// Transport-visible classification of a failed admission. The transport never
+/// sees handler text, credentials, context or message bodies; only this bounded
+/// kind plus the provider message id.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WeixinAdmissionFailure {
+    HandlerRejected,
+    InvalidPeerIdentity,
+    ContextPreparation,
+}
+
+impl WeixinAdmissionFailure {
+    fn category(self) -> &'static str {
+        match self {
+            Self::HandlerRejected => "handler_rejected",
+            Self::InvalidPeerIdentity => "invalid_peer_identity",
+            Self::ContextPreparation => "context_preparation",
+        }
+    }
+}
+
+/// Bounded, redacted observation for the channel page. It names the category
+/// and the provider correlation id only; frontier and cursor stay untouched.
+fn admission_failure_message(failure: WeixinAdmissionFailure, provider_message_id: &str) -> String {
+    let id: String = provider_message_id.chars().take(64).collect();
+    format!(
+        "Weixin message admission failed ({}); provider message {}; cursor and frontier retained",
+        failure.category(),
+        id
+    )
 }
 
 async fn drive_request(
@@ -794,12 +1004,12 @@ async fn drive_request(
     message: WeixinMessage,
     context: Option<WeixinContextRef>,
     receipt: ChannelIngressReceipt,
-) {
+) -> std::result::Result<(), WeixinAdmissionFailure> {
     let Ok(target) = encode_target(&account_id, &message.peer) else {
-        return;
+        return Err(WeixinAdmissionFailure::InvalidPeerIdentity);
     };
     let Ok(sender) = encode_target(&account_id, &message.peer) else {
-        return;
+        return Err(WeixinAdmissionFailure::InvalidPeerIdentity);
     };
     let mut inbound = InboundMessage::new(
         "weixin",
@@ -829,7 +1039,7 @@ async fn drive_request(
         if !matches!(outcome, Ok(WeixinSendOutcome::Accepted { .. })) {
             tracing::warn!("Weixin capability rejection could not be confirmed as delivered");
         }
-        return;
+        return Ok(());
     }
     if let Some(timestamp) = message
         .timestamp_ms
@@ -840,7 +1050,12 @@ async fn drive_request(
     // The host publishes the original receipt, registers its reply route and
     // wakes its own claim owner. It retains long output through the original
     // delivery handle; transport never consumes or spawns an output waiter.
-    let _ = handler.admit_with_ingress(inbound, cancel, receipt).await;
+    // A failed admission is reported to the poll owner as a bounded category;
+    // it is never converted into a receipt, cursor progress or Agent success.
+    handler
+        .admit_with_ingress(inbound, cancel, receipt)
+        .await
+        .map_err(|_| WeixinAdmissionFailure::HandlerRejected)
 }
 
 fn is_control(text: &str) -> bool {
@@ -854,9 +1069,161 @@ fn error(message: &str) -> ReactError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use echo_core::memory::store::{StoreCompareAndPutOutcome, StoreItem};
+    use futures::future::BoxFuture;
 
     fn pending_ingress(receipt: oneshot::Receiver<ChannelIngressDisposition>) -> PendingIngress {
         PendingIngress { receipt }
+    }
+
+    fn rejected_admission(identity: &str) -> WeixinAdmissionObservations {
+        WeixinAdmissionObservations::from([(
+            identity.to_string(),
+            admission_failure_message(WeixinAdmissionFailure::HandlerRejected, identity),
+        )])
+    }
+
+    #[tokio::test]
+    async fn admission_observation_keeps_other_message_from_clearing_error() -> Result<()> {
+        let original = rejected_admission("failed");
+        let mut admission_failure = original.clone();
+        let mut failure = None;
+        let frontier = HashSet::from(["failed".to_string(), "another-message".to_string()]);
+        let acknowledged = HashSet::new();
+        let transport = TransportStatus::new(ChannelTransportPhase::Connecting);
+        let mut tasks = JoinSet::new();
+        tasks.spawn(async {
+            (
+                "another-message".to_string(),
+                "provider-another-message".to_string(),
+                Ok(()),
+            )
+        });
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !tasks.is_empty() {
+                reap_admissions(
+                    &mut tasks,
+                    &mut failure,
+                    &mut admission_failure,
+                    &frontier,
+                    &acknowledged,
+                    &transport,
+                );
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .map_err(|_| error("admission observation fixture did not settle"))?;
+        assert!(failure.is_none());
+        assert_eq!(admission_failure, original);
+        Ok(())
+    }
+
+    #[test]
+    fn admission_observation_keeps_expired_transport_failed() {
+        let transport = TransportStatus::new(ChannelTransportPhase::Connecting);
+        transport.publish(
+            ChannelTransportPhase::Failed,
+            None,
+            Some("Weixin authorization expired (-14)".to_string()),
+        );
+        let mut observed = None;
+        let admission_failure = rejected_admission("late-admission");
+        publish_admission_observation(
+            &transport,
+            &mut observed,
+            &admission_failure,
+            &CancellationToken::new(),
+        );
+        let snapshot = transport.subscribe().borrow().clone();
+        assert_eq!(snapshot.phase, ChannelTransportPhase::Failed);
+        assert_eq!(snapshot.evidence, None);
+        assert_eq!(
+            snapshot.last_error.as_deref(),
+            Some("Weixin authorization expired (-14)")
+        );
+    }
+
+    #[test]
+    fn admission_observation_cancelled_call_keeps_original_snapshot() {
+        let transport = TransportStatus::new(ChannelTransportPhase::Ready);
+        transport.publish(
+            ChannelTransportPhase::Ready,
+            Some(ChannelTransportEvidence::WeixinAuthenticatedPoll),
+            None,
+        );
+        let before = transport.subscribe().borrow().clone();
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        let mut observed = None;
+        publish_admission_observation(
+            &transport,
+            &mut observed,
+            &rejected_admission("late-after-stop"),
+            &cancel,
+        );
+        let after = transport.subscribe().borrow().clone();
+        assert_eq!(after.phase, before.phase);
+        assert_eq!(after.evidence, before.evidence);
+        assert_eq!(after.last_error, before.last_error);
+        assert_eq!(after.observed_at, before.observed_at);
+        assert!(observed.is_none());
+    }
+
+    #[test]
+    fn admission_observation_clears_only_for_its_exact_durable_receipt() {
+        let original = rejected_admission("failed");
+        let mut admission_failure = original.clone();
+        let mut pending = HashMap::new();
+        let mut acknowledged = HashSet::new();
+        let (other_publisher, other_received) = channel_ingress_receipt();
+        pending.insert("another-message".into(), pending_ingress(other_received));
+        other_publisher.publish(ChannelIngressDisposition::DurableInput);
+        reap_receipts(&mut pending, &mut acknowledged, &mut admission_failure);
+        assert!(acknowledged.contains("another-message"));
+        assert_eq!(admission_failure, original);
+
+        let (exact_publisher, exact_received) = channel_ingress_receipt();
+        pending.insert("failed".into(), pending_ingress(exact_received));
+        exact_publisher.publish(ChannelIngressDisposition::DurableInput);
+        reap_receipts(&mut pending, &mut acknowledged, &mut admission_failure);
+        assert!(acknowledged.contains("failed"));
+        assert!(admission_failure.is_empty());
+    }
+
+    #[test]
+    fn admission_observation_keeps_a_when_only_b_is_acknowledged() {
+        let frontier = HashSet::from(["a".to_string(), "b".to_string()]);
+        let mut acknowledged = HashSet::new();
+        let mut failures = WeixinAdmissionObservations::new();
+        for identity in ["a", "b"] {
+            record_admission_failure(
+                &mut failures,
+                &frontier,
+                &acknowledged,
+                identity.to_string(),
+                identity,
+                WeixinAdmissionFailure::HandlerRejected,
+            );
+        }
+        let mut pending = HashMap::new();
+        let (publisher, received) = channel_ingress_receipt();
+        pending.insert("b".into(), pending_ingress(received));
+        publisher.publish(ChannelIngressDisposition::DurableInput);
+        reap_receipts(&mut pending, &mut acknowledged, &mut failures);
+        assert_eq!(failures, rejected_admission("a"));
+
+        // B 的迟到调用失败不能使其重新成为未准入项，更不能替换尚未解决的 A。
+        record_admission_failure(
+            &mut failures,
+            &frontier,
+            &acknowledged,
+            "b".to_string(),
+            "b",
+            WeixinAdmissionFailure::HandlerRejected,
+        );
+        assert_eq!(failures, rejected_admission("a"));
+        assert_eq!(failures.len(), 1);
     }
 
     fn credentials() -> WeixinCredentials {
@@ -907,7 +1274,11 @@ mod tests {
         let (publisher, received) = channel_ingress_receipt();
         pending.insert("id".into(), pending_ingress(received));
         drop(publisher);
-        reap_receipts(&mut pending, &mut acknowledged);
+        reap_receipts(
+            &mut pending,
+            &mut acknowledged,
+            &mut WeixinAdmissionObservations::new(),
+        );
         assert!(acknowledged.is_empty());
         Ok(())
     }
@@ -919,7 +1290,11 @@ mod tests {
         let (publisher, received) = channel_ingress_receipt();
         pending.insert("id".into(), pending_ingress(received));
         publisher.publish(ChannelIngressDisposition::ControlRecoveryRequired);
-        reap_receipts(&mut pending, &mut acknowledged);
+        reap_receipts(
+            &mut pending,
+            &mut acknowledged,
+            &mut WeixinAdmissionObservations::new(),
+        );
         assert!(acknowledged.contains("id"));
         assert!(!acknowledged.contains("other"));
         Ok(())
@@ -1042,7 +1417,8 @@ mod tests {
             None,
             receipt,
         )
-        .await;
+        .await
+        .map_err(|_| error("control admission fixture failed"))?;
         assert_eq!(
             received
                 .await
@@ -1053,7 +1429,8 @@ mod tests {
         cancel.cancel();
         normal
             .await
-            .map_err(|_| error("original response producer failed to settle"))?;
+            .map_err(|_| error("original response producer failed to settle"))?
+            .map_err(|_| error("original response admission failed"))?;
         Ok(())
     }
 
@@ -1062,6 +1439,9 @@ mod tests {
         FortyThenControl,
         FortyThenControlWithoutRet,
         ManyPagesThenControl,
+        DirectThenGroup,
+        HeldThenUnwind,
+        ContextPreparation,
         Unacknowledged,
         Unknown,
         Unrelated,
@@ -1086,6 +1466,7 @@ mod tests {
     struct PollFixtureState {
         case: PollCase,
         observation: tokio::sync::watch::Sender<PollObservation>,
+        replay_release: Option<Arc<tokio::sync::Notify>>,
     }
 
     struct PollFixture {
@@ -1093,6 +1474,7 @@ mod tests {
         observation: tokio::sync::watch::Receiver<PollObservation>,
         stop: CancellationToken,
         server: JoinHandle<Result<()>>,
+        replay_release: Option<Arc<tokio::sync::Notify>>,
     }
 
     impl PollFixture {
@@ -1104,7 +1486,16 @@ mod tests {
                 .local_addr()
                 .map_err(|_| error("poll fixture address unavailable"))?;
             let (observation, received) = tokio::sync::watch::channel(PollObservation::default());
-            let state = PollFixtureState { case, observation };
+            let replay_release = matches!(
+                case,
+                PollCase::DirectThenGroup | PollCase::ContextPreparation
+            )
+            .then(|| Arc::new(tokio::sync::Notify::new()));
+            let state = PollFixtureState {
+                case,
+                observation,
+                replay_release: replay_release.clone(),
+            };
             let router = axum::Router::new()
                 .route(
                     "/ilink/bot/getupdates",
@@ -1128,6 +1519,7 @@ mod tests {
                 observation: received,
                 stop,
                 server,
+                replay_release,
             })
         }
 
@@ -1176,6 +1568,9 @@ mod tests {
                         .and_then(|value| value.parse::<usize>().ok())
                         .is_some_and(|index| index <= 128)
             }
+            PollCase::DirectThenGroup | PollCase::ContextPreparation => {
+                matches!(cursor, "" | "control-page-accepted")
+            }
             _ => cursor.is_empty(),
         };
         state.observation.send_modify(|observed| {
@@ -1186,6 +1581,7 @@ mod tests {
         });
         // Keep empty-page heartbeats bounded while retaining a real TCP/HTTP request.
         tokio::time::sleep(Duration::from_millis(10)).await;
+        let requests = state.observation.borrow().requests;
         let mut response = match state.case {
             PollCase::FortyThenControl | PollCase::FortyThenControlWithoutRet
                 if cursor.is_empty() =>
@@ -1224,6 +1620,34 @@ mod tests {
                         serde_json::json!({"ret": 0, "msgs": [], "get_updates_buf": "control-page-accepted"})
                     }
                 }
+            }
+            PollCase::DirectThenGroup if cursor == "control-page-accepted" => {
+                serde_json::json!({"ret": 0, "msgs": [], "get_updates_buf": "control-page-accepted"})
+            }
+            PollCase::DirectThenGroup if requests == 1 => {
+                serde_json::json!({"ret": 0, "msgs": [poll_message("reclassified", "direct admission fails")], "get_updates_buf": "control-page-accepted"})
+            }
+            PollCase::DirectThenGroup => {
+                if requests == 2
+                    && let Some(release) = state.replay_release.as_ref()
+                {
+                    release.notified().await;
+                }
+                serde_json::json!({"ret": 0, "msgs": [{"message_id": "reclassified", "message_type": 1, "from_user_id": "peer-a", "group_id": "fixture-group", "item_list": [{"type": 1, "text_item": {"text": "same identity is explicitly rejected as group input"}}]}], "get_updates_buf": "control-page-accepted"})
+            }
+            PollCase::HeldThenUnwind => {
+                serde_json::json!({"ret": 0, "msgs": [poll_message("held", "already admitted, effect still pending"), poll_message("unwind", "admission task fails")], "get_updates_buf": "must-not-commit"})
+            }
+            PollCase::ContextPreparation if cursor == "control-page-accepted" => {
+                serde_json::json!({"ret": 0, "msgs": [], "get_updates_buf": "control-page-accepted"})
+            }
+            PollCase::ContextPreparation => {
+                if requests == 2
+                    && let Some(release) = state.replay_release.as_ref()
+                {
+                    release.notified().await;
+                }
+                serde_json::json!({"ret": 0, "msgs": [poll_message("context-fails", "context persistence initially fails"), poll_message("context-ok", "another input is accepted")], "get_updates_buf": "control-page-accepted"})
             }
             PollCase::Unacknowledged => {
                 serde_json::json!({"ret": 0, "msgs": [poll_message("no-ack", "must retain the original cursor")], "get_updates_buf": "must-not-commit"})
@@ -1623,6 +2047,413 @@ mod tests {
         Ok(())
     }
 
+    struct AdmissionFailureHandler {
+        unwind: bool,
+    }
+
+    #[async_trait]
+    impl MessageHandler for AdmissionFailureHandler {
+        async fn handle(&self, _message: InboundMessage) -> Result<OutboundMessage> {
+            Err(error("fixture requires ingress entry"))
+        }
+        async fn reply(&self, _message: OutboundMessage) -> Result<()> {
+            Ok(())
+        }
+        fn bind_durable_ingress(&self, _cancel: CancellationToken) -> Result<()> {
+            Ok(())
+        }
+        async fn admit_with_ingress(
+            &self,
+            _message: InboundMessage,
+            _cancel: CancellationToken,
+            _receipt: ChannelIngressReceipt,
+        ) -> Result<()> {
+            if self.unwind {
+                // 模拟第三方 handler 的异常；原 JoinSet task 边界必须捕获它。
+                // 生产路径不引入 panic 或新的执行/恢复 owner。
+                std::panic::resume_unwind(Box::new("injected admission task unwind"));
+            }
+            Err(error("injected admission rejection"))
+        }
+    }
+
+    #[tokio::test]
+    async fn admission_observation_actual_poll_unwind_becomes_unknown() -> Result<()> {
+        let fixture = PollFixture::start(PollCase::Unacknowledged).await?;
+        let mut channel = WeixinChannel::for_local_fixture(
+            WeixinConfig {
+                credentials: credentials(),
+                store: super::super::state::tests::store(),
+            },
+            fixture.address,
+        )?;
+        channel
+            .start(Arc::new(AdmissionFailureHandler { unwind: true }))
+            .await?;
+        let mut observed = channel.transport.subscribe();
+        let ended = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let snapshot = observed.borrow_and_update().clone();
+                if snapshot.phase == ChannelTransportPhase::Unknown {
+                    return Ok::<_, ReactError>(snapshot);
+                }
+                observed
+                    .changed()
+                    .await
+                    .map_err(|_| error("original transport observation closed"))?;
+            }
+        })
+        .await;
+        let cursor = channel.state.cursor().await;
+        let health = channel.health_check().await;
+        // 第一次 Stop 接收原 poller 的实际错误；第二次继续结算原 sender/handler。
+        let first_stop = channel.stop().await;
+        let second_stop = channel.stop().await;
+        let server_stop = fixture.shutdown().await;
+        let snapshot = ended.map_err(|_| error("failed poller retained Ready"))??;
+        second_stop?;
+        server_stop?;
+        assert_eq!(snapshot.phase, ChannelTransportPhase::Unknown);
+        assert!(snapshot.evidence.is_none());
+        assert!(health.is_err());
+        assert!(first_stop.is_err());
+        assert_eq!(cursor?, "");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn admission_observation_actual_group_rejection_clears_exact_error() -> Result<()> {
+        let mut fixture = PollFixture::start(PollCase::DirectThenGroup).await?;
+        let mut channel = WeixinChannel::for_local_fixture(
+            WeixinConfig {
+                credentials: credentials(),
+                store: super::super::state::tests::store(),
+            },
+            fixture.address,
+        )?;
+        channel
+            .start(Arc::new(AdmissionFailureHandler { unwind: false }))
+            .await?;
+        let mut transport = channel.transport.subscribe();
+        let failure_seen = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let snapshot = transport.borrow_and_update().clone();
+                if snapshot
+                    .last_error
+                    .as_deref()
+                    .is_some_and(|message| message.contains("message admission failed"))
+                {
+                    return Ok::<_, ReactError>(snapshot);
+                }
+                transport
+                    .changed()
+                    .await
+                    .map_err(|_| error("original transport observation closed"))?;
+            }
+        })
+        .await;
+        // 即使观察失败也释放 HTTP gate，再完成全部原清理后报告失败。
+        if let Some(release) = fixture.replay_release.as_ref() {
+            release.notify_one();
+        }
+        let progressed =
+            wait_observation(&mut fixture.observation, |state| state.saw_second_cursor).await;
+        let cursor = channel.state.cursor().await;
+        let snapshot = channel.transport.subscribe().borrow().clone();
+        let stopped = channel.stop().await;
+        let server_stop = fixture.shutdown().await;
+        let progressed = progressed?;
+        stopped?;
+        server_stop?;
+        let original_failure = failure_seen
+            .map_err(|_| error("direct failure was never observed before group ACK"))??;
+        assert_eq!(original_failure.phase, ChannelTransportPhase::Ready);
+        assert_eq!(cursor?, "control-page-accepted");
+        assert!(!progressed.unexpected_cursor);
+        assert_eq!(progressed.send_requests, 0);
+        assert_eq!(snapshot.phase, ChannelTransportPhase::Ready);
+        assert!(
+            !snapshot
+                .last_error
+                .as_deref()
+                .is_some_and(|message| message.contains("message admission failed"))
+        );
+        Ok(())
+    }
+
+    struct HeldThenUnwindHandler {
+        started: Arc<tokio::sync::Notify>,
+        release: Arc<tokio::sync::Notify>,
+        settled: Arc<AtomicBool>,
+    }
+
+    #[async_trait]
+    impl MessageHandler for HeldThenUnwindHandler {
+        async fn handle(&self, _message: InboundMessage) -> Result<OutboundMessage> {
+            Err(error("fixture requires ingress entry"))
+        }
+        async fn reply(&self, _message: OutboundMessage) -> Result<()> {
+            Ok(())
+        }
+        fn bind_durable_ingress(&self, _cancel: CancellationToken) -> Result<()> {
+            Ok(())
+        }
+        async fn admit_with_ingress(
+            &self,
+            message: InboundMessage,
+            _cancel: CancellationToken,
+            receipt: ChannelIngressReceipt,
+        ) -> Result<()> {
+            if message.message_id == "held" {
+                receipt.publish(ChannelIngressDisposition::DurableInput);
+                self.started.notify_one();
+                // ACK 和 cancel 都不能越过这个代表已准入物理效果的结算 gate。
+                self.release.notified().await;
+                self.settled.store(true, Ordering::Release);
+                Ok(())
+            } else {
+                self.started.notified().await;
+                // 第三方 handler 故障注入，异常由原 JoinSet task 边界捕获。
+                std::panic::resume_unwind(Box::new("injected concurrent admission unwind"));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn admission_observation_unknown_precedes_other_call_physical_settlement() -> Result<()> {
+        let fixture = PollFixture::start(PollCase::HeldThenUnwind).await?;
+        let release = Arc::new(tokio::sync::Notify::new());
+        let settled = Arc::new(AtomicBool::new(false));
+        let mut channel = WeixinChannel::for_local_fixture(
+            WeixinConfig {
+                credentials: credentials(),
+                store: super::super::state::tests::store(),
+            },
+            fixture.address,
+        )?;
+        channel
+            .start(Arc::new(HeldThenUnwindHandler {
+                started: Arc::new(tokio::sync::Notify::new()),
+                release: release.clone(),
+                settled: settled.clone(),
+            }))
+            .await?;
+        let mut observed = channel.transport.subscribe();
+        let failed = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let snapshot = observed.borrow_and_update().clone();
+                if snapshot.phase == ChannelTransportPhase::Unknown {
+                    return Ok::<_, ReactError>(snapshot);
+                }
+                observed
+                    .changed()
+                    .await
+                    .map_err(|_| error("original transport observation closed"))?;
+            }
+        })
+        .await;
+        let poll_still_owned = channel
+            .poll_task
+            .as_ref()
+            .is_some_and(|task| !task.is_finished());
+        let effect_still_held = !settled.load(Ordering::Acquire);
+        let health = channel.health_check().await;
+        let cursor = channel.state.cursor().await;
+        let (stop_waited, first_stop) = {
+            let stopping = channel.stop();
+            tokio::pin!(stopping);
+            match tokio::time::timeout(Duration::from_millis(25), stopping.as_mut()).await {
+                Err(_) => {
+                    release.notify_one();
+                    (true, stopping.await)
+                }
+                Ok(result) => {
+                    release.notify_one();
+                    (false, result)
+                }
+            }
+        };
+        let second_stop = channel.stop().await;
+        let server_stop = fixture.shutdown().await;
+        let snapshot = failed.map_err(|_| error("Unknown waited for another call to settle"))??;
+        second_stop?;
+        server_stop?;
+        assert_eq!(snapshot.phase, ChannelTransportPhase::Unknown);
+        assert!(poll_still_owned);
+        assert!(effect_still_held);
+        assert!(health.is_err());
+        assert_eq!(cursor?, "");
+        assert!(stop_waited);
+        assert!(first_stop.is_err());
+        assert!(settled.load(Ordering::Acquire));
+        Ok(())
+    }
+
+    struct ContextWriteFailureStore {
+        inner: Arc<dyn Store>,
+        failing: Arc<AtomicBool>,
+    }
+
+    impl Store for ContextWriteFailureStore {
+        fn put<'a>(
+            &'a self,
+            namespace: &'a [&'a str],
+            key: &'a str,
+            value: serde_json::Value,
+        ) -> BoxFuture<'a, Result<()>> {
+            self.inner.put(namespace, key, value)
+        }
+        fn compare_and_put<'a>(
+            &'a self,
+            namespace: &'a [&'a str],
+            key: &'a str,
+            expected: Option<serde_json::Value>,
+            value: serde_json::Value,
+        ) -> BoxFuture<'a, Result<StoreCompareAndPutOutcome>> {
+            if self.failing.load(Ordering::Acquire)
+                && value.get("message_id").and_then(serde_json::Value::as_str)
+                    == Some("context-fails")
+            {
+                return Box::pin(async {
+                    Err(std::io::Error::other("secret-context-store-failure").into())
+                });
+            }
+            self.inner.compare_and_put(namespace, key, expected, value)
+        }
+        fn get<'a>(
+            &'a self,
+            namespace: &'a [&'a str],
+            key: &'a str,
+        ) -> BoxFuture<'a, Result<Option<StoreItem>>> {
+            self.inner.get(namespace, key)
+        }
+        fn search<'a>(
+            &'a self,
+            namespace: &'a [&'a str],
+            query: &'a str,
+            limit: usize,
+        ) -> BoxFuture<'a, Result<Vec<StoreItem>>> {
+            self.inner.search(namespace, query, limit)
+        }
+        fn delete<'a>(
+            &'a self,
+            namespace: &'a [&'a str],
+            key: &'a str,
+        ) -> BoxFuture<'a, Result<bool>> {
+            self.inner.delete(namespace, key)
+        }
+        fn list_namespaces<'a>(
+            &'a self,
+            prefix: Option<&'a [&'a str]>,
+        ) -> BoxFuture<'a, Result<Vec<Vec<String>>>> {
+            self.inner.list_namespaces(prefix)
+        }
+        fn list<'a>(&'a self, namespace: &'a [&'a str]) -> BoxFuture<'a, Result<Vec<StoreItem>>> {
+            self.inner.list(namespace)
+        }
+    }
+
+    struct RecordingReceiptHandler(tokio::sync::watch::Sender<Vec<String>>);
+
+    #[async_trait]
+    impl MessageHandler for RecordingReceiptHandler {
+        async fn handle(&self, _message: InboundMessage) -> Result<OutboundMessage> {
+            Err(error("fixture requires ingress entry"))
+        }
+        async fn reply(&self, _message: OutboundMessage) -> Result<()> {
+            Ok(())
+        }
+        fn bind_durable_ingress(&self, _cancel: CancellationToken) -> Result<()> {
+            Ok(())
+        }
+        async fn admit_with_ingress(
+            &self,
+            message: InboundMessage,
+            _cancel: CancellationToken,
+            receipt: ChannelIngressReceipt,
+        ) -> Result<()> {
+            receipt.publish(ChannelIngressDisposition::DurableInput);
+            self.0
+                .send_modify(|ids| ids.push(message.message_id.clone()));
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn admission_observation_context_failure_waits_for_exact_recovery_ack() -> Result<()> {
+        let mut fixture = PollFixture::start(PollCase::ContextPreparation).await?;
+        let failing = Arc::new(AtomicBool::new(true));
+        let store = Arc::new(ContextWriteFailureStore {
+            inner: super::super::state::tests::store(),
+            failing: failing.clone(),
+        });
+        let (calls, called) = tokio::sync::watch::channel(Vec::new());
+        let mut channel = WeixinChannel::for_local_fixture(
+            WeixinConfig {
+                credentials: credentials(),
+                store,
+            },
+            fixture.address,
+        )?;
+        channel
+            .start(Arc::new(RecordingReceiptHandler(calls)))
+            .await?;
+        let mut transport = channel.transport.subscribe();
+        let failure_seen = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let snapshot = transport.borrow_and_update().clone();
+                if snapshot
+                    .last_error
+                    .as_deref()
+                    .is_some_and(|message| message.contains("context_preparation"))
+                {
+                    return Ok::<_, ReactError>(snapshot);
+                }
+                transport
+                    .changed()
+                    .await
+                    .map_err(|_| error("original context observation closed"))?;
+            }
+        })
+        .await;
+        // 第二个原 HTTP 请求只在 B 的 ACK/调用已被原 poller 回收后发出。
+        // 先停在响应 gate，确认 B 成功仍没有清除 A 的真实 context 失败。
+        let repeated =
+            wait_observation(&mut fixture.observation, |state| state.requests >= 2).await;
+        let before = channel.transport.subscribe().borrow().clone();
+        let before_cursor = channel.state.cursor().await;
+        let before_calls = called.borrow().clone();
+        failing.store(false, Ordering::Release);
+        if let Some(release) = fixture.replay_release.as_ref() {
+            release.notify_one();
+        }
+        let recovered =
+            wait_observation(&mut fixture.observation, |state| state.saw_second_cursor).await;
+        let after = channel.transport.subscribe().borrow().clone();
+        let after_cursor = channel.state.cursor().await;
+        let after_calls = called.borrow().clone();
+        let stopped = channel.stop().await;
+        let server_stop = fixture.shutdown().await;
+        failure_seen.map_err(|_| error("context failure was silently discarded"))??;
+        repeated?;
+        recovered?;
+        stopped?;
+        server_stop?;
+        assert_eq!(before_cursor?, "");
+        assert_eq!(before_calls, vec!["context-ok"]);
+        let message = before
+            .last_error
+            .as_deref()
+            .ok_or_else(|| error("another message cleared the context failure"))?;
+        assert!(message.contains("context_preparation"));
+        assert!(!message.contains("secret-context-store-failure"));
+        assert!(!message.contains("context persistence initially fails"));
+        assert_eq!(after_cursor?, "control-page-accepted");
+        assert_eq!(after_calls, vec!["context-ok", "context-fails"]);
+        assert!(after.last_error.is_none());
+        Ok(())
+    }
+
     struct NoAcknowledgmentHandler(tokio::sync::watch::Sender<usize>);
 
     #[async_trait]
@@ -1718,7 +2549,10 @@ mod tests {
                 }
                 PollCase::FortyThenControl
                 | PollCase::FortyThenControlWithoutRet
-                | PollCase::ManyPagesThenControl => {
+                | PollCase::ManyPagesThenControl
+                | PollCase::DirectThenGroup
+                | PollCase::HeldThenUnwind
+                | PollCase::ContextPreparation => {
                     return Err(error("unexpected test case"));
                 }
             }

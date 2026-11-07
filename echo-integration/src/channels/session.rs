@@ -574,6 +574,8 @@ pub enum SessionEndReason {
     CommandReset,
     /// Replaced after timeout
     TimeoutReplaced,
+    /// The channel closed this retained session successfully
+    Shutdown,
 }
 
 /// Session management handler.
@@ -1216,8 +1218,23 @@ impl MessageHandler for SessionHandler {
             guard.generation.retire_all_streams().await;
             match guard.handler.close().await {
                 Ok(()) => {
-                    self.sessions
-                        .remove_if(&key, |_, current| Arc::ptr_eq(current, &session));
+                    // A successful close physically releases this incarnation.
+                    // Only the owner that removed its own map entry may publish
+                    // the end, so a concurrent replacement never loses its new
+                    // current incarnation or receives a duplicate settlement.
+                    let removed = self
+                        .sessions
+                        .remove_if(&key, |_, current| Arc::ptr_eq(current, &session))
+                        .is_some();
+                    if removed {
+                        let instance = guard.instance.clone();
+                        let generation = Arc::clone(&guard.generation);
+                        // Drop the session mutex and map reference before the
+                        // synchronous callback; no await separates removal from
+                        // the single end notification.
+                        drop(guard);
+                        self.settle_session_end(&generation, instance, SessionEndReason::Shutdown);
+                    }
                 }
                 Err(error) => failures.push(error.to_string()),
             }
@@ -2975,10 +2992,19 @@ mod tests {
         }
 
         let closes = Arc::new(AtomicUsize::new(0));
+        let ends = Arc::new(std::sync::Mutex::new(Vec::new()));
         let handler = SessionHandler::new(SessionConfig::default(), {
             let closes = Arc::clone(&closes);
             move |_instance: &ChannelSessionInstance| -> Box<dyn MessageHandler> {
                 Box::new(RetryCloseHandler(Arc::clone(&closes)))
+            }
+        })
+        .with_on_session_end({
+            let ends = Arc::clone(&ends);
+            move |info: SessionEndInfo| {
+                ends.lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .push((info.incarnation_id, info.reason));
             }
         });
         handler
@@ -2988,12 +3014,138 @@ mod tests {
         if handler.close().await.is_ok() || handler.active_sessions() != 1 {
             return Err("failed close lost the session Agent owner".to_string());
         }
+        if !ends
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .is_empty()
+        {
+            return Err("failed close published a session end".to_string());
+        }
         if handler.handle(test_message("late", "second")).await.is_ok() {
             return Err("closed SessionHandler admitted a new message".to_string());
         }
         handler.close().await.map_err(|error| error.to_string())?;
         if handler.active_sessions() != 0 || closes.load(Ordering::Acquire) != 2 {
             return Err("retried session Agent close did not settle".to_string());
+        }
+        let ends = ends
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        if ends.len() != 1 || ends[0].1 != SessionEndReason::Shutdown || ends[0].0.is_empty() {
+            return Err(format!(
+                "successful close published {ends:?} instead of one shutdown end"
+            ));
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn session_close_publishes_one_shutdown_end_per_retained_session() -> Result<(), String> {
+        struct IdleHandler;
+
+        #[async_trait]
+        impl MessageHandler for IdleHandler {
+            async fn handle(
+                &self,
+                msg: InboundMessage,
+            ) -> echo_core::error::Result<OutboundMessage> {
+                Ok(OutboundMessage::new(
+                    &msg.channel_id,
+                    msg.reply_target(),
+                    msg.chat_type,
+                    "reply",
+                ))
+            }
+
+            async fn reply(&self, _msg: OutboundMessage) -> echo_core::error::Result<()> {
+                Ok(())
+            }
+
+            async fn close(&self) -> echo_core::error::Result<()> {
+                Ok(())
+            }
+        }
+
+        let created = Arc::new(std::sync::Mutex::new(Vec::<(String, String)>::new()));
+        let ends = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let handler = SessionHandler::new(SessionConfig::default(), {
+            let created = Arc::clone(&created);
+            move |instance: &ChannelSessionInstance| -> Box<dyn MessageHandler> {
+                created
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .push((instance.sender_id().to_string(), instance.incarnation_id()));
+                Box::new(IdleHandler)
+            }
+        })
+        .with_on_session_end({
+            let ends = Arc::clone(&ends);
+            move |info: SessionEndInfo| {
+                ends.lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .push((info.sender_id, info.incarnation_id, info.reason));
+            }
+        });
+        for sender in ["u1", "u2"] {
+            handler
+                .handle(InboundMessage::new(
+                    "qq",
+                    sender,
+                    "c1",
+                    ChatType::Direct,
+                    "hello",
+                    format!("{sender}-1"),
+                ))
+                .await
+                .map_err(|error| error.to_string())?;
+        }
+        if handler.active_sessions() != 2 {
+            return Err(format!(
+                "expected two retained sessions, got {}",
+                handler.active_sessions()
+            ));
+        }
+        handler.close().await.map_err(|error| error.to_string())?;
+        if handler.active_sessions() != 0 {
+            return Err("shutdown left a retained session owner".to_string());
+        }
+        let created = created
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        let published = ends
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        if created.len() != 2 || published.len() != created.len() {
+            return Err(format!(
+                "shutdown published {} ends for {} sessions",
+                published.len(),
+                created.len()
+            ));
+        }
+        for (sender, incarnation) in created {
+            if !published
+                .iter()
+                .any(|(ended_sender, ended_incarnation, reason)| {
+                    ended_sender == &sender
+                        && ended_incarnation == &incarnation
+                        && *reason == SessionEndReason::Shutdown
+                })
+            {
+                return Err(format!("shutdown end lost the incarnation of {sender}"));
+            }
+        }
+        // No retained owner remains, so a second close must not republish.
+        handler.close().await.map_err(|error| error.to_string())?;
+        if ends
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .len()
+            != 2
+        {
+            return Err("repeated close republished a session end".to_string());
         }
         Ok(())
     }
@@ -3029,12 +3181,21 @@ mod tests {
         }
 
         let closes = Arc::new(AtomicUsize::new(0));
+        let ends = Arc::new(std::sync::Mutex::new(Vec::new()));
         let handler = SessionHandler::new(SessionConfig::default(), {
             let closes = Arc::clone(&closes);
             move |_instance: &ChannelSessionInstance| -> Box<dyn MessageHandler> {
                 Box::new(InterruptedHandler {
                     closes: Arc::clone(&closes),
                 })
+            }
+        })
+        .with_on_session_end({
+            let ends = Arc::clone(&ends);
+            move |info: SessionEndInfo| {
+                ends.lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .push(info.reason);
             }
         });
         handler
@@ -3050,9 +3211,25 @@ mod tests {
         if handler.active_sessions() != 1 || closes.load(Ordering::Acquire) != 1 {
             return Err("interrupted Agent close lost its owner".to_string());
         }
+        if !ends
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .is_empty()
+        {
+            return Err("interrupted close published a session end".to_string());
+        }
         handler.close().await.map_err(|error| error.to_string())?;
         if handler.active_sessions() != 0 || closes.load(Ordering::Acquire) != 2 {
             return Err("Agent close retry did not settle".to_string());
+        }
+        let ends = ends
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        if ends != vec![SessionEndReason::Shutdown] {
+            return Err(format!(
+                "cancelled close retry published {ends:?} instead of one shutdown end"
+            ));
         }
         Ok(())
     }
@@ -3118,18 +3295,35 @@ mod tests {
         let started = Arc::new(Notify::new());
         let stream_dropped = Arc::new(AtomicBool::new(false));
         let closes = Arc::new(AtomicUsize::new(0));
-        let handler = Arc::new(SessionHandler::new(SessionConfig::default(), {
-            let started = Arc::clone(&started);
-            let stream_dropped = Arc::clone(&stream_dropped);
-            let closes = Arc::clone(&closes);
-            move |_instance: &ChannelSessionInstance| -> Box<dyn MessageHandler> {
-                Box::new(LegacyResourceHandler {
-                    started: Arc::clone(&started),
-                    stream_dropped: Arc::clone(&stream_dropped),
-                    closes: Arc::clone(&closes),
-                })
-            }
-        }));
+        let ends = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let handler = Arc::new(
+            SessionHandler::new(SessionConfig::default(), {
+                let started = Arc::clone(&started);
+                let stream_dropped = Arc::clone(&stream_dropped);
+                let closes = Arc::clone(&closes);
+                move |_instance: &ChannelSessionInstance| -> Box<dyn MessageHandler> {
+                    Box::new(LegacyResourceHandler {
+                        started: Arc::clone(&started),
+                        stream_dropped: Arc::clone(&stream_dropped),
+                        closes: Arc::clone(&closes),
+                    })
+                }
+            })
+            .with_on_session_end({
+                let ends = Arc::clone(&ends);
+                let stream_dropped = Arc::clone(&stream_dropped);
+                let closes = Arc::clone(&closes);
+                move |info: SessionEndInfo| {
+                    ends.lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .push((
+                            info.reason,
+                            stream_dropped.load(Ordering::Acquire),
+                            closes.load(Ordering::Acquire),
+                        ));
+                }
+            }),
+        );
         let stream_owner = Arc::clone(&handler);
         let stream_task = tokio::spawn(async move {
             let mut stream = stream_owner
@@ -3152,6 +3346,15 @@ mod tests {
             || closes.load(Ordering::Acquire) != 1
         {
             return Err("legacy stream was not dropped before handler close".to_string());
+        }
+        let ends = ends
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        if ends != vec![(SessionEndReason::Shutdown, true, 1)] {
+            return Err(format!(
+                "legacy close settled stream/Agent/end out of order: {ends:?}"
+            ));
         }
         Ok(())
     }

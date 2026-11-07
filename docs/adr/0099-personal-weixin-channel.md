@@ -143,3 +143,26 @@ comments do not opt `AgentChannelHandler` into durability. Bilingual channel doc
 track the API; website mirrors wait the coordinator's qualified producer. SDK
 accepted contracts, real QR/login/messages, native GUI and exact main CI remain
 separate and unverified by this source change.
+
+## 2026-11-07：准入失败观测与准确回执隔离
+
+原 poll owner 按完整 frontier 消息身份记录尚未得到回执的失败诊断；集合规模受原
+`MAX_PENDING_RECEIPTS` 限制，只保存有界类别和关联标识，不保存正文、凭据或 context。
+诊断集合没有消息准入、重试、执行或恢复权，不替代原持久 host、许可、cursor 或发送结果。
+
+消息 context 关联准备中的 Store 读写、损坏关联或 CAS 错误也进入同一集合，类别固定为
+`context_preparation`。原错误文本、正文、token 和 context 不进入诊断；失败消息不交给
+handler、不生成 ACK、不推进 cursor，后续修复存储也只通过该消息的准确回执解除诊断。
+
+handler 返回 `Ok` 和 authenticated poll 成功都不能解除另一条消息的失败。只有原消息
+的真实持久回执或原明确终端拒绝路径清除准确身份；A、B 同时失败后确认 B，A 继续可见。
+已被回执确认或随真实 cursor 提交离开 frontier 的调用若晚到失败，保留脱敏调用警告，
+不将消息重新放入 frontier，也不重放业务效果。
+
+诊断发布仅补充已确认的 `WeixinAuthenticatedPoll` Ready。关闭、认证过期或断连期间的
+迟到调用不能发布新的 Ready，也不能覆盖原传输失败原因。实际模型执行、typed send
+结果与手机收件仍分别验收；本节不更新上文历史验证快照的资格。
+
+原准入任务的异常在捕获时立即发布 Unknown。其它调用即使已经提前 ACK，仍继续持有
+实际效果、许可和 JoinSet 结算责任；故障观察与物理结算分开，不以等待结束或释放原执行
+作为报告故障的条件。

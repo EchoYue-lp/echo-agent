@@ -263,6 +263,13 @@ stream 被 drop 后执行。如果消费者回调自身 panic，`SessionHandler`
 该 panic，不会让它从 stream 析构继续传播，也不会污染 replacement session。详见
 [ADR 0057](../adr/0057-channel-generation-delivery-fence.md)。
 
+`SessionHandler::close()` 只在某个保留会话的 handler `close()` 成功、且 session map 中确实移除
+了同一个 session 之后，才同步发布一次 `SessionEndInfo`（`SessionEndReason::Shutdown`）；删除与
+通知之间没有 await 点，因此后继准入创建的新 incarnation 一定排在旧的结束通知之后。handler
+close 失败或被取消时保留原 owner 且不发布结束通知，重复 close 也不会重复发布。应用侧会话协调器
+必须依据该通知释放对应 surface 的 current incarnation，才能接纳停止/重连后同一会话的新
+incarnation；迟到的旧回调仍按 incarnation 校验，不会清除已注册的 replacement。
+
 自定义 Agent driver 应把稳定产品 ID 放在
 `AgentInvocationContext.runtime.conversation_id`，并把 instance 派生的 runtime key 同时传给
 `runtime_state_id` 与 `transcript_generation_id`。这样同一 incarnation 的 checkpoint load/save
@@ -426,6 +433,16 @@ GET/POST 使用各自 headers；HTTPS origin 校验及禁用自动重定向防�
 `capture_message_context(target, message_id)` 读取原消息关联，`send_with_context` 将准确 Option 交同一 sender。恢复使用 `validate_message_context(target, message_id, expected)`：None 必须存在真实 `context: null` 关联；Some 必须精确 identity/reference 且原 token record 可读有效。缺关联/字段、身份/reference/token 漂移或不同凭据 generation 均拒绝，不发 HTTP、不借 latest、不修状态、不返回秘密。A2 持久 binding、never-claimed 证明、workspace generation 和 TaskRun 意图留原 host 策略。
 
 typed send 仍等待唯一 producer 的真实 `Accepted`/`Rejected`/`Unknown`；HTTP200、入队、start 不等于成功，Unknown 不准重放。只有真实 authenticated 业务 poll 证明 `WeixinAuthenticatedPoll` Ready；`-14` 停止新收发并要求重新认证。
+
+准入失败按原 frontier 的完整消息身份保留有界、脱敏诊断，显示在原传输观察的 `last_error`。
+context 关联准备中的 Store 读写或 CAS 失败以固定 `context_preparation` 类别记录，原 Store
+错误、token、context 和消息正文不进入诊断；失败消息不交给 handler，不伪造回执或推进 cursor。
+成功 poll、某个 handler 返回 `Ok` 或另一条消息的回执均不清除该失败；同一消息的真实持久
+回执只移除自身诊断，多条消息失败后确认其中一条，其余诊断继续保留。诊断不接管 cursor、
+执行许可或业务结果；已确认接收后的迟到调用失败保留为独立调用警告，不重新准入该消息。
+诊断只补充已确认的 authenticated-poll Ready，不能把认证过期、断连或尚未连接提升为 Ready。
+原准入任务被确认异常时立即发布 Unknown；其它已准入效果、许可及 join 义务继续保留，
+不等物理结算完成才报告故障，也不为更新观察而提前释放原执行。
 
 源码反例使用真实本地 HTTP poll/sender、SessionHandler 与通用文件持久 host：40 条输入、128 单消息页后控制、原长流分段、提前 ACK 持有调用许可及取消 Stop waiter 后的实际 join。此前 Framework focused 已实际通过 135 条渠道用例（含全部 10 条新增或重命名 NoStream 用例）、12 条 facade 用例和 2 条仅编译 doctest；demo38 类型检查、匹配范围的 warning/panic lint、featureless 隔离及 fmt/check 同样通过。前述结果绑定此前的 Rust 输入；下述测试工厂属于后续源码变化，须单独编译和运行验证。受控夹具资格不证明 host 生产持久化、完整合并矩阵、官网镜像、应用恢复、原生 GUI、真实扫码收发或精确 main CI。详见 [ADR 0099](../adr/0099-personal-weixin-channel.md)。
 
