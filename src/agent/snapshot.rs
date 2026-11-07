@@ -4060,10 +4060,10 @@ mod transcript_filter_tests {
         context.push(Message::user(
             "ordinary text mentions provider-marker".to_string(),
         ));
-        context.apply_projections(&[ContextProjection {
-            marker: "provider-marker".to_string(),
-            message: Some(Message::user("internal projected state".to_string())),
-        }]);
+        context.apply_projections(&[ContextProjection::replacing(
+            "provider-marker",
+            Some(Message::user("internal projected state".to_string())),
+        )]);
         context.push(Message::user("ordinary visible message".to_string()));
 
         let visible = filter_user_visible_transcript(context.messages());

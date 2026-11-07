@@ -1232,6 +1232,26 @@ pub(crate) fn cache_fingerprint(
 }
 
 fn log_prompt_cache_shape(messages: &[Message], tools: Option<&[ToolDefinition]>) {
+    // 完整模型可见 prompt 指纹只在调试级别计算：它要序列化全部 parts/tool calls/
+    // reasoning，生产默认不付这份开销；记录的内容只有摘要、数量与稳定段标记。
+    if tracing::enabled!(target: "echo_agent::prompt_cache", tracing::Level::DEBUG) {
+        let tools = tools.unwrap_or(&[]);
+        let full = echo_core::llm::cache::full_prompt_fingerprint(messages, tools);
+        let layout = echo_core::llm::cache::PromptCacheLayout::from_messages(messages, tools);
+        tracing::debug!(
+            target: "echo_agent::prompt_cache",
+            prompt_hash = %full.prompt_hash,
+            tools_schema_hash = %full.tools_schema_hash,
+            system_hash = %full.system_hash,
+            history_hash = %full.history_hash,
+            dynamic_hash = %full.dynamic_hash,
+            message_count = full.message_count,
+            tool_count = full.tool_count,
+            history_messages = layout.history.len(),
+            dynamic_messages = layout.dynamic.len(),
+            "LLM full prompt cache fingerprint"
+        );
+    }
     let fingerprint = cache_fingerprint(messages, tools);
     let leading_system_messages = messages
         .iter()

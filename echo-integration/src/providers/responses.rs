@@ -269,6 +269,7 @@ impl ResponsesClient {
                 json!(user_id),
             );
         }
+        echo_core::llm::cache::wire::log_wire_prompt(&body, "responses");
         Ok(body)
     }
 }
@@ -7528,5 +7529,21 @@ mod responses_late_source_projection_r03_tests {
             .await
             .map_err(|_| invalid_response("HTTP fixture timeout"))??;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod cache_prefix_wire_contract {
+    use super::*;
+    #[test]
+    fn three_growing_prompts_keep_wire_prefix() -> Result<()> {
+        let client = ResponsesClient::new(LlmConfig::for_provider(
+            "openai",
+            "https://api.openai.com/v1",
+            "synthetic",
+            "gpt-4.1",
+            echo_core::llm::LlmApiProtocol::Responses,
+        )?)?;
+        super::super::assert_cache_wire_growth(|request| client.request_body(request, false))
     }
 }

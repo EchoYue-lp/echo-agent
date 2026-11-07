@@ -2128,10 +2128,10 @@ mod tests {
             _context: &ProjectionContext,
         ) -> BoxFuture<'_, Result<Vec<ContextProjection>>> {
             Box::pin(async {
-                Ok(vec![ContextProjection {
-                    marker: "routing-test".to_string(),
-                    message: Some(Message::user("required routing projection".to_string())),
-                }])
+                Ok(vec![ContextProjection::replacing(
+                    "routing-test",
+                    Some(Message::user("required routing projection".to_string())),
+                )])
             })
         }
     }

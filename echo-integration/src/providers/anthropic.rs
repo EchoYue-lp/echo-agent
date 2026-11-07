@@ -362,8 +362,10 @@ impl AnthropicClient {
         let mut system_parts: Vec<String> = Vec::new();
         let mut messages: Vec<AnthropicMessage> = Vec::new();
         let mut pending_tools = std::collections::HashSet::new();
+        // 多个 Core tool_result 可合成一条 wire User，断点必须经过同一转换映射。
+        let mut source_to_wire = vec![None; request.messages.len()];
 
-        for msg in &request.messages {
+        for (source_index, msg) in request.messages.iter().enumerate() {
             if msg.is_provider_response_observation_only() {
                 continue;
             }
@@ -433,6 +435,9 @@ impl AnthropicClient {
                         content: AnthropicContent::Blocks(vec![result]),
                     });
                 }
+                if let Some(target) = source_to_wire.get_mut(source_index) {
+                    *target = messages.len().checked_sub(1);
+                }
                 continue;
             }
             if !pending_tools.is_empty() {
@@ -485,6 +490,9 @@ impl AnthropicClient {
                     role: "assistant".into(),
                     content: AnthropicContent::Blocks(blocks),
                 });
+                if let Some(target) = source_to_wire.get_mut(source_index) {
+                    *target = messages.len().checked_sub(1);
+                }
                 continue;
             }
 
@@ -518,6 +526,9 @@ impl AnthropicClient {
                     role: "assistant".to_string(),
                     content: AnthropicContent::Blocks(blocks),
                 });
+                if let Some(target) = source_to_wire.get_mut(source_index) {
+                    *target = messages.len().checked_sub(1);
+                }
                 continue;
             }
 
@@ -569,6 +580,9 @@ impl AnthropicClient {
                 role: msg.role.as_str().to_string(),
                 content,
             });
+            if let Some(target) = source_to_wire.get_mut(source_index) {
+                *target = messages.len().checked_sub(1);
+            }
         }
 
         // ── Cache breakpoint strategy (delegated to AnthropicCachePlan) ──
@@ -583,6 +597,9 @@ impl AnthropicClient {
 
         let tools_ref: &[echo_core::llm::types::ToolDefinition] =
             request.tools.as_deref().unwrap_or(&[]);
+        let layout =
+            echo_core::llm::cache::PromptCacheLayout::from_messages(&request.messages, tools_ref);
+        let history_start = layout.segment_ranges().history.start;
         let cache_plan = if let Some(ref hints) = request.cache_hints
             && !hints.breakpoints.is_empty()
         {
@@ -609,10 +626,6 @@ impl AnthropicClient {
             // WITHOUT this fallback the main path would place ZERO cache_control
             // (has_system/tool=false, history_breakpoint_count=0) and Anthropic
             // would never cache the stable prefix on the highest-volume path.
-            let layout = echo_core::llm::cache::PromptCacheLayout::from_messages(
-                &request.messages,
-                tools_ref,
-            );
             AnthropicCachePlan::from_layout(&layout)
         };
 
@@ -666,7 +679,13 @@ impl AnthropicClient {
                         .breakpoints
                         .iter()
                         .filter_map(|bp| match bp {
-                            echo_core::llm::cache::BreakpointTarget::HistoryIndex(i) => Some(*i),
+                            echo_core::llm::cache::BreakpointTarget::HistoryIndex(i) => {
+                                history_start
+                                    .checked_add(*i)
+                                    .and_then(|source| source_to_wire.get(source))
+                                    .copied()
+                                    .flatten()
+                            }
                             echo_core::llm::cache::BreakpointTarget::HistoryLastStable => {
                                 messages.iter().rposition(|msg| !msg.is_runtime_context())
                             }
@@ -693,7 +712,7 @@ impl AnthropicClient {
                 }
             }
         }
-        Ok(AnthropicRequest {
+        let body = AnthropicRequest {
             model: self.model.clone(),
             max_tokens,
             system,
@@ -707,7 +726,13 @@ impl AnthropicClient {
             metadata: request.user_id.as_ref().map(|uid| AnthropicMetadata {
                 user_id: uid.clone(),
             }),
-        })
+        };
+        if tracing::enabled!(tracing::Level::DEBUG)
+            && let Ok(value) = serde_json::to_value(&body)
+        {
+            echo_core::llm::cache::wire::log_wire_prompt(&value, "anthropic");
+        }
+        Ok(body)
     }
 
     fn convert_response(&self, resp: AnthropicResponse) -> Result<ChatResponse> {
@@ -1670,7 +1695,9 @@ fn apply_conversation_cache_breakpoints(
 }
 
 fn is_runtime_context_text(text: &str) -> bool {
-    text.trim_start().starts_with("[runtime_context:")
+    // 共享框架元数据判据：投影信封带 version 的追加式事实与既有 runtime_context
+    // 尾注都属于"可变尾段"，缓存断点不得落在它们后面。
+    echo_core::compression::is_dynamic_context_text(text)
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -3275,3 +3302,127 @@ mod metadata_tests;
 #[cfg(test)]
 #[path = "anthropic_tool_result_default_tests.rs"]
 mod tool_result_default_tests;
+
+#[cfg(test)]
+mod cache_prefix_wire_contract {
+    use super::*;
+    #[test]
+    fn explicit_history_breakpoints_cover_native_and_tool_assistants() -> Result<()> {
+        use echo_core::llm::cache::{BreakpointTarget, CacheHints};
+        use echo_core::llm::types::{FunctionCall, ToolCall};
+        let client = AnthropicClient::new("synthetic", "claude-sonnet-4-5");
+        let native = client
+            .convert_response(AnthropicResponse(serde_json::json!({
+                "id":"native-source", "content":[
+                    {"type":"thinking","thinking":"signed reasoning","signature":"signature"},
+                    {"type":"text","text":"native answer"}
+                ], "stop_reason":"end_turn"
+            })))?
+            .message;
+        let mut with_tools = Message::assistant_with_tools(vec![ToolCall {
+            id: "call".into(),
+            call_type: "function".into(),
+            provider_source: None,
+            function: FunctionCall {
+                name: "lookup".into(),
+                arguments: "{}".into(),
+            },
+        }]);
+        with_tools.content = MessageContent::Text("tool preamble".into());
+        for (assistant, result) in [
+            (native, None),
+            (
+                with_tools,
+                Some(Message::tool_result(
+                    "call".into(),
+                    "lookup".into(),
+                    "result".into(),
+                )),
+            ),
+        ] {
+            let mut messages = vec![
+                Message::system("fixed".into()),
+                Message::user("question".into()),
+                assistant,
+            ];
+            messages.extend(result);
+            let request = ChatRequest {
+                messages,
+                cache_hints: Some(CacheHints {
+                    breakpoints: vec![BreakpointTarget::HistoryIndex(1)],
+                    ..Default::default()
+                }),
+                ..Default::default()
+            };
+            let body = serde_json::to_value(client.convert_request(&request)?)?;
+            let assistant = body
+                .pointer("/messages/1")
+                .ok_or_else(|| LlmError::InvalidResponse("missing mapped assistant".into()))?;
+            assert!(
+                assistant.to_string().contains("cache_control"),
+                "explicit source assistant breakpoint must survive conversion"
+            );
+        }
+        Ok(())
+    }
+    #[test]
+    fn coalesced_tool_results_do_not_move_breakpoint_to_dynamic_tail() -> Result<()> {
+        use echo_core::llm::types::{FunctionCall, ToolCall};
+        let client = AnthropicClient::new("synthetic", "claude-sonnet-4-5");
+        let calls = (0..4)
+            .map(|index| ToolCall {
+                id: format!("call-{index}"),
+                call_type: "function".into(),
+                provider_source: None,
+                function: FunctionCall {
+                    name: "lookup".into(),
+                    arguments: "{}".into(),
+                },
+            })
+            .collect();
+        let mut messages = vec![
+            Message::system("fixed".into()),
+            Message::user("question".into()),
+            Message::assistant_with_tools(calls),
+        ];
+        for index in 0..4 {
+            messages.push(Message::tool_result(
+                format!("call-{index}"),
+                "lookup".into(),
+                "result".into(),
+            ));
+        }
+        messages.push(Message::assistant("answer".into()));
+        messages.push(Message::user(
+            "<echo-agent-context-projection-v2>\nmarker=\"facts\"\nplacement=tail\nversion=\"2\"\n\nnew facts".into(),
+        ));
+        let request = ChatRequest::new(messages);
+        let body = serde_json::to_value(client.convert_request(&request)?)?;
+        let messages = body
+            .get("messages")
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| LlmError::InvalidResponse("missing wire messages".into()))?;
+        assert_eq!(messages.len(), 5, "four tool results must coalesce");
+        let tail = messages
+            .last()
+            .ok_or_else(|| LlmError::InvalidResponse("missing dynamic tail".into()))?;
+        assert!(
+            !tail.to_string().contains("cache_control"),
+            "breakpoints must precede dynamic facts"
+        );
+        assert!(
+            messages
+                .iter()
+                .take(4)
+                .any(|message| message.to_string().contains("cache_control"))
+        );
+        Ok(())
+    }
+    #[test]
+    fn three_growing_prompts_keep_wire_prefix() -> Result<()> {
+        let client = AnthropicClient::new("synthetic", "claude-sonnet-4-5");
+        super::super::assert_cache_wire_growth(|request| {
+            serde_json::to_value(client.convert_request(request)?).map_err(Into::into)
+        })
+    }
+}

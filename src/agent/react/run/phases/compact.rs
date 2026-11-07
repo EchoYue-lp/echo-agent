@@ -281,10 +281,10 @@ mod tests {
                 context.iteration
             );
             Box::pin(async move {
-                Ok(vec![ContextProjection {
-                    marker: "<changing_projection>".to_string(),
-                    message: Some(Message::user(content)),
-                }])
+                Ok(vec![ContextProjection::replacing(
+                    "<changing_projection>",
+                    Some(Message::user(content)),
+                )])
             })
         }
     }
@@ -301,10 +301,10 @@ mod tests {
             let call = self.calls.fetch_add(1, Ordering::SeqCst);
             Box::pin(async move {
                 if call == 0 {
-                    Ok(vec![ContextProjection {
-                        marker: "failure-test".to_string(),
-                        message: Some(Message::user("projection before failure".to_string())),
-                    }])
+                    Ok(vec![ContextProjection::replacing(
+                        "failure-test",
+                        Some(Message::user("projection before failure".to_string())),
+                    )])
                 } else {
                     Err(crate::error::ReactError::Other(
                         "projection unavailable".to_string(),

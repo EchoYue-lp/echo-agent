@@ -338,16 +338,29 @@ mod tests {
     }
 
     #[test]
-    fn from_parent_ignores_runtime_context_and_projection_messages() {
+    fn from_parent_ignores_runtime_context_and_projection_messages() -> Result<(), serde_json::Error>
+    {
         let mut projected = crate::compression::ContextManager::builder(4096).build();
         projected.push(Message::user("用户请求：核对并发问题 🧭".to_string()));
-        projected.apply_projections(&[crate::compression::ContextProjection {
-            marker: "test:turn-contract".to_string(),
-            message: Some(Message::user("English runtime contract".to_string())),
-        }]);
+        projected.apply_projections(&[crate::compression::ContextProjection::replacing(
+            "test:turn-contract",
+            Some(Message::user("English runtime contract".to_string())),
+        )]);
         projected.push(Message::user(
             "[runtime_context:task-runtime]\ninternal state".to_string(),
         ));
+
+        // 已发布 v1 只有 marker 头；新 Tail 双版本与旧信封均不是用户意图。
+        projected.push(Message::user(
+            "<echo-agent-context-projection-v1>\nmarker=\"legacy-runtime\"\nlegacy state".into(),
+        ));
+        for version in ["parent-v1", "parent-v2"] {
+            projected.apply_projections(&[crate::compression::ContextProjection::versioned(
+                "test:runtime-facts",
+                version,
+                Some(Message::user(format!("parent-only runtime {version}"))),
+            )]);
+        }
 
         let ctx = SubagentContext::from_parent(
             &[],
@@ -362,6 +375,58 @@ mod tests {
         );
         assert!(ctx.messages.is_empty());
         assert!(ctx.store.is_none());
+
+        let before = projected.messages().to_vec();
+        let fork = SubagentContext::from_parent(
+            &[],
+            projected.messages(),
+            None,
+            &ContextInheritance {
+                inherit_history: Some(0),
+                ..ContextInheritance::fork_default()
+            },
+        );
+        assert_eq!(fork.parent_goal.as_deref(), ctx.parent_goal.as_deref());
+        // 原 prompt compiler 在生成子提示词前过滤继承快照；from_parent 只搬运快照。
+        let inherited = crate::agent::subagent::filter_history(&fork.messages, None);
+        assert_eq!(inherited.len(), 1);
+        assert_eq!(
+            inherited
+                .first()
+                .and_then(|message| message.content.as_text_ref()),
+            Some("用户请求：核对并发问题 🧭"),
+        );
+        let mut child = crate::compression::ContextManager::builder(4096).build();
+        for message in inherited {
+            child.push(message);
+        }
+        // 故意复用父层最新 marker/version，证明子层不会继承父层去重状态。
+        let facts = crate::compression::ContextProjection::versioned(
+            "test:runtime-facts",
+            "parent-v2",
+            Some(Message::user("child-only runtime".into())),
+        );
+        child.apply_projections(std::slice::from_ref(&facts));
+        let child_count = child.messages().len();
+        child.apply_projections(std::slice::from_ref(&facts));
+        assert_eq!(child.messages().len(), child_count);
+        assert!(child.messages().iter().any(|message| {
+            message
+                .content
+                .as_text_ref()
+                .is_some_and(|text| text.contains("child-only runtime"))
+        }));
+        assert!(!child.messages().iter().any(|message| {
+            message
+                .content
+                .as_text_ref()
+                .is_some_and(|text| text.contains("parent-only runtime"))
+        }));
+        assert_eq!(
+            serde_json::to_value(projected.messages())?,
+            serde_json::to_value(&before)?,
+        );
+        Ok(())
     }
 
     #[test]

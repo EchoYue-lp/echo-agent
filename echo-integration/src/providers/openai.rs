@@ -437,6 +437,7 @@ impl OpenAiClient {
             ChatFileDialect::TextOnly
         };
         normalize_wire_parts(&mut body, dialect)?;
+        echo_core::llm::cache::wire::log_wire_prompt(&body, "chat");
         Ok(body)
     }
 
@@ -963,5 +964,21 @@ mod tests {
 
     mod legacy_api_tests {
         include!("openai_legacy_api_tests.rs");
+    }
+}
+
+#[cfg(test)]
+mod cache_prefix_wire_contract {
+    use super::*;
+    #[test]
+    fn three_growing_prompts_keep_wire_prefix() -> Result<()> {
+        let client = OpenAiClient::new(LlmConfig::for_provider(
+            "openai",
+            "https://api.openai.com/v1",
+            "synthetic",
+            "gpt-4.1",
+            echo_core::llm::LlmApiProtocol::ChatCompletions,
+        )?)?;
+        super::super::assert_cache_wire_growth(|request| client.request_body(request, false))
     }
 }

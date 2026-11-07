@@ -54,6 +54,10 @@ Journal 通常适合承担“已经发生的领域事实”。当前状态、列
 
 ## Checkpoint：稳定边界的状态快照
 
+模型上下文中的版本投影随原 checkpoint 消息信封保存，恢复后仍可按最新版本去重；
+旧版可压缩、最新版受保护，失效以追加版本表达。它是派生上下文，不是新的状态权威。
+固定规则和协议诊断边界见 [ADR 0108](../adr/0108-versioned-context-projections.md)。
+
 ### Reducer checkpoint
 
 `CheckpointedReducer` 将 Journal 事件 fold 为状态，并通过 `CheckpointStore<S>` 保存：

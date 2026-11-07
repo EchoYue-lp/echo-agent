@@ -693,10 +693,15 @@ impl ReactAgent {
             WORKSPACE_CONTEXT_PROJECTION,
             (!ws_block.trim().is_empty()).then(|| runtime_context_note("workspace", &ws_block)),
         );
-        context.replace_tail_projection(
-            TURN_MEMORY_CONTEXT_PROJECTION,
-            memory_context.map(|body| runtime_context_note("memory", body.as_str())),
-        );
+        // 召回是运行事实；无召回须显式失效，避免上回合的快照继续作为当前状态。
+        let note = memory_context.map(|body| runtime_context_note("memory", body.as_str()));
+        let version = crate::compression::projection_content_version(&[
+            if note.is_some() { "present" } else { "cleared" },
+            note.as_ref()
+                .and_then(|message| message.content.as_text_ref())
+                .unwrap_or_default(),
+        ]);
+        context.append_versioned_projection(TURN_MEMORY_CONTEXT_PROJECTION, version, note);
         for message in history {
             context.push(message.clone());
         }
@@ -783,10 +788,15 @@ impl ReactAgent {
             WORKSPACE_CONTEXT_PROJECTION,
             (!ws_block.trim().is_empty()).then(|| runtime_context_note("workspace", &ws_block)),
         );
-        context.replace_tail_projection(
-            TURN_MEMORY_CONTEXT_PROJECTION,
-            memory_context.map(|body| runtime_context_note("memory", body.as_str())),
-        );
+        // 召回是运行事实；无召回须显式失效，避免上回合的快照继续作为当前状态。
+        let note = memory_context.map(|body| runtime_context_note("memory", body.as_str()));
+        let version = crate::compression::projection_content_version(&[
+            if note.is_some() { "present" } else { "cleared" },
+            note.as_ref()
+                .and_then(|message| message.content.as_text_ref())
+                .unwrap_or_default(),
+        ]);
+        context.append_versioned_projection(TURN_MEMORY_CONTEXT_PROJECTION, version, note);
         for history_message in history {
             context.push(history_message.clone());
         }

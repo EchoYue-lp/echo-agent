@@ -4612,10 +4612,10 @@ async fn canonical_root_agent_refresh_and_setters_keep_derived_system_and_scope(
         context.set_messages(messages);
         context.apply_projection_scope(
             "root-agent-test",
-            &[crate::compression::ContextProjection {
-                marker: "retained-root-scope".to_string(),
-                message: Some(Message::user("protected source".to_string())),
-            }],
+            &[crate::compression::ContextProjection::replacing(
+                "retained-root-scope",
+                Some(Message::user("protected source".to_string())),
+            )],
         );
     }
     crate::agent::Agent::set_system_prompt(&agent, "trait root");
