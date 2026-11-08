@@ -430,8 +430,40 @@ impl WeixinApi {
             .poll_observation_recorded
             .swap(true, std::sync::atomic::Ordering::Relaxed)
         {
-            tracing::info!(target:"echo::weixin_poll_observation",diagnostic=%poll_observation(http_status,bytes),"Weixin poll protocol shape");
+            // 使用宿主默认可见的既有窄域；不继承可能携带调用者正文/凭据的span。
+            tracing::info!(target:"echo_agent::channels::weixin::poll_observation",parent:None,diagnostic=%poll_observation(http_status,bytes),"Weixin poll protocol shape");
         }
+    }
+}
+
+/// 仅分类既有错误类型及本模块固定协议错误，不输出或改变原错误。
+/// HTTP/decode固定文案已在原producer消除了URL/body；未知文案不参与业务判断。
+pub(super) fn poll_failure_class(error: &echo_core::error::ReactError) -> &'static str {
+    use echo_core::error::{ChannelError, ReactError};
+    match error {
+        ReactError::Io(error) if error.kind() == std::io::ErrorKind::TimedOut => "timeout",
+        ReactError::Channel(error) => match error.as_ref() {
+            ChannelError::Other(message)
+                if message == "Weixin HTTPS response has a non-success status" =>
+            {
+                "http"
+            }
+            ChannelError::Other(message)
+                if message == "Weixin HTTPS response has an invalid protocol payload" =>
+            {
+                "decode"
+            }
+            ChannelError::Other(message)
+                if matches!(
+                    message.as_str(),
+                    "Weixin HTTPS request failed" | "Weixin HTTPS response was interrupted"
+                ) =>
+            {
+                "transport"
+            }
+            _ => "protocol",
+        },
+        _ => "protocol",
     }
 }
 
@@ -532,6 +564,33 @@ mod tests {
             request,
             server,
         })
+    }
+
+    #[tokio::test]
+    async fn actual_http_and_decode_poll_failures_keep_safe_classes_and_original_errors()
+    -> Result<()> {
+        for (status, body, expected) in [
+            ("403 Forbidden", "private-response-secret", "http"),
+            ("200 OK", "private-invalid-json-secret", "decode"),
+        ] {
+            let HttpFixture {
+                api,
+                request,
+                server,
+            } = local_response(status, body).await?;
+            let result: Result<UpdatesResponse> = api.execute_json(request).await;
+            server
+                .await
+                .map_err(|_| protocol_error("fixture server join failed"))??;
+            let error = result
+                .err()
+                .ok_or_else(|| protocol_error("original response unexpectedly accepted"))?;
+            assert_eq!(poll_failure_class(&error), expected);
+            assert!(matches!(&error, echo_core::error::ReactError::Channel(_)));
+            let text = error.to_string();
+            assert!(!text.contains(body) && !text.contains("query-secret"));
+        }
+        Ok(())
     }
 
     #[tokio::test]
@@ -912,5 +971,34 @@ mod bounded_poll_diagnostic_tests {
                 .swap(true, std::sync::atomic::Ordering::Relaxed)
         );
         Ok(())
+    }
+
+    #[test]
+    fn poll_failure_class_preserves_typed_timeout_and_never_exposes_unknown_error_text() {
+        let timeout = echo_core::error::ReactError::Io(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "private-timeout-secret",
+        ));
+        assert_eq!(poll_failure_class(&timeout), "timeout");
+        assert!(matches!(&timeout, echo_core::error::ReactError::Io(error)
+            if error.kind() == std::io::ErrorKind::TimedOut));
+        assert_eq!(
+            poll_failure_class(&protocol_error("private-protocol-secret")),
+            "protocol"
+        );
+        let unknown_io: echo_core::error::ReactError = std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "private-non-timeout-io-secret",
+        )
+        .into();
+        assert_eq!(poll_failure_class(&unknown_io), "protocol");
+        assert!(
+            matches!(&unknown_io, echo_core::error::ReactError::Io(error)
+            if error.kind() == std::io::ErrorKind::PermissionDenied)
+        );
+        assert_eq!(
+            poll_failure_class(&protocol_error("Weixin HTTPS request failed")),
+            "transport"
+        );
     }
 }

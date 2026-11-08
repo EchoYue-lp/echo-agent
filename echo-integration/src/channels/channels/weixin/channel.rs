@@ -603,11 +603,14 @@ async fn poll_loop(
         };
         let updates = match updates {
             Ok(updates) => updates,
-            Err(_) => {
+            Err(error) => {
                 transport.publish(
                     ChannelTransportPhase::Disconnected,
                     None,
-                    Some("Weixin poll failed; cursor unchanged".into()),
+                    Some(format!(
+                        "Weixin poll failed ({}); cursor unchanged",
+                        super::api::poll_failure_class(&error)
+                    )),
                 );
                 tokio::select! { _ = cancel.cancelled() => break, _ = tokio::time::sleep(Duration::from_secs(2)) => {} }
                 continue;
