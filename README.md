@@ -227,7 +227,7 @@ echo-agent ships with **67 registered tools** across 8 crates. The prelude expos
 | **MCP Protocol** | Connect any MCP server (stdio / SSE / HTTP) | `mcp.connect(McpServerConfig::stdio(...))` |
 | **Skill System** | Progressive disclosure: discover → activate → use | `agent.load_skill("web_research")` |
 | **IM Channels** | QQ Bot (WebSocket) & Feishu (Webhook) built-in | `ChannelManager::new()` |
-| **Web Tools** | Search (DuckDuckGo/Brave/Tavily) + Page Fetch | `WebSearchTool::auto()` |
+| **Web Tools** | 搜索（Exa/DuckDuckGo/Brave/Tavily）+ 独立网页获取 | `WebSearchTool::auto()` |
 | **Research Tools** | ArXiv, Semantic Scholar, PDF fetch, BibTeX generation | `ArxivSearchTool` |
 | **Media Tools** | PDF, Excel, Word, multimodal image viewing | `ViewImageTool` |
 | **Data Tools** | Polars-powered filter, aggregate, transform, stats | `DataReadTool` |
@@ -861,7 +861,7 @@ fn main() -> echo_agent::error::Result<()> {
         .model("qwen3.7-max")
         .build()?;
 
-    // Auto-select best provider: Tavily > Brave > DuckDuckGo
+    // 构造时选择：非空EXA_API_KEY优先Exa > Tavily > Brave > DuckDuckGo，失败不换引擎
     agent.add_tool(Box::new(WebSearchTool::auto()));
     agent.add_tool(Box::new(WebFetchTool::new()));
     Ok(())
@@ -873,6 +873,7 @@ fn main() -> echo_agent::error::Result<()> {
 | DuckDuckGo | Free | Medium | HTML scraping, no API key needed |
 | Brave | Free 2k/mo | High | Official API |
 | Tavily | Paid (free tier) | Highest | AI-optimized for agents |
+| Exa | API 额度 | 搜索摘要 | `EXA_API_KEY`；highlights 作为 snippet |
 
 ### 21. Self-Review — Quality critique as a tool
 

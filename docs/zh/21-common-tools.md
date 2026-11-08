@@ -52,6 +52,7 @@ agent.add_tool(Box::new(WebSearchTool::auto()));
 
 `auto()` 的 provider 选择顺序：
 
+- `EXA_API_KEY`（非空）-> Exa
 - `TAVILY_API_KEY` -> Tavily
 - `BRAVE_SEARCH_API_KEY` -> Brave
 - 否则 DuckDuckGo

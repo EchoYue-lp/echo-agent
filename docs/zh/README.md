@@ -54,7 +54,7 @@
 | ------------------------------------------------- | ---------------------- | ---------------------------------------------------------------------------------------------------------- |
 | [17 - Graph Workflow](17-graph-workflow.md)       | 图工作流               | LangGraph 风格、SharedState、条件边、fan-out/fan-in                                                        |
 | [18 - Guard 系统](18-guard-system.md)             | 护栏系统               | RuleGuard、LlmGuard、输入/输出过滤                                                                         |
-| [20 - Web 工具](20-web-tools.md)                  | Web 搜索 / 网页获取    | DuckDuckGo / Brave / Tavily 搜索、HTML→文本                                                                |
+| [20 - Web 工具](20-web-tools.md)                  | Web 搜索 / 网页获取    | DuckDuckGo / Brave / Tavily / Exa 搜索、HTML→文本                                                                |
 | [21 - 常用工具速查](21-common-tools.md)           | Tool Guide             | Web 搜索、网页抓取、浏览器自动化、数据工具                                                                 |
 | [22 - 论文检索工具](22-research-tools.md)         | Research               | ArXiv 搜索、Semantic Scholar、PDF 下载、BibTeX 生成                                                        |
 | [23 - Hooks 系统](23-hooks.md)                    | Hooks                  | Skills hooks（31 个事件、7 种动作）、Task hooks、Subagent hooks                                            |

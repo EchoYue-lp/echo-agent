@@ -1,12 +1,14 @@
 //! demo41_web_tools.rs —— Web 搜索 + 页面获取综合演示
 //!
 //! 展示 echo-agent 的 Web 工具能力：
-//! - DuckDuckGo / Brave / Tavily 三个搜索 Provider 独立演示
+//! - DuckDuckGo / Brave / Tavily / Exa 搜索 Provider 独立演示
 //! - WebSearchTool::auto() 自动选择策略
 //! - WebFetchTool: 获取网页内容并转换为可读文本
 //! - Agent 集成：让 LLM 自主决定何时搜索/获取
 //!
 //! # 运行方式
+//!
+//! 完整综合演示仍需 Brave、Tavily 与 LLM 配置；Exa 部分仅在配置 EXA_API_KEY 后运行。
 //!
 //! ```bash
 //! # DuckDuckGo（免费，无需 API Key）
@@ -18,6 +20,9 @@
 //! # Tavily（需 API Key）
 //! TAVILY_API_KEY=xxx cargo run -p echo-agent-learning --example demo41_web_tools --features web
 //!
+//! # Exa（EXA_API_KEY 配置后增加独立演示，并由 auto() 优先选择）
+//! EXA_API_KEY=xxx cargo run -p echo-agent-learning --example demo41_web_tools --features web
+//!
 //! # 多个 Key 同时配置时，auto() 自动选择最佳
 //! TAVILY_API_KEY=xxx BRAVE_SEARCH_API_KEY=xxx cargo run -p echo-agent-learning --example demo41_web_tools --features web
 //! ```
@@ -27,6 +32,7 @@ use echo_agent::prelude::*;
 use echo_agent::tools::web::providers::SearchProvider;
 use echo_agent::tools::web::providers::brave::BraveSearchProvider;
 use echo_agent::tools::web::providers::duckduckgo::DuckDuckGoProvider;
+use echo_agent::tools::web::providers::exa::ExaSearchProvider;
 use echo_agent::tools::web::providers::tavily::TavilyProvider;
 use echo_agent::tools::web::{WebFetchTool, WebSearchTool};
 
@@ -52,6 +58,7 @@ async fn main() -> echo_agent::error::Result<()> {
     demo_duckduckgo_search().await?;
     demo_brave_search().await?;
     demo_tavily_search().await?;
+    demo_exa_search().await?;
 
     // Part 5: 自动选择策略
     demo_auto_search().await?;
@@ -82,6 +89,11 @@ fn demo_provider_overview() {
             "Tavily",
             "AI 优化搜索，专为 Agent 设计",
             TavilyProvider::from_env().is_some(),
+        ),
+        (
+            "Exa",
+            "互联网搜索，highlights 映射为结果摘要",
+            ExaSearchProvider::from_env().is_some(),
         ),
     ];
 
@@ -157,11 +169,23 @@ async fn demo_tavily_search() -> echo_agent::error::Result<()> {
     Ok(())
 }
 
+async fn demo_exa_search() -> echo_agent::error::Result<()> {
+    let Some(provider) = ExaSearchProvider::from_env() else {
+        println!("Exa 独立演示：未配置 EXA_API_KEY，跳过\n");
+        return Ok(());
+    };
+    let results = provider.search("Rust programming language", 3).await?;
+    ensure_search_results("Exa", &results)?;
+    println!("Exa 搜索结果：\n");
+    print_results(&results);
+    Ok(())
+}
+
 // ── Part 5: 自动选择策略 ─────────────────────────────────────────────────────
 
 async fn demo_auto_search() -> echo_agent::error::Result<()> {
     println!("{}", "─".repeat(55));
-    println!("Part 5: 自动选择策略（Tavily > Brave > DuckDuckGo）\n");
+    println!("Part 5: 自动选择策略（Exa > Tavily > Brave > DuckDuckGo）\n");
 
     let query = "Rust async runtime tokio";
     println!("  搜索: \"{query}\"\n");
@@ -172,7 +196,7 @@ async fn demo_auto_search() -> echo_agent::error::Result<()> {
 
     let mut params = std::collections::HashMap::new();
     params.insert("query".to_string(), serde_json::json!(query));
-    params.insert("max_results".to_string(), serde_json::json!(3));
+    params.insert("limit".to_string(), serde_json::json!(3));
 
     let result = tool.execute(params).await?;
     if !result.success || result.output.trim().is_empty() {
@@ -182,6 +206,9 @@ async fn demo_auto_search() -> echo_agent::error::Result<()> {
         )));
     }
     println!("{}", result.output);
+    if let Some(cursor) = result.metadata.get("page.next_cursor") {
+        println!("续页保持相同 query/limit，传入 cursor={cursor}；本演示不自动请求下一页。");
+    }
     println!();
     Ok(())
 }

@@ -14,7 +14,7 @@ Domain tools for the [echo-agent](https://crates.io/crates/echo_agent) framework
 | `artifact` | Verified, paged reads of spilled tool output | sha2 |
 | `files` | Artifact reader plus FileRead, FileWrite, FileDelete, FileList, FileDiff, FileEdit, FileGlob, FileGrep | tree-sitter, encoding_rs |
 | `shell` | ShellTool (sandboxed command execution) | none |
-| `web` | WebFetchTool, WebSearchTool, WebExtractTool + 3 search providers | scraper, html2text, url |
+| `web` | WebFetchTool、WebSearchTool、WebExtractTool + 4个搜索provider（Exa/Brave/Tavily/DuckDuckGo） | scraper, html2text, url |
 | `media` | ImageFetch, WebFetchEnhanced, PDF, Word, Excel | lopdf, calamine, docx-rs |
 | `chart` | ChartTool (vega-lite) | — |
 | `data` | DataTool (polars-based analysis) | polars |
