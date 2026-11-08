@@ -1,5 +1,11 @@
 # echo-agent AGENTS.md
 
+## 2026-11-09 本次整合交付范围
+
+用户要求全部既有开发成果合入本仓 `main`，交付时仅保留主分支；`echo-agent-learning` 是本 workspace 的学习子项目，随框架一同验证、交付。经功能核对的 Exa 既有分支属于本次范围，覆盖旧迭代排除 Exa、保留 baseline 分支的限定；固定历史 tag 和必要恢复证据保留。
+
+仍在任务分支通过适用本地门禁后 PR squash 合入 main，并核验精确 main CI；核对旧分支功能覆盖与最新远端 tip 后再清理。本次不扩张下文精确依赖风险接受，不以源码或 CI 通过代替消费者 GUI、真实 Provider 或手机验收。
+
 ## 当前 GUI 消费者名称：Eclip
 
 用户于 2026-11-06 明确纠正 GUI 产品名为 **Eclip**。本文件中 EKO 为同一应用的历史称呼；新增对外产品说明使用 Eclip，原产品边界与退役裁决不变。框架保持产品无关，产品 HTTP 身份由宿主注入，不在 framework 硬编码 Eclip 品牌。`EKO_*`、`.eko`、`EkoConfig` 等既有技术标识不因品牌修正而自动迁移。
