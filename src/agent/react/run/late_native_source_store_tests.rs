@@ -578,10 +578,7 @@ async fn reject_foreign_observation(config: &LlmConfig, history: &[Message]) -> 
 
 #[tokio::test]
 async fn responses_late_native_source_survives_react_file_cold_and_next_http_once() -> Result<()> {
-    let base = std::env::var_os("EKO_CONSUMER_TEST_ROOT")
-        .map(std::path::PathBuf::from)
-        .ok_or_else(|| error("EKO_CONSUMER_TEST_ROOT must point inside the main workspace"))?;
-    std::fs::create_dir_all(&base)?;
+    let base = super::consumer_test_artifacts::root()?;
     let directory = tempfile::Builder::new()
         .prefix("late-native-root-")
         .tempdir_in(base)?;

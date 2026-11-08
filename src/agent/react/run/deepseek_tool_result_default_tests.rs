@@ -120,12 +120,7 @@ async fn child(streaming: bool, fail: bool) -> Result<()> {
         "tool_calls":[{"id":"history-call","type":"function","function":{"name":"ordinary","arguments":"{}"}}]}))
         .map_err(|error|ReactError::Other(error.to_string()))?,
         crate::llm::types::Message::tool_result("history-call".into(),"ordinary".into(),"known historical ordinary result".into())];
-    let root = std::env::var_os("EKO_CONSUMER_TEST_ROOT")
-        .map(std::path::PathBuf::from)
-        .ok_or_else(|| {
-            ReactError::Other("EKO_CONSUMER_TEST_ROOT must name the task runtime directory".into())
-        })?;
-    std::fs::create_dir_all(&root).map_err(|error| ReactError::Other(error.to_string()))?;
+    let root = super::consumer_test_artifacts::root()?;
     let directory =
         tempfile::tempdir_in(root).map_err(|error| ReactError::Other(error.to_string()))?;
     let conversations = Arc::new(crate::memory::FileConversationStore::new(
@@ -379,11 +374,8 @@ async fn parent(name: &str, fail: bool) -> Result<()> {
             .env_remove("ALL_PROXY")
             .env_remove("all_proxy")
             .kill_on_drop(true);
-        let root = std::env::var_os("EKO_CONSUMER_TEST_ROOT")
-            .map(std::path::PathBuf::from)
-            .ok_or_else(|| {
-                ReactError::Other("EKO_CONSUMER_TEST_ROOT is required for diagnostics".into())
-            })?;
+        let root = super::consumer_test_artifacts::root()?;
+        command.env("EKO_CONSUMER_TEST_ROOT", &root);
         let stamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_err(|error| ReactError::Other(error.to_string()))?

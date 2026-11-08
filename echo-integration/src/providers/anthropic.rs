@@ -1718,8 +1718,8 @@ fn apply_conversation_cache_breakpoints(
 }
 
 fn is_runtime_context_text(text: &str) -> bool {
-    // 共享框架元数据判据：投影信封带 version 的追加式事实与既有 runtime_context
-    // 尾注都属于"可变尾段"，缓存断点不得落在它们后面。
+    // 仅合法 v2 Tail 信封属于追加式动态尾段；不能按裸 runtime_context 正文猜测。
+    // 与共享框架判据一致，缓存断点停在动态尾段之前。
     echo_core::compression::is_dynamic_context_text(text)
 }
 
@@ -2015,7 +2015,10 @@ mod tests {
             text_message("older turn"),
             text_message("middle turn"),
             text_message("current request"),
-            text_message("[runtime_context:turn]\nvolatile cwd and memory"),
+            text_message(&format!(
+                "{}\nmarker=\"runtime\"\nplacement=tail\nversion=\"test\"\n\n[runtime_context:turn]\nvolatile cwd and memory",
+                echo_core::compression::CONTEXT_PROJECTION_ENVELOPE_PREFIX
+            )),
         ];
 
         apply_conversation_cache_breakpoints(&mut messages, 2);
@@ -2026,6 +2029,22 @@ mod tests {
                 .get(3)
                 .is_some_and(|message| !has_cache_control(message))
         );
+    }
+
+    #[test]
+    fn conversation_cache_breakpoints_keep_bare_runtime_prefix_as_history() {
+        // 相同正文前缀不提供框架元数据，仍是可缓存历史，不能冒充 v2 Tail。
+        let mut messages = vec![
+            text_message("older turn"),
+            text_message("middle turn"),
+            text_message("current request"),
+            text_message("[runtime_context:turn]\nvolatile cwd and memory"),
+        ];
+
+        apply_conversation_cache_breakpoints(&mut messages, 2);
+
+        assert!(messages.get(2).is_some_and(has_cache_control));
+        assert!(messages.get(3).is_some_and(has_cache_control));
     }
 
     // ── stage4 P4.1: cache_user_id single-source ────────────────────────────

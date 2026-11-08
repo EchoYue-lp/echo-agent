@@ -4285,15 +4285,17 @@ async fn warm_chat_history_is_not_replaced_by_checkpoint() -> Result<(), String>
     Ok(())
 }
 
-// ── recall_long_term_memories injects into the current user turn ─────────────
+// ── recall_long_term_memories 的逐轮版本化上下文 ──────────────────────────────
 
-/// Recalled memories are dynamic per turn, so they must not be appended as
-/// permanent system messages where they destabilize the provider's prompt-cache
-/// prefix. The current turn owns one replaceable projection before the request.
+/// 召回事实使用 User 版本投影，不改稳定 System 前缀。后续无命中时追加显式清除，
+/// 旧值只作为历史保留，由原 compaction 回收，不在准备下一轮时回删已见消息。
 #[tokio::test]
 async fn recall_injects_memories_into_current_user_message() -> Result<(), String> {
+    use crate::agent::react::run::context::TURN_MEMORY_CONTEXT_PROJECTION;
     use crate::agent::react::run::types::StreamMode;
+    use crate::compression::projection_content_version;
     use crate::memory::InMemoryStore;
+    use echo_core::compression::context_projection_envelope;
     use echo_core::memory::{
         MemoryApproval, MemoryEvidence, MemoryEvidenceRole, MemoryMeta, MemoryProvenance,
         MemorySource, MemoryStatus, MemoryTrust, MemoryType, TypedMemoryValue,
@@ -4418,8 +4420,10 @@ async fn recall_injects_memories_into_current_user_message() -> Result<(), Strin
         "expected runtime context before current request so shared workspace context remains prefix-cacheable"
     );
 
+    let first_prefix_len = messages.len();
+    let first_prefix = serde_json::to_vec(messages).map_err(|error| error.to_string())?;
     drop(ctx);
-    agent
+    let recalled = agent
         .prepare_stream_context(
             StreamMode::Chat,
             "unrelated-query",
@@ -4430,24 +4434,102 @@ async fn recall_injects_memories_into_current_user_message() -> Result<(), Strin
         )
         .await
         .map_err(|error| error.to_string())?;
-    let ctx = agent.memory.context.lock().await;
-    let runtime_contexts: Vec<_> = ctx
-        .messages()
-        .iter()
-        .filter(|message| {
-            message
-                .text_content()
-                .is_some_and(|content| content.contains("[runtime_context:memory]"))
-        })
-        .collect();
-    assert!(
-        runtime_contexts.len() <= 1,
-        "turn runtime context must use latest-wins replacement"
+    assert_eq!(
+        recalled, 0,
+        "unrelated query must not recall the seeded fact"
     );
-    assert!(ctx.messages().iter().all(|message| {
-        message
-            .text_content()
-            .is_none_or(|content| !content.contains("user prefers Rust over Python"))
+    let ctx = agent.memory.context.lock().await;
+    let retained_prefix = ctx
+        .messages()
+        .get(..first_prefix_len)
+        .ok_or_else(|| "the previous turn prefix was removed".to_string())?;
+    assert_eq!(
+        serde_json::to_vec(retained_prefix).map_err(|error| error.to_string())?,
+        first_prefix,
+        "clearing current recall must preserve the complete previously seen prefix"
+    );
+
+    let memory_versions = |messages: &[Message]| {
+        messages
+            .iter()
+            .enumerate()
+            .filter_map(|(index, message)| {
+                let envelope = context_projection_envelope(message)?;
+                (envelope.marker().as_deref() == Some(TURN_MEMORY_CONTEXT_PROJECTION))
+                    .then(|| (index, envelope.version()))
+            })
+            .collect::<Vec<_>>()
+    };
+    let versions = memory_versions(ctx.messages());
+    assert_eq!(
+        versions.len(),
+        2,
+        "retain the old fact and one clear version"
+    );
+    let (clear_index, latest_version) = versions
+        .last()
+        .ok_or_else(|| "the explicit clear version is missing".to_string())?;
+    assert_eq!(*clear_index, first_prefix_len);
+    let cleared_version = projection_content_version(&["cleared", ""]);
+    assert_eq!(latest_version.as_deref(), Some(cleared_version.as_str()));
+    assert_eq!(
+        ctx.projection_version(TURN_MEMORY_CONTEXT_PROJECTION),
+        Some(cleared_version.as_str())
+    );
+    let clear_text = ctx
+        .messages()
+        .get(*clear_index)
+        .and_then(|message| message.text_content())
+        .ok_or_else(|| "the clear version has no text".to_string())?;
+    assert!(clear_text.contains("[runtime fact cleared]"));
+    assert!(clear_text.contains("historical only"));
+    assert!(!clear_text.contains("user prefers Rust over Python"));
+    assert!(
+        ctx.messages()
+            .get(clear_index.saturating_add(1))
+            .is_some_and(|message| message.role == Role::User
+                && message
+                    .text_content()
+                    .is_some_and(|content| content == "unrelated-query")),
+        "the newest clear version must precede the new query"
+    );
+
+    // 相同无命中再次准备：允许追加用户请求，不得重复物化清除版本或重写旧历史。
+    let second_prefix_len = ctx.messages().len();
+    let second_prefix = serde_json::to_vec(ctx.messages()).map_err(|error| error.to_string())?;
+    drop(ctx);
+    let recalled = agent
+        .prepare_stream_context(
+            StreamMode::Chat,
+            "unrelated-query",
+            &Default::default(),
+            None,
+            None,
+            None,
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+    assert_eq!(recalled, 0);
+    let ctx = agent.memory.context.lock().await;
+    let retained_prefix = ctx
+        .messages()
+        .get(..second_prefix_len)
+        .ok_or_else(|| "the prefix before repeated clear was removed".to_string())?;
+    assert_eq!(
+        serde_json::to_vec(retained_prefix).map_err(|error| error.to_string())?,
+        second_prefix
+    );
+    assert_eq!(memory_versions(ctx.messages()), versions);
+    assert_eq!(
+        ctx.projection_version(TURN_MEMORY_CONTEXT_PROJECTION),
+        Some(cleared_version.as_str())
+    );
+    assert_eq!(ctx.messages().len(), second_prefix_len.saturating_add(1));
+    assert!(ctx.messages().last().is_some_and(|message| {
+        message.role == Role::User
+            && message
+                .text_content()
+                .is_some_and(|content| content == "unrelated-query")
     }));
     Ok(())
 }

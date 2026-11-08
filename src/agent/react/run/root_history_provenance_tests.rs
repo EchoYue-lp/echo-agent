@@ -235,12 +235,7 @@ fn contains_key(value: &Value, key: &str) -> bool {
 
 async fn run_case(case: HistoryCase) -> Result<()> {
     for streaming in [false, true] {
-        let runtime_root = std::env::var_os("EKO_CONSUMER_TEST_ROOT")
-            .map(std::path::PathBuf::from)
-            .ok_or_else(|| {
-                err("EKO_CONSUMER_TEST_ROOT must name the main-workspace task runtime directory")
-            })?;
-        std::fs::create_dir_all(&runtime_root).map_err(err)?;
+        let runtime_root = super::consumer_test_artifacts::root()?;
         let directory = tempfile::tempdir_in(runtime_root).map_err(err)?.keep();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
@@ -544,10 +539,7 @@ async fn root_deepseek_opaque_history_keeps_signature_presence_and_file_cold_ord
         let signature_present =
             std::env::var("EKO_ROOT_DS_OPAQUE_SIGNATURE_PRESENT").map_err(err)? == "yes";
         let endpoint = std::env::var("EKO_ROOT_DS_OPAQUE_ENDPOINT").map_err(err)?;
-        let root = std::env::var_os("EKO_CONSUMER_TEST_ROOT")
-            .map(std::path::PathBuf::from)
-            .ok_or_else(|| err("EKO_CONSUMER_TEST_ROOT is required"))?;
-        std::fs::create_dir_all(&root).map_err(err)?;
+        let root = super::consumer_test_artifacts::root()?;
         let directory = tempfile::tempdir_in(root).map_err(err)?.keep();
         let config = LlmConfig::for_provider(
             "deepseek",
@@ -757,13 +749,10 @@ async fn root_deepseek_opaque_history_keeps_signature_presence_and_file_cold_ord
     }
     for streaming in [false, true] {
         for signature_present in [false, true] {
-            let root = std::env::var_os("EKO_CONSUMER_TEST_ROOT")
-                .map(std::path::PathBuf::from)
-                .ok_or_else(|| err("EKO_CONSUMER_TEST_ROOT required for subprocess diagnostics"))?;
-            std::fs::create_dir_all(&root).map_err(err)?;
+            let root = super::consumer_test_artifacts::root()?;
             let diagnostics = tempfile::Builder::new()
                 .prefix("root-deepseek-opaque-")
-                .tempdir_in(root)
+                .tempdir_in(&root)
                 .map_err(err)?
                 .keep();
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -806,6 +795,7 @@ async fn root_deepseek_opaque_history_keeps_signature_presence_and_file_cold_ord
             let stderr_path = diagnostics.join("child.stderr.log");
             command
                 .args(["--exact", &format!("{module}::{NAME}"), "--nocapture"])
+                .env("EKO_CONSUMER_TEST_ROOT", &root)
                 .env(
                     "EKO_ROOT_DS_OPAQUE_CHILD_MODE",
                     if streaming { "stream" } else { "nonstream" },

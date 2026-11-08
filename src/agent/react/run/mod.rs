@@ -30,6 +30,9 @@ pub(crate) use types::StreamMode;
 mod native_message_contract_tests;
 
 #[cfg(test)]
+mod consumer_test_artifacts;
+
+#[cfg(test)]
 mod json_object_runtime_gate_tests;
 
 #[cfg(test)]
