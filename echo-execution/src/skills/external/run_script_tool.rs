@@ -841,7 +841,9 @@ mod tests {
             })),
             ..echo_core::tools::ToolContext::default()
         };
-        assert!(which_exists("sh", Some(&context), 5).await?);
+        // 原夹具错误要求POSIX sh支持--version；本测试与Unix生产路径明确使用bash。
+        // 仍经原which_exists/物理owner探测，保持原5秒与资源生命周期断言。
+        assert!(which_exists("bash", Some(&context), 5).await?);
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         assert_eq!(capacity.available_permits(), 1);
         let tool = RunSkillScriptTool::new(Arc::new(RwLock::new(registry)));
