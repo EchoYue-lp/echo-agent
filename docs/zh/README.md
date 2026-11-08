@@ -1,5 +1,11 @@
 # echo-agent 文档
 
+> 具名退役：当前源码移除 A2A／LSP 的实现、feature、公开出口和专属示例；
+> ACP、MCP、channels、Task/Subagent、通用工具和存储菜单继续保留。
+> 旧插件 `lsp.yaml` 仅保留用户原件；当前prepare不probe、读取、冻结、hash或缓存它，不纳入generation身份、不生成LSP专属诊断，也不启动服务。见[ADR0105](../adr/0105-current-config-and-plugin-inputs.md)。
+> 源码同步不代表删后构建、最终锁、SDK正式新Git来源、native或发布资格已通过。
+> 边界和恢复锚点见[ADR0090](../adr/0090-a2a-lsp-retirement-contract.md)。
+
 > **English docs** → [docs/en/README.md](../en/README.md)
 
 ---
@@ -26,7 +32,7 @@
 
 | 文档                                       | 功能模块                 | 核心关键词                                                                      |
 | ------------------------------------------ | ------------------------ | ------------------------------------------------------------------------------- |
-| [01 - ReAct Agent](01-react-agent.md)      | 核心执行引擎             | Thought→Action→Observation、CoT、并行工具调用、回调                             |
+| [01 - ReAct Agent](01-react-agent.md)      | 核心执行引擎             | Thought→Action→Observation、原生消息、并行工具调用、回调                             |
 | [02 - 工具系统](02-tools.md)               | Tools                    | Tool trait、ToolManager、超时重试、并发限流                                     |
 | [03 - 记忆系统](03-memory.md)              | Memory                   | Store（长期）、RuntimeStateStore（运行时检查点）、ConversationStore（对话历史） |
 | [04 - 上下文压缩](04-compression.md)       | Compression              | SlidingWindow、Summary、Hybrid、ContextManager                                  |
@@ -48,7 +54,7 @@
 | ------------------------------------------------- | ---------------------- | ---------------------------------------------------------------------------------------------------------- |
 | [17 - Graph Workflow](17-graph-workflow.md)       | 图工作流               | LangGraph 风格、SharedState、条件边、fan-out/fan-in                                                        |
 | [18 - Guard 系统](18-guard-system.md)             | 护栏系统               | RuleGuard、LlmGuard、输入/输出过滤                                                                         |
-| [20 - Web 工具](20-web-tools.md)                  | Web 搜索 / 网页获取    | DuckDuckGo / Brave / Tavily 搜索、HTML→文本                                                                |
+| [20 - Web 工具](20-web-tools.md)                  | Web 搜索 / 网页获取    | DuckDuckGo / Brave / Tavily / Exa 搜索、HTML→文本                                                                |
 | [21 - 常用工具速查](21-common-tools.md)           | Tool Guide             | Web 搜索、网页抓取、浏览器自动化、数据工具                                                                 |
 | [22 - 论文检索工具](22-research-tools.md)         | Research               | ArXiv 搜索、Semantic Scholar、PDF 下载、BibTeX 生成                                                        |
 | [23 - Hooks 系统](23-hooks.md)                    | Hooks                  | Skills hooks（31 个事件、7 种动作）、Task hooks、Subagent hooks                                            |
@@ -64,7 +70,7 @@
 | 文档                                                 | 功能模块                                       | 核心关键词                                                               |
 | ---------------------------------------------------- | ---------------------------------------------- | ------------------------------------------------------------------------ |
 | [30 - ReAct 安全机制](30-react-safety.md)            | Loop Detection / Adaptive Compression          | 循环检测、5 级自适应压缩、Git Checkpoint                                 |
-| [31 - LSP 集成](31-lsp-integration.md)               | LSP                                            | Language Server Protocol、代码导航、诊断、rust-analyzer                  |
+| [31 - LSP退役与历史恢复](31-lsp-integration.md)               | 已退役能力                                      | 源码撤销边界、旧声明诊断与本机恢复锚点                  |
 | [32 - 插件系统](32-plugin-system.md)                 | Plugin                                         | PluginManifest、PluginRegistry、PluginScope、生命周期管理                |
 | [33 - Headless 模式](33-headless-mode.md)            | Headless                                       | 非交互执行、CI/CD 集成、JSON 输出、exit_code                             |
 | [34 - Git 隔离](34-git-isolation.md)                 | Git Worktree / Checkpoint                      | 并行子代理隔离、worktree 管理、文件操作回滚                              |
@@ -214,7 +220,6 @@ Anthropic Messages 或 Chat Completions，并声明文本、图片、音频、�
 | Subagent 编排           | `enable_subagent`                                        | `false` |
 | 长期记忆 (Store)        | `enable_memory`                                          | `false` |
 | 人工介入                | `enable_human_in_loop`                                   | `false` |
-| Chain-of-Thought 提示词 | `enable_cot`                                             | `true`  |
 | 上下文压缩              | 通过 `set_compressor()`                                  | 无      |
 | 线程持久化 / 恢复       | `conversation_id` + `state_store`（`RuntimeStateStore`） | 无      |
 | transcript/history 投影 | `conversation_id` + `ConversationStore`                  | 无      |
@@ -246,7 +251,6 @@ Anthropic Messages 或 Chat Completions，并声明文本、图片、音频、�
 | `echo-agent-learning/examples/demo18_semantic_memory.rs`      | Store 语义搜索（EmbeddingStore / 向量检索）                               |
 | `echo-agent-learning/examples/demo19_guard.rs`                | Guard 系统（规则 / LLM 内容过滤）                                         |
 | `echo-agent-learning/examples/demo20_audit.rs`                | 审计日志                                                                  |
-| `echo-agent-learning/examples/demo23_a2a.rs`                  | A2A 协议                                                                  |
 | `echo-agent-learning/tests/example_contracts/demo24_topology.rs`             | 多 Agent 拓扑可视化                                                       |
 | `echo-agent-learning/examples/demo25_macros.rs`               | 宏系统综合展示                                                            |
 | `echo-agent-learning/examples/demo26_provider_factory.rs`     | 动态 LLM 工厂                                                             |

@@ -28,7 +28,7 @@ use super::prompt::{
     CompiledSubagentInvocation, ContextTransferPolicy, SubagentInvocation, SubagentPromptCompiler,
     SubagentTaskContext, ToolCapabilitySnapshot,
 };
-use super::registry::SubagentRegistry;
+use super::registry::{SubagentRegistration, SubagentRegistry};
 use super::types::{
     ExecutionMode, ObservedIsolation, SubagentArtifact, SubagentEvidence, SubagentEvidenceSource,
     SubagentOutcome, SubagentResult, SubagentStatus,
@@ -113,21 +113,40 @@ impl DispatchRequest {
     }
 }
 
-fn invocation_disabled_tools(
-    tool_names: Vec<String>,
+fn apply_subagent_invocation_scope(
+    invocation: &mut AgentInvocationContext,
+    agent: &dyn Agent,
     allowed_tools: Option<&[String]>,
-) -> Option<HashSet<String>> {
-    let allowed_tools = allowed_tools.filter(|tools| !tools.is_empty())?;
-    let allowed = allowed_tools
-        .iter()
-        .map(String::as_str)
-        .collect::<HashSet<_>>();
-    Some(
-        tool_names
+    tool_access: Option<echo_core::tools::ToolAccess>,
+    target_policy: NestedDelegationPolicy,
+) {
+    // The request already names this exact actor. Advancing child_policy here
+    // would count the same dispatch edge again; copying parent runtime policy
+    // would let a child masquerade as its parent on the next dispatch.
+    invocation
+        .runtime
+        .get_or_insert_with(echo_core::tools::ExternalRunContext::default)
+        .delegation_policy = Some(target_policy);
+    // Keep the positive bound until the original Agent takes its snapshot
+    // after acquiring the execution lock. A deny complement of today's names
+    // cannot exclude tools registered while this invocation waits in the queue.
+    invocation.tool_access = match (invocation.tool_access, tool_access) {
+        (Some(echo_core::tools::ToolAccess::ReadOnly), _)
+        | (_, Some(echo_core::tools::ToolAccess::ReadOnly)) => {
+            Some(echo_core::tools::ToolAccess::ReadOnly)
+        }
+        (current, inherited) => inherited.or(current),
+    };
+    invocation.allowed_tools = allowed_tools
+        .filter(|tools| !tools.is_empty())
+        .map(|tools| tools.iter().cloned().collect());
+    invocation.visible_tools = invocation.allowed_tools.as_ref().map(|allowed| {
+        agent
+            .tool_names()
             .into_iter()
-            .filter(|tool| !allowed.contains(tool.as_str()))
-            .collect(),
-    )
+            .filter(|name| allowed.contains(name))
+            .collect()
+    });
 }
 
 fn effective_capabilities(
@@ -556,6 +575,13 @@ pub struct SubagentExecutor {
     team_runtimes: Arc<Mutex<TeamRuntimeIndex>>,
 }
 
+// Only the original dispatcher creates the admitted form. Tool callers may
+// select a record early for routing, but cannot bypass its host validation.
+struct DispatchRegistration {
+    registration: SubagentRegistration,
+    admitted: bool,
+}
+
 const TEAM_RUNTIME_RETENTION: usize = 64;
 
 #[derive(Default)]
@@ -805,6 +831,29 @@ impl SubagentAttemptControlHandle {
             .map_err(SubagentExecutor::control_react_error)?;
         bind_task_dispatch_context(&mut request, &context)?;
         self.executor.dispatch_attempt(request, identity).await
+    }
+
+    async fn dispatch_registered(
+        &self,
+        mut request: DispatchRequest,
+        context: TaskSubagentContext,
+        registration: SubagentRegistration,
+    ) -> Result<SubagentResult> {
+        let identity = self
+            .identity_from_context(&context)
+            .map_err(SubagentExecutor::control_react_error)?;
+        bind_task_dispatch_context(&mut request, &context)?;
+        let (request, admission) = self.executor.admit_attempt(request, identity)?;
+        self.executor
+            .dispatch_owned(
+                request,
+                Some(admission),
+                Some(DispatchRegistration {
+                    registration,
+                    admitted: false,
+                }),
+            )
+            .await
     }
 
     /// Project an interrupt that has already passed durable TaskClaim checks.
@@ -1145,19 +1194,67 @@ impl SubagentExecutor {
         *self.shared_admission.write().await = Some(admission);
     }
 
+    fn retain_invocation_resources(
+        &self,
+        req: &DispatchRequest,
+    ) -> Result<Option<SubagentPhysicalResources>> {
+        let guards = req
+            .runtime_context
+            .as_ref()
+            .map(|context| context.resource_guards.clone())
+            .unwrap_or_default();
+        if guards.is_empty() {
+            return Ok(None);
+        }
+        let lease = self
+            .local_fork_admission
+            .keyed()
+            .issue(format!("subagent-resources:{}", uuid::Uuid::new_v4()))
+            .map_err(|error| ReactError::Other(error.to_string()))?;
+        Ok(Some(SubagentPhysicalResources {
+            lease: Some(lease),
+            isolation: None,
+            resource_guards: guards,
+            uncertain: true,
+        }))
+    }
+
     /// Main dispatch entry point.
     ///
     /// Routes to the appropriate mode based on the definition or override.
     /// Uses a loop for retry/delegation instead of recursion to prevent stack overflow.
     pub async fn dispatch(&self, mut req: DispatchRequest) -> Result<SubagentResult> {
         req.cancel = req.cancel.child_token();
-        self.dispatch_owned(req, None).await
+        self.dispatch_owned(req, None, None).await
+    }
+
+    /// Dispatch a previously selected record through the normal host policy.
+    ///
+    /// This preserves a tool's definition-based routing and actual executable
+    /// as one selection. Foreign-registry or differently named records fail
+    /// before construction. Retries select and admit their actual target anew.
+    pub async fn dispatch_registered(
+        &self,
+        mut req: DispatchRequest,
+        registration: SubagentRegistration,
+    ) -> Result<SubagentResult> {
+        req.cancel = req.cancel.child_token();
+        self.dispatch_owned(
+            req,
+            None,
+            Some(DispatchRegistration {
+                registration,
+                admitted: false,
+            }),
+        )
+        .await
     }
 
     async fn dispatch_owned(
         &self,
         req: DispatchRequest,
         admission: Option<super::control::SubagentAttemptAdmission>,
+        registration: Option<DispatchRegistration>,
     ) -> Result<SubagentResult> {
         struct CancelObservation(CancellationToken);
         impl Drop for CancelObservation {
@@ -1191,7 +1288,7 @@ impl SubagentExecutor {
             let binding = admission
                 .as_ref()
                 .map(|admission| admission.binding.clone());
-            let result = owner.dispatch_inner(req, binding).await;
+            let result = owner.dispatch_inner(req, binding, registration).await;
             if let Some(admission) = admission {
                 let status = match &result {
                     Ok(result) => result.outcome.status,
@@ -1245,7 +1342,7 @@ impl SubagentExecutor {
         req: DispatchRequest,
         admission: super::control::SubagentAttemptAdmission,
     ) -> Result<SubagentResult> {
-        self.dispatch_owned(req, Some(admission)).await
+        self.dispatch_owned(req, Some(admission), None).await
     }
 
     /// Deliver a live instruction to one exact active attempt.
@@ -1269,6 +1366,28 @@ impl SubagentExecutor {
     ) -> std::result::Result<SubagentGuidanceQueueReceipt, SubagentControlError> {
         self.control_registry
             .queue_guidance(task_id, expected_next_attempt, instruction)
+    }
+
+    /// Queue guidance in the same control scope and run as a future admission.
+    ///
+    /// The future attempt may not have an execution id yet. This carries its
+    /// logical scope/run identity into the existing queue; admission claims the
+    /// guidance once, without changing the legacy unscoped queue.
+    pub fn queue_guidance_scoped(
+        &self,
+        control_scope_id: &str,
+        run_id: &str,
+        task_id: &str,
+        expected_next_attempt: u32,
+        instruction: impl Into<String>,
+    ) -> std::result::Result<SubagentGuidanceQueueReceipt, SubagentControlError> {
+        self.control_registry.queue_guidance_scoped(
+            control_scope_id,
+            run_id,
+            task_id,
+            expected_next_attempt,
+            instruction,
+        )
     }
 
     /// Cancel one exact attempt and wait until its dispatch has settled.
@@ -1495,6 +1614,7 @@ impl SubagentExecutor {
         &self,
         mut req: DispatchRequest,
         control: Option<SubagentAttemptBinding>,
+        registration: Option<DispatchRegistration>,
     ) -> futures::future::BoxFuture<'_, Result<SubagentResult>> {
         Box::pin(async move {
             let mut retry_count: u32 = 0;
@@ -1507,14 +1627,24 @@ impl SubagentExecutor {
             // authority before any accepted dispatch can settle or fail setup.
             self.enrich_dispatch_context(&mut req);
             let event_publisher = self.event_publisher(&req)?;
-            let initial_registration = self.registry.get(&req.agent_name).await;
+            let mut initial_registration = match registration {
+                Some(registration) => Some(registration),
+                None => self
+                    .registry
+                    .resolve_registration(&req.agent_name)
+                    .await
+                    .map(|registration| DispatchRegistration {
+                        registration,
+                        admitted: false,
+                    }),
+            };
             let initial_mode = req
                 .mode_override
                 .clone()
                 .or_else(|| {
                     initial_registration
                         .as_ref()
-                        .map(|registered| registered.definition.execution_mode.clone())
+                        .map(|registered| registered.registration.definition.execution_mode.clone())
                 })
                 .unwrap_or(ExecutionMode::Sync);
             let runtime = req.runtime_context.as_ref();
@@ -1572,9 +1702,22 @@ impl SubagentExecutor {
                     return Err(error);
                 }
 
-                // Look up definition
-                let registered = match self.registry.get(&req.agent_name).await {
-                    Some(registered) => registered,
+                // The first record may come from agent_tool's routing. Every
+                // retry/retarget resolves once again; strategies never perform
+                // a second name lookup for definition or executable.
+                let selected = match initial_registration.take() {
+                    Some(selected) => Some(selected),
+                    None => self
+                        .registry
+                        .resolve_registration(&req.agent_name)
+                        .await
+                        .map(|registration| DispatchRegistration {
+                            registration,
+                            admitted: false,
+                        }),
+                };
+                let selected = match selected {
+                    Some(selected) => selected,
                     None => {
                         let error =
                             ReactError::Other(format!("Subagent '{}' not found", req.agent_name));
@@ -1582,6 +1725,16 @@ impl SubagentExecutor {
                         return Err(error);
                     }
                 };
+                let registered = selected.registration;
+                if !selected.admitted
+                    && let Err(error) = self
+                        .registry
+                        .admit_registration(&registered, &mut req)
+                        .await
+                {
+                    Self::emit_pre_execution_failure(&event_publisher, &req, &error)?;
+                    return Err(error);
+                }
 
                 let mode = req
                     .mode_override
@@ -1665,23 +1818,8 @@ impl SubagentExecutor {
                 // invocation resources, without consuming a Fork process slot.
                 // A typed observation (or unwind) cannot release those guards.
                 // Fork retains the same bundle in its existing physical slot.
-                let guards = req
-                    .runtime_context
-                    .as_ref()
-                    .map(|context| context.resource_guards.clone())
-                    .unwrap_or_default();
-                let mut resources = if !matches!(mode, ExecutionMode::Fork) && !guards.is_empty() {
-                    let lease = self
-                        .local_fork_admission
-                        .keyed()
-                        .issue(format!("subagent-resources:{}", uuid::Uuid::new_v4()))
-                        .map_err(|error| ReactError::Other(error.to_string()))?;
-                    Some(SubagentPhysicalResources {
-                        lease: Some(lease),
-                        isolation: None,
-                        resource_guards: guards,
-                        uncertain: true,
-                    })
+                let mut resources = if !matches!(mode, ExecutionMode::Fork) {
+                    self.retain_invocation_resources(&req)?
                 } else {
                     None
                 };
@@ -1689,12 +1827,22 @@ impl SubagentExecutor {
                 let start = Instant::now();
                 let result = match mode {
                     ExecutionMode::Sync => {
-                        self.dispatch_sync(&req, control.clone(), event_publisher.clone())
-                            .await
+                        self.dispatch_sync(
+                            &req,
+                            &registered,
+                            control.clone(),
+                            event_publisher.clone(),
+                        )
+                        .await
                     }
                     ExecutionMode::Fork => {
-                        self.dispatch_fork(&req, control.clone(), event_publisher.clone())
-                            .await
+                        self.dispatch_fork(
+                            &req,
+                            &registered,
+                            control.clone(),
+                            event_publisher.clone(),
+                        )
+                        .await
                     }
                     ExecutionMode::Teammate => {
                         // Teammate mode: spawn independently, then await result
@@ -1704,6 +1852,8 @@ impl SubagentExecutor {
                                 control.clone(),
                                 event_publisher.clone(),
                                 false,
+                                &registered,
+                                None,
                             )
                             .await
                         {
@@ -1711,7 +1861,10 @@ impl SubagentExecutor {
                             Err(e) => Err(e),
                         }
                     }
-                    ExecutionMode::Team => self.dispatch_team(&req, event_publisher.clone()).await,
+                    ExecutionMode::Team => {
+                        self.dispatch_team(&req, &registered, event_publisher.clone())
+                            .await
+                    }
                 };
 
                 if let Some(resources) = resources.as_mut() {
@@ -2060,18 +2213,29 @@ impl SubagentExecutor {
     /// teammate-only streaming path.
     pub async fn dispatch_background(
         &self,
-        mut req: DispatchRequest,
+        req: DispatchRequest,
     ) -> Result<BackgroundSubagentHandle> {
-        // Fail fast if the target role is missing (same as sync dispatch).
-        if self.registry.get(&req.agent_name).await.is_none() {
-            return Err(ReactError::Other(format!(
-                "Subagent '{}' not found",
-                req.agent_name
-            )));
-        }
+        let registration = self
+            .registry
+            .resolve_registration(&req.agent_name)
+            .await
+            .ok_or_else(|| ReactError::Other(format!("Subagent '{}' not found", req.agent_name)))?;
+        self.dispatch_background_registered(req, registration).await
+    }
 
+    /// Background variant of [`Self::dispatch_registered`].
+    /// Host refusal is returned before a background handle or work is created.
+    pub async fn dispatch_background_registered(
+        &self,
+        mut req: DispatchRequest,
+        registration: SubagentRegistration,
+    ) -> Result<BackgroundSubagentHandle> {
         let execution_id = Self::ensure_background_execution_id(&mut req);
         req.background = true;
+        self.enrich_dispatch_context(&mut req);
+        self.registry
+            .admit_registration(&registration, &mut req)
+            .await?;
         let observation_run_id = req
             .runtime_context
             .as_ref()
@@ -2083,7 +2247,17 @@ impl SubagentExecutor {
         let spawned = self.clone_for_spawn();
 
         let join_handle = tokio::spawn(async move {
-            let result = spawned.dispatch(req).await;
+            req.cancel = req.cancel.child_token();
+            let result = spawned
+                .dispatch_owned(
+                    req,
+                    None,
+                    Some(DispatchRegistration {
+                        registration,
+                        admitted: true,
+                    }),
+                )
+                .await;
             if let Err(error) = &result {
                 warn!(agent = %agent_name, error = %error, "background subagent dispatch failed");
             }
@@ -2105,14 +2279,24 @@ impl SubagentExecutor {
         req: DispatchRequest,
         identity: SubagentAttemptIdentity,
     ) -> Result<BackgroundSubagentHandle> {
-        if self.registry.get(&req.agent_name).await.is_none() {
-            return Err(ReactError::Other(format!(
-                "Subagent '{}' not found",
-                req.agent_name
-            )));
-        }
+        let registration = self
+            .registry
+            .resolve_registration(&req.agent_name)
+            .await
+            .ok_or_else(|| ReactError::Other(format!("Subagent '{}' not found", req.agent_name)))?;
         let (mut req, admission) = self.admit_attempt(req, identity)?;
         req.background = true;
+        self.enrich_dispatch_context(&mut req);
+        if let Err(error) = self
+            .registry
+            .admit_registration(&registration, &mut req)
+            .await
+        {
+            // No child was constructed: settle the original exact-attempt
+            // reservation instead of leaving a refused background claim live.
+            admission.settle(subagent_status_from_error(&error)?);
+            return Err(error);
+        }
         let execution_id = admission.binding.identity().execution_id.clone();
         let observation_run_id = req
             .runtime_context
@@ -2125,7 +2309,16 @@ impl SubagentExecutor {
         let spawned = self.clone_for_spawn();
 
         let join_handle = tokio::spawn(async move {
-            let result = spawned.dispatch_admitted_attempt(req, admission).await;
+            let result = spawned
+                .dispatch_owned(
+                    req,
+                    Some(admission),
+                    Some(DispatchRegistration {
+                        registration,
+                        admitted: true,
+                    }),
+                )
+                .await;
             if let Err(error) = &result {
                 warn!(agent = %agent_name, error = %error, "controlled background subagent dispatch failed");
             }
@@ -2143,6 +2336,9 @@ impl SubagentExecutor {
 
     /// Dispatch a teammate, returning a handle for async polling.
     pub async fn dispatch_teammate(&self, mut req: DispatchRequest) -> Result<TeammateHandle> {
+        // This explicit entry always selects Teammate. Expose the actual mode
+        // to host admission rather than a caller's otherwise ignored override.
+        req.mode_override = Some(ExecutionMode::Teammate);
         self.enrich_dispatch_context(&mut req);
         let event_publisher = self.event_publisher(&req)?;
         let runtime = req.runtime_context.as_ref();
@@ -2157,10 +2353,33 @@ impl SubagentExecutor {
             message_id: runtime.and_then(|context| context.message_id.clone()),
             background: req.background,
         })?;
-        match self
-            .dispatch_teammate_with_control(req.clone(), None, event_publisher.clone(), true)
+        let result = async {
+            let registration = self
+                .registry
+                .resolve_registration(&req.agent_name)
+                .await
+                .ok_or_else(|| {
+                    ReactError::Other(format!("Subagent '{}' not found", req.agent_name))
+                })?;
+            self.registry
+                .admit_registration(&registration, &mut req)
+                .await?;
+            // This public handle entry bypasses dispatch_inner's borrowed-
+            // resource bundle. Reuse that same keyed retainer, then move it
+            // into the existing Teammate physical task; no second process slot.
+            let resources = self.retain_invocation_resources(&req)?;
+            self.dispatch_teammate_with_control(
+                req.clone(),
+                None,
+                event_publisher.clone(),
+                true,
+                &registration,
+                resources,
+            )
             .await
-        {
+        }
+        .await;
+        match result {
             Ok(handle) => Ok(handle),
             Err(error) => {
                 Self::emit_pre_execution_failure(&event_publisher, &req, &error)?;
@@ -2175,13 +2394,18 @@ impl SubagentExecutor {
         control: Option<SubagentAttemptBinding>,
         event_publisher: SubagentEventPublisher,
         settle_in_handle: bool,
+        registered: &SubagentRegistration,
+        mut resources: Option<SubagentPhysicalResources>,
     ) -> Result<TeammateHandle> {
-        let registered =
-            self.registry.get(&req.agent_name).await.ok_or_else(|| {
-                ReactError::Other(format!("Subagent '{}' not found", req.agent_name))
-            })?;
-
-        let agent_arc = self.isolated_dispatch_agent(&req.agent_name).await?;
+        let agent_arc = match registered.agent_for_dispatch().await {
+            Ok(agent) => agent,
+            Err(error) => {
+                if let Some(resources) = resources.as_mut() {
+                    resources.uncertain = matches!(&error, ReactError::ExecutionNotSettled { .. });
+                }
+                return Err(error);
+            }
+        };
 
         let child_token = req.cancel.child_token();
         let handle_cancel = child_token.clone();
@@ -2210,11 +2434,22 @@ impl SubagentExecutor {
             .runtime_context
             .as_ref()
             .and_then(|ctx| ctx.run_id.clone());
-        let invocation = AgentInvocationContext {
+        let mut invocation = AgentInvocationContext {
             runtime: req.runtime_context.clone(),
             working_dir: agent_arc.working_dir(),
             ..AgentInvocationContext::default()
         };
+        apply_subagent_invocation_scope(
+            &mut invocation,
+            agent_arc.as_ref(),
+            req.parent_context
+                .as_ref()
+                .and_then(|context| context.allowed_tools.as_deref()),
+            req.parent_context
+                .as_ref()
+                .and_then(|context| context.tool_access),
+            req.delegation_policy,
+        );
 
         let observation_run_id = event_run_id.clone().unwrap_or_else(|| handle_id.clone());
         let observation_execution_id = event_execution_id.clone();
@@ -2252,6 +2487,13 @@ impl SubagentExecutor {
                 )))),
             )
             .await;
+            if let Some(resources) = resources.as_mut() {
+                // Agent's default invocation wrapper cannot retain a context
+                // when stream setup itself returns unknown. The original keyed
+                // debt owner must keep the last guard in that case (or unwind).
+                resources.uncertain =
+                    matches!(&result, Err(ReactError::ExecutionNotSettled { .. }));
+            }
             if settle_in_handle {
                 match &mut result {
                     Ok(value) => {
@@ -2310,12 +2552,9 @@ impl SubagentExecutor {
     async fn dispatch_team(
         &self,
         req: &DispatchRequest,
+        registered: &SubagentRegistration,
         event_publisher: SubagentEventPublisher,
     ) -> Result<SubagentResult> {
-        let registered =
-            self.registry.get(&req.agent_name).await.ok_or_else(|| {
-                ReactError::Other(format!("Subagent '{}' not found", req.agent_name))
-            })?;
         let spec = registered.definition.team.clone().ok_or_else(|| {
             ReactError::Other("Team mode requested but definition has no TeamSpec".to_string())
         })?;
@@ -2345,7 +2584,18 @@ impl SubagentExecutor {
         let inherited_history = req
             .parent_context
             .clone()
-            .filter(|context| !context.messages.is_empty() || context.parent_goal.is_some());
+            .filter(SubagentContext::has_content);
+        // Retained Team runtime handles outlive this invocation. Their stored
+        // dispatch closure must not keep a completed parent's physical lease
+        // alive forever. Actual members upgrade while this original call is
+        // alive, then carry real guard clones into their original resources.
+        let team_resource_guards = req
+            .runtime_context
+            .as_ref()
+            .map(|runtime| runtime.resource_guards.clone())
+            .filter(|guards| !guards.is_empty())
+            .map(Arc::new);
+        let member_resource_guards = team_resource_guards.as_ref().map(Arc::downgrade);
         let control_scope_id = format!(
             "team-control:{}:{}",
             run_id,
@@ -2405,16 +2655,29 @@ impl SubagentExecutor {
             }
             let constraints = team_constraints.clone();
             let parent_event_id = team_parent_event_id.clone();
+            let member_resource_guards = member_resource_guards.clone();
             Box::pin(async move {
-                let member = executor.registry.get(&agent_name).await.ok_or_else(|| {
-                    ReactError::Other(format!("Team Subagent '{agent_name}' not registered"))
-                })?;
+                let member = executor
+                    .registry
+                    .resolve_registration(&agent_name)
+                    .await
+                    .ok_or_else(|| {
+                        ReactError::Other(format!("Team Subagent '{agent_name}' not registered"))
+                    })?;
                 if member.definition.execution_mode == ExecutionMode::Team {
                     return Err(ReactError::Other(format!(
                         "nested Team mode is not supported for '{agent_name}'"
                     )));
                 }
                 let mut runtime_context = context.runtime_context();
+                if let Some(guards) = member_resource_guards {
+                    let guards = guards.upgrade().ok_or_else(|| ReactError::Other(
+                        "Team invocation resource source has settled; refusing an unretained member".to_string(),
+                    ))?;
+                    runtime_context
+                        .resource_guards
+                        .extend(guards.iter().cloned());
+                }
                 runtime_context.subagent_lineage =
                     runtime_context.subagent_lineage.map(|mut lineage| {
                         lineage.agent_name = Some(agent_name.clone());
@@ -2423,7 +2686,7 @@ impl SubagentExecutor {
                         lineage
                     });
                 attempt_control
-                    .dispatch(
+                    .dispatch_registered(
                         DispatchRequest {
                             agent_name,
                             task,
@@ -2440,6 +2703,7 @@ impl SubagentExecutor {
                             background: false,
                         },
                         context,
+                        member,
                     )
                     .await
             })
@@ -2598,57 +2862,40 @@ impl SubagentExecutor {
             .map(|value| value.as_str())
             .unwrap_or(event_identity.turn_id.as_str())
             .to_string();
+        let terminal_run = source_run.clone();
         let source_execution = event_identity
             .execution_id
             .as_ref()
             .map(|value| value.as_str().to_string());
-        // Route by content: text-only invocations use the text streaming path
-        // (agents that implement only `execute_stream` stay dispatch-
-        // compatible); genuinely multimodal input requires the message
-        // override. This mirrors the documented `DispatchRequest.message`
-        // contract instead of assuming every agent implements both paths.
-        let mut raw_stream = match current_message.content.as_text_ref() {
-            Some(task) => {
-                agent
-                    .execute_stream_with_invocation_context(task, cancel.clone(), invocation)
-                    .await?
-            }
-            None => {
-                agent
-                    .execute_stream_message_with_invocation_context(
-                        current_message,
-                        cancel.clone(),
-                        invocation,
-                    )
-                    .await?
-            }
-        }
-        .inspect(move |item| {
-            let mut pending = source_progress.lock().unwrap_or_else(|p| p.into_inner());
-            let matches_owner = |error: &ReactError| {
-                matches!(error,
+        // 当前typed消息与invocation始终完整值传递，不把Text内容当作旧入口选择依据。
+        let mut raw_stream = agent
+            .execute_stream_message_with_invocation_context(
+                current_message,
+                cancel.clone(),
+                invocation,
+            )
+            .await?
+            .inspect(move |item| {
+                let mut pending = source_progress.lock().unwrap_or_else(|p| p.into_inner());
+                let matches_owner = |error: &ReactError| {
+                    matches!(error,
                 ReactError::ExecutionNotSettled { run_id, execution_id }
                     if run_id == &source_run && execution_id == &source_execution)
-            };
-            match item {
-                Err(ReactError::ExecutionNotSettled {
+                };
+                if let Err(ReactError::ExecutionNotSettled {
                     run_id,
                     execution_id,
-                }) => {
-                    if pending.as_ref().is_none_or(matches_owner) {
-                        *pending = Some(ReactError::ExecutionNotSettled {
-                            run_id: run_id.clone(),
-                            execution_id: execution_id.clone(),
-                        });
-                    }
+                }) = item
+                    && pending.as_ref().is_none_or(matches_owner)
+                {
+                    *pending = Some(ReactError::ExecutionNotSettled {
+                        run_id: run_id.clone(),
+                        execution_id: execution_id.clone(),
+                    });
                 }
-                Ok(event) if event.is_terminal() && pending.as_ref().is_some_and(matches_owner) => {
-                    *pending = None;
-                }
-                _ => {}
-            }
-        })
-        .fuse();
+            })
+            .fuse();
+        let mut output = echo_core::agent::AgentOutputProjection::default();
         let _steering_lease = if let Some(binding) = control {
             let attachment = control_turn_id
                 .ok_or_else(|| ReactError::Other("Subagent control turn id missing".to_string()))
@@ -2662,7 +2909,14 @@ impl SubagentExecutor {
                 Err(error) => {
                     Self::record_first_cause(&first_cause, error);
                     cancel.cancel();
-                    Self::drain_source_stream(&mut raw_stream, &first_cause).await;
+                    Self::drain_source_stream(
+                        &mut raw_stream,
+                        &first_cause,
+                        &mut output,
+                        &source_observation,
+                        &terminal_run,
+                    )
+                    .await;
                     if let Some(error) = source_observation
                         .lock()
                         .unwrap_or_else(|p| p.into_inner())
@@ -2678,12 +2932,8 @@ impl SubagentExecutor {
         } else {
             None
         };
-        // The envelope normalizer ends at its first terminal event. Borrow the
-        // original source so that its EOF/cleanup can still be awaited below.
-        let mut stream =
-            echo_core::agent::envelope_event_stream(raw_stream.by_ref().boxed(), event_identity);
-        let mut output = String::new();
-        let mut in_thinking = false;
+        // 同一原source读到物理EOF；不经旧terminal包装器截断/改判身份。
+        let stream = raw_stream.by_ref();
         let mut prompt_tokens: usize = 0;
         let mut completion_tokens: usize = 0;
         let mut usage_stats = super::usage::LlmUsageStats::default();
@@ -2692,6 +2942,17 @@ impl SubagentExecutor {
         let mut observed_artifacts = Vec::new();
 
         while let Some(event_result) = stream.next().await {
+            if let Ok(AgentEvent::ExecutionStatus(status)) = &event_result {
+                if let Err(error) = Self::observe_stream_runtime_status(
+                    &mut output,
+                    &source_observation,
+                    &terminal_run,
+                    status,
+                ) {
+                    Self::record_first_cause(&first_cause, error);
+                }
+                continue;
+            }
             let event_result = match event_result {
                 Err(ReactError::ExecutionNotSettled { .. }) => continue,
                 other => other,
@@ -2706,7 +2967,7 @@ impl SubagentExecutor {
                 continue;
             }
             let event = match event_result {
-                Ok(event) => event.payload,
+                Ok(event) => event,
                 Err(error) => {
                     Self::record_first_cause(&first_cause, error);
                     continue;
@@ -2714,50 +2975,50 @@ impl SubagentExecutor {
             };
             let processed = (|| -> Result<()> {
                 match event {
-                    AgentEvent::Token(content) => {
-                        if in_thinking {
-                            event_publisher.emit(SubagentEvent::DispatchThinkingDelta {
-                                parent: parent.to_string(),
-                                agent: subagent.to_string(),
-                                content,
-                                execution_id: execution_id.clone(),
-                                run_id: run_id.clone(),
-                            })?;
-                        } else {
-                            output.push_str(&content);
-                            event_publisher.emit(SubagentEvent::DispatchTokenDelta {
-                                parent: parent.to_string(),
-                                agent: subagent.to_string(),
-                                content,
-                                execution_id: execution_id.clone(),
-                                run_id: run_id.clone(),
-                            })?;
+                    AgentEvent::AssistantMessage { block } => {
+                        if let Some(delta) = output.observe_block(&block)? {
+                            if delta.reasoning_started {
+                                event_publisher.emit(SubagentEvent::DispatchThinkingStarted {
+                                    parent: parent.to_string(),
+                                    agent: subagent.to_string(),
+                                    execution_id: execution_id.clone(),
+                                    run_id: run_id.clone(),
+                                })?;
+                            }
+                            if !delta.text.is_empty() {
+                                let event = if delta.block.phase
+                                    == echo_core::agent::AssistantPhase::Reasoning
+                                {
+                                    SubagentEvent::DispatchThinkingDelta {
+                                        parent: parent.to_string(),
+                                        agent: subagent.to_string(),
+                                        content: delta.text,
+                                        execution_id: execution_id.clone(),
+                                        run_id: run_id.clone(),
+                                    }
+                                } else {
+                                    SubagentEvent::DispatchTokenDelta {
+                                        parent: parent.to_string(),
+                                        agent: subagent.to_string(),
+                                        content: delta.text,
+                                        execution_id: execution_id.clone(),
+                                        run_id: run_id.clone(),
+                                    }
+                                };
+                                event_publisher.emit(event)?;
+                            }
+                            if delta.reasoning_finished {
+                                // 用量只来自每请求LlmUsage；结束块不是第二份token统计。
+                                event_publisher.emit(SubagentEvent::DispatchThinkingEnded {
+                                    parent: parent.to_string(),
+                                    agent: subagent.to_string(),
+                                    prompt_tokens: 0,
+                                    completion_tokens: 0,
+                                    execution_id: execution_id.clone(),
+                                    run_id: run_id.clone(),
+                                })?;
+                            }
                         }
-                    }
-                    AgentEvent::ThinkStart => {
-                        in_thinking = true;
-                        event_publisher.emit(SubagentEvent::DispatchThinkingStarted {
-                            parent: parent.to_string(),
-                            agent: subagent.to_string(),
-                            execution_id: execution_id.clone(),
-                            run_id: run_id.clone(),
-                        })?;
-                    }
-                    AgentEvent::ThinkEnd {
-                        prompt_tokens: pt,
-                        completion_tokens: ct,
-                    } => {
-                        in_thinking = false;
-                        prompt_tokens = prompt_tokens.saturating_add(pt);
-                        completion_tokens = completion_tokens.saturating_add(ct);
-                        event_publisher.emit(SubagentEvent::DispatchThinkingEnded {
-                            parent: parent.to_string(),
-                            agent: subagent.to_string(),
-                            prompt_tokens: pt,
-                            completion_tokens: ct,
-                            execution_id: execution_id.clone(),
-                            run_id: run_id.clone(),
-                        })?;
                     }
                     AgentEvent::LlmUsage {
                         model,
@@ -2767,7 +3028,10 @@ impl SubagentExecutor {
                         cached_prompt_tokens: cpt,
                         cache_creation_prompt_tokens: ccpt,
                         usage_reported,
+                        ..
                     } => {
+                        prompt_tokens = prompt_tokens.saturating_add(pt);
+                        completion_tokens = completion_tokens.saturating_add(ct);
                         usage_stats.record(&model, pt, ct, tt, cpt, ccpt, usage_reported);
                         event_publisher.emit(SubagentEvent::DispatchLlmUsage {
                             parent: parent.to_string(),
@@ -2845,10 +3109,7 @@ impl SubagentExecutor {
                             run_id: run_id.clone(),
                         })?;
                     }
-                    AgentEvent::FinalAnswer(answer) if !answer.is_empty() => {
-                        output = answer;
-                    }
-                    AgentEvent::FinalAnswer(_) => {}
+                    AgentEvent::FinalAnswer(answer) => output.confirm_answer(&answer)?,
                     AgentEvent::Cancelled => {
                         return Err(ReactError::Agent(Box::new(AgentError::Cancelled(format!(
                             "Subagent '{subagent}' cancelled"
@@ -2882,11 +3143,17 @@ impl SubagentExecutor {
                 Self::record_first_cause(&first_cause, error);
             }
         }
-        drop(stream);
         // Envelope EOF only proves terminal projection. The original stream
         // may still own a producer/finally; consume that source to its real EOF
         // and keep any cleanup failure it reports on the way out.
-        Self::drain_source_stream(&mut raw_stream, &first_cause).await;
+        Self::drain_source_stream(
+            &mut raw_stream,
+            &first_cause,
+            &mut output,
+            &source_observation,
+            &terminal_run,
+        )
+        .await;
         if let Some(error) = source_observation
             .lock()
             .unwrap_or_else(|p| p.into_inner())
@@ -2898,6 +3165,19 @@ impl SubagentExecutor {
             return Err(error);
         }
 
+        // 原source EOF及尾部错误均已检查，才投影当前runtime确认的最终结果。
+        let answer = output.finish()?;
+        let final_delta = output.take_final_presentation()?;
+        let output = answer;
+        if let Some(content) = final_delta {
+            event_publisher.emit(SubagentEvent::DispatchTokenDelta {
+                parent: parent.to_string(),
+                agent: subagent.to_string(),
+                content,
+                execution_id: execution_id.clone(),
+                run_id: run_id.clone(),
+            })?;
+        }
         let tokens_used = Some(prompt_tokens.saturating_add(completion_tokens));
         let usage = if usage_stats.call_count > 0 {
             // Also update tokens_used from real usage stats for consistency.
@@ -2927,17 +3207,34 @@ impl SubagentExecutor {
         Ok(result)
     }
 
-    async fn isolated_dispatch_agent(&self, agent_name: &str) -> Result<Arc<dyn Agent>> {
-        let agent = match self.registry.create_fresh_agent(agent_name).await? {
-            Some(agent) => agent,
-            None => self.registry.get_agent(agent_name).await.ok_or_else(|| {
-                ReactError::Other(format!(
-                    "Subagent '{}' not found or not instantiated",
-                    agent_name
-                ))
-            })?,
-        };
-        Ok(agent)
+    // 主读取与attachment失败后的原source drain使用同一纯native事实核验。
+    fn observe_stream_runtime_status(
+        output: &mut echo_core::agent::AgentOutputProjection,
+        observation: &Arc<Mutex<Option<ReactError>>>,
+        run: &str,
+        status: &echo_core::agent::ExecutionStatus,
+    ) -> Result<()> {
+        let new_fact = output.observe_status(status)?;
+        if new_fact
+            && matches!(
+                status.status,
+                echo_core::agent::ExecutionStatusKind::Settled
+                    | echo_core::agent::ExecutionStatusKind::Failed
+                    | echo_core::agent::ExecutionStatusKind::Cancelled
+            )
+        {
+            let mut pending = observation
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if pending.as_ref().is_some_and(|error|matches!(error, ReactError::ExecutionNotSettled {run_id,execution_id:Some(execution)} if run_id==run && execution==&status.execution_id)) {
+                *pending=None;
+            }
+            // 先解除匹配unknown，再把原生失败按观察顺序交给既有首因槽；不提前结算。
+            if let Some(error) = output.terminal_failure() {
+                return Err(error);
+            }
+        }
+        Ok(())
     }
 
     fn record_first_cause(cause: &Arc<Mutex<Option<ReactError>>>, error: ReactError) {
@@ -2968,11 +3265,22 @@ impl SubagentExecutor {
     ///
     /// Both drain sites (attachment failure and post-terminal tail) share this
     /// function so the cleanup-error contract cannot diverge between them.
-    async fn drain_source_stream<S>(source: &mut S, first_cause: &Arc<Mutex<Option<ReactError>>>)
-    where
+    async fn drain_source_stream<S>(
+        source: &mut S,
+        first_cause: &Arc<Mutex<Option<ReactError>>>,
+        output: &mut echo_core::agent::AgentOutputProjection,
+        observation: &Arc<Mutex<Option<ReactError>>>,
+        run: &str,
+    ) where
         S: futures::Stream<Item = Result<AgentEvent>> + Unpin,
     {
         while let Some(item) = source.next().await {
+            if let Ok(AgentEvent::ExecutionStatus(status)) = &item
+                && let Err(error) =
+                    Self::observe_stream_runtime_status(output, observation, run, status)
+            {
+                Self::record_first_cause(first_cause, error);
+            }
             if let Err(error) = item
                 && !matches!(error, ReactError::ExecutionNotSettled { .. })
             {
@@ -3028,28 +3336,26 @@ impl SubagentExecutor {
     async fn dispatch_sync(
         &self,
         req: &DispatchRequest,
+        registered: &SubagentRegistration,
         control: Option<SubagentAttemptBinding>,
         event_publisher: SubagentEventPublisher,
     ) -> Result<SubagentResult> {
-        let agent_arc = self.isolated_dispatch_agent(&req.agent_name).await?;
+        let agent_arc = registered.agent_for_dispatch().await?;
 
         // Per-subagent override (0 = executor default). Sync now enforces a
         // timeout too (previously it blocked the parent indefinitely) — one
         // config (AgentConfig.subagent_timeout_secs) governs all three modes.
-        let timeout_secs = match self.registry.get(&req.agent_name).await {
-            Some(r) if r.definition.timeout_secs > 0 => r.definition.timeout_secs,
-            _ => self.config.default_timeout_secs,
+        let timeout_secs = if registered.definition.timeout_secs > 0 {
+            registered.definition.timeout_secs
+        } else {
+            self.config.default_timeout_secs
         };
 
         let start = Instant::now();
-        let inherit_history = match self.registry.get(&req.agent_name).await {
-            Some(r) => r.definition.inherit_history,
-            None => None,
-        };
         let compiled = self.compile_invocation(
             req,
             ExecutionMode::Sync,
-            inherit_history,
+            registered.definition.inherit_history,
             agent_arc.as_ref(),
         );
         let execution_cancel = req.cancel.child_token();
@@ -3061,11 +3367,22 @@ impl SubagentExecutor {
             .runtime_context
             .as_ref()
             .and_then(|ctx| ctx.run_id.clone());
-        let invocation = AgentInvocationContext {
+        let mut invocation = AgentInvocationContext {
             runtime: req.runtime_context.clone(),
             working_dir: agent_arc.working_dir(),
             ..AgentInvocationContext::default()
         };
+        apply_subagent_invocation_scope(
+            &mut invocation,
+            agent_arc.as_ref(),
+            req.parent_context
+                .as_ref()
+                .and_then(|context| context.allowed_tools.as_deref()),
+            req.parent_context
+                .as_ref()
+                .and_then(|context| context.tool_access),
+            req.delegation_policy,
+        );
 
         let cause = Arc::new(Mutex::new(None));
         let deadline = (timeout_secs > 0)
@@ -3106,13 +3423,10 @@ impl SubagentExecutor {
     async fn dispatch_fork(
         &self,
         req: &DispatchRequest,
+        registered: &SubagentRegistration,
         control: Option<SubagentAttemptBinding>,
         event_publisher: SubagentEventPublisher,
     ) -> Result<SubagentResult> {
-        let registered =
-            self.registry.get(&req.agent_name).await.ok_or_else(|| {
-                ReactError::Other(format!("Subagent '{}' not found", req.agent_name))
-            })?;
         let timeout_secs = if registered.definition.timeout_secs > 0 {
             registered.definition.timeout_secs
         } else {
@@ -3160,7 +3474,7 @@ impl SubagentExecutor {
                     req.agent_name, timeout_secs
                 )))));
             }
-            agent = self.isolated_dispatch_agent(&req.agent_name) => agent?,
+            agent = registered.agent_for_dispatch() => agent?,
         };
 
         let agent_name = req.agent_name.clone();
@@ -3239,6 +3553,11 @@ impl SubagentExecutor {
             .as_ref()
             .and_then(|context| context.allowed_tools.clone())
             .filter(|allowed| !allowed.is_empty());
+        let invocation_tool_access = req
+            .parent_context
+            .as_ref()
+            .and_then(|context| context.tool_access);
+        let invocation_target_policy = req.delegation_policy;
 
         let observation_run_id = req
             .runtime_context
@@ -3330,27 +3649,32 @@ impl SubagentExecutor {
                 capability_override: capability_override.as_ref(),
                 payload: prompt_payload.as_ref(),
             });
-            let disabled_tools = invocation_disabled_tools(
-                agent_arc.tool_names(),
-                invocation_allowed_tools.as_deref(),
-            );
             let effective_working_dir = isolation_handle
                 .as_ref()
                 .map(|handle| handle.path.clone())
                 .or_else(|| agent_arc.working_dir());
-            let invocation = AgentInvocationContext {
+            let mut invocation = AgentInvocationContext {
                 runtime: runtime_context.clone(),
                 runtime_state_id: None,
                 transcript_generation_id: None,
                 working_dir: effective_working_dir,
                 cancel: None,
-                disabled_tools,
+                disabled_tools: None,
+                allowed_tools: None,
+                tool_access: None,
                 visible_tools: None,
                 run_budget: None,
                 history: None,
                 resource_guards: Vec::new(),
                 input_lifecycle: None,
             };
+            apply_subagent_invocation_scope(
+                &mut invocation,
+                agent_arc.as_ref(),
+                invocation_allowed_tools.as_deref(),
+                invocation_tool_access,
+                invocation_target_policy,
+            );
             event_publisher.emit(SubagentEvent::DispatchIsolationObserved {
                 parent: parent_agent.clone(),
                 agent: agent_name.clone(),
@@ -3450,6 +3774,35 @@ mod tests {
     use echo_core::tools::{InvocationResourceGuard, ToolResult, ToolResultKind};
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
+    /// 测试 producer 自己选择状态及序号；此函数只保留同一次调用的身份。
+    fn source_status(
+        identity: &echo_core::agent::EventIdentity,
+        kind: echo_core::agent::ExecutionStatusKind,
+        sequence: u64,
+    ) -> AgentEvent {
+        AgentEvent::ExecutionStatus(echo_core::agent::ExecutionStatus {
+            adapter_generated: false,
+            execution_id: identity
+                .execution_id
+                .as_ref()
+                .map(|value| value.as_str())
+                .unwrap_or(identity.turn_id.as_str())
+                .to_string(),
+            request_id: Some(
+                identity
+                    .message_id
+                    .as_ref()
+                    .map(|value| value.as_str())
+                    .unwrap_or(identity.turn_id.as_str())
+                    .to_string(),
+            ),
+            sequence,
+            phase: echo_core::agent::AgentPhase::Thinking,
+            status: kind,
+            reason: None,
+        })
+    }
+
     /// Agent that blocks its stream until released and records steer input —
     /// used to exercise the default uplink sink against a live attempt.
     struct SteerableBlockingAgent {
@@ -3460,20 +3813,21 @@ mod tests {
     impl SteerableBlockingAgent {
         fn blocking_stream<'a>(
             release: Arc<tokio::sync::Notify>,
+            invocation: AgentInvocationContext,
         ) -> futures::future::BoxFuture<
             'a,
             Result<futures::stream::BoxStream<'a, Result<AgentEvent>>>,
         > {
-            // Resolve the stream-creation future immediately: the control
-            // plane attaches (and live steer becomes possible) only after the
-            // stream exists, so the release wait must live inside the first
-            // stream poll rather than in this future.
             Box::pin(async move {
-                Ok(Box::pin(futures::stream::once(async move {
+                let identity = echo_core::agent::EventIdentity::from_invocation(&invocation)?;
+                let source = async_stream::stream! {
+                    let _invocation = invocation;
+                    yield Ok(source_status(&identity, echo_core::agent::ExecutionStatusKind::Started, 0));
                     release.notified().await;
-                    Ok(AgentEvent::FinalAnswer("released".to_string()))
-                }))
-                    as futures::stream::BoxStream<'a, Result<AgentEvent>>)
+                    yield Ok(AgentEvent::FinalAnswer("released".to_string()));
+                    yield Ok(source_status(&identity, echo_core::agent::ExecutionStatusKind::Settled, 1));
+                };
+                Ok(source.boxed())
             })
         }
     }
@@ -3491,29 +3845,16 @@ mod tests {
             ""
         }
 
-        fn execute<'a>(&'a self, _task: &'a str) -> futures::future::BoxFuture<'a, Result<String>> {
-            Box::pin(async { Ok("done".to_string()) })
-        }
-
-        fn execute_stream<'a>(
-            &'a self,
-            _task: &'a str,
-        ) -> futures::future::BoxFuture<
-            'a,
-            Result<futures::stream::BoxStream<'a, Result<AgentEvent>>>,
-        > {
-            Self::blocking_stream(self.release.clone())
-        }
-
-        fn execute_stream_message_with_cancel<'a>(
+        fn execute_stream_message_with_invocation_context<'a>(
             &'a self,
             _message: Message,
             _cancel: CancellationToken,
+            invocation: AgentInvocationContext,
         ) -> futures::future::BoxFuture<
             'a,
             Result<futures::stream::BoxStream<'a, Result<AgentEvent>>>,
         > {
-            Self::blocking_stream(self.release.clone())
+            Self::blocking_stream(self.release.clone(), invocation)
         }
 
         fn steer_input(
@@ -3797,21 +4138,347 @@ mod tests {
         }
     }
 
+    fn readonly_test_request(target: &str, mode: ExecutionMode) -> DispatchRequest {
+        DispatchRequest {
+            agent_name: target.to_string(),
+            task: "只读调用传递".to_string(),
+            mode_override: Some(mode),
+            cancel: CancellationToken::new(),
+            parent_agent: "primary".to_string(),
+            parent_context: Some(SubagentContext {
+                tool_access: Some(echo_core::tools::ToolAccess::ReadOnly),
+                ..SubagentContext::empty()
+            }),
+            delegation_policy: DispatchRequest::policy_from_depth(0),
+            runtime_context: None,
+            message: None,
+            prompt_payload: None,
+            prompt_context: None,
+            constraints: Vec::new(),
+            background: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn readonly_access_only_survives_sync_fork_teammate_and_background() -> Result<()> {
+        for mode in [
+            ExecutionMode::Sync,
+            ExecutionMode::Fork,
+            ExecutionMode::Teammate,
+        ] {
+            for (background, inherited) in
+                [(false, false), (false, true), (true, false), (true, true)]
+            {
+                let registry = Arc::new(SubagentRegistry::new());
+                let agent = MockAgent::new("reader").with_response("## Summary\n只读完成");
+                let mut definition = SubagentDefinition::new("reader", "只读角色");
+                definition.access_mode = super::super::types::SubagentAccessMode::ReadOnly;
+                registry.register(definition, Box::new(agent.clone())).await;
+                let executor = SubagentExecutor::new(registry, SubagentExecutorConfig::default());
+                let mut request = readonly_test_request("reader", mode.clone());
+                if !inherited {
+                    request.parent_context = None;
+                }
+                if background {
+                    executor.dispatch_background(request).await?.join().await?;
+                } else {
+                    executor.dispatch(request).await?;
+                }
+                let calls = agent.invocation_contexts();
+                assert_eq!(calls.len(), 1, "{mode:?}/{background}");
+                let context = calls
+                    .first()
+                    .ok_or_else(|| ReactError::Other("readonly invocation missing".into()))?;
+                assert_eq!(
+                    context.tool_access,
+                    Some(echo_core::tools::ToolAccess::ReadOnly)
+                );
+                assert!(context.allowed_tools.is_none());
+            }
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn readonly_writer_registration_is_rejected_before_factory_in_every_entry() -> Result<()>
+    {
+        for mode in [
+            ExecutionMode::Sync,
+            ExecutionMode::Fork,
+            ExecutionMode::Teammate,
+        ] {
+            for background in [false, true] {
+                let registry = Arc::new(SubagentRegistry::new());
+                let calls = Arc::new(AtomicUsize::new(0));
+                let observed = Arc::clone(&calls);
+                registry
+                    .register_factory(
+                        SubagentDefinition::new("writer", "写角色"),
+                        Arc::new(super::super::registry::FnAgentFactory::new(move || {
+                            let observed = Arc::clone(&observed);
+                            Box::pin(async move {
+                                observed.fetch_add(1, Ordering::SeqCst);
+                                Ok(Box::new(MockAgent::new("writer")) as Box<dyn Agent>)
+                            })
+                        })),
+                    )
+                    .await;
+                let executor = SubagentExecutor::new(registry, SubagentExecutorConfig::default());
+                let request = readonly_test_request("writer", mode.clone());
+                let error = if background {
+                    match executor.dispatch_background(request).await {
+                        Err(error) => error,
+                        Ok(handle) => {
+                            let _settled = handle.join().await;
+                            return Err(ReactError::Other(
+                                "readonly writer background was admitted".into(),
+                            ));
+                        }
+                    }
+                } else {
+                    match executor.dispatch(request).await {
+                        Err(error) => error,
+                        Ok(_) => {
+                            return Err(ReactError::Other("readonly writer was admitted".into()));
+                        }
+                    }
+                };
+                assert!(error.to_string().contains("Read-only"));
+                assert_eq!(calls.load(Ordering::SeqCst), 0, "{mode:?}/{background}");
+            }
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn readonly_team_carries_access_and_checks_each_actual_member() -> Result<()> {
+        for member_is_readonly in [true, false] {
+            let registry = Arc::new(SubagentRegistry::new());
+            let member = MockAgent::new("member").with_response("## Summary\n成员完成");
+            let mut definition = SubagentDefinition::new("member", "实际成员");
+            if member_is_readonly {
+                definition.access_mode = super::super::types::SubagentAccessMode::ReadOnly;
+            }
+            registry
+                .register(definition, Box::new(member.clone()))
+                .await;
+            let team = super::super::builder::SubagentBuilder::new("readonly-team")
+                .read_only()
+                .team(super::super::team::TeamSpec {
+                    strategy: super::super::team::TeamStrategy::Pipeline(vec!["member".into()]),
+                    manager: String::new(),
+                    subagents: Vec::new(),
+                    config: super::super::team::TeamConfig::default(),
+                })
+                .build();
+            registry
+                .register(team, Box::new(MockAgent::new("readonly-team")))
+                .await;
+            let executor = SubagentExecutor::new(registry, SubagentExecutorConfig::default());
+            let mut request = readonly_test_request("readonly-team", ExecutionMode::Team);
+            // 普通父的 None 不抵消 Team 自己的 ReadOnly 声明。
+            request.parent_context = None;
+            let result = executor.dispatch(request).await;
+            if member_is_readonly {
+                let result = result?;
+                assert_eq!(result.outcome.status, SubagentStatus::Completed);
+                let calls = member.invocation_contexts();
+                let invocation = calls
+                    .first()
+                    .ok_or_else(|| ReactError::Other("Team dropped access-only context".into()))?;
+                assert_eq!(
+                    invocation.tool_access,
+                    Some(echo_core::tools::ToolAccess::ReadOnly)
+                );
+            } else {
+                let failure = match result {
+                    Err(error) => error.to_string(),
+                    Ok(result) => {
+                        assert_ne!(result.outcome.status, SubagentStatus::Completed);
+                        serde_json::to_string(&result.outcome)?
+                    }
+                };
+                assert!(
+                    failure.to_ascii_lowercase().contains("read-only"),
+                    "{failure}"
+                );
+                assert!(member.invocation_contexts().is_empty());
+            }
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn readonly_target_bound_survives_retry_target_change_without_resetting_depth_or_scope()
+    -> Result<()> {
+        let registry = Arc::new(SubagentRegistry::new());
+        let mut reader = SubagentDefinition::new("reader", "readonly target");
+        reader.access_mode = super::super::types::SubagentAccessMode::ReadOnly;
+        registry
+            .register(reader, Box::new(MockAgent::new("reader")))
+            .await;
+        registry
+            .register(
+                SubagentDefinition::new("writer", "write target"),
+                Box::new(MockAgent::new("writer")),
+            )
+            .await;
+        let mut request = readonly_test_request("reader", ExecutionMode::Sync);
+        request.parent_context = Some(SubagentContext {
+            tool_access: Some(echo_core::tools::ToolAccess::Mutating),
+            allowed_tools: Some(vec!["read_file".to_string()]),
+            ..SubagentContext::empty()
+        });
+        let policy = NestedDelegationPolicy {
+            can_spawn_subagents: true,
+            delegate_depth: 2,
+            max_delegate_depth: 4,
+        };
+        request.delegation_policy = policy;
+        let reader = registry
+            .resolve_registration("reader")
+            .await
+            .ok_or_else(|| ReactError::Other("reader registration missing".to_string()))?;
+        registry.admit_registration(&reader, &mut request).await?;
+        assert_eq!(request.delegation_policy, policy);
+        let inherited = request
+            .parent_context
+            .as_ref()
+            .ok_or_else(|| ReactError::Other("readonly target bound missing".to_string()))?;
+        assert_eq!(
+            inherited.tool_access,
+            Some(echo_core::tools::ToolAccess::ReadOnly)
+        );
+        assert_eq!(inherited.allowed_tools, Some(vec!["read_file".to_string()]));
+        request.agent_name = "writer".to_string();
+        let writer = registry
+            .resolve_registration("writer")
+            .await
+            .ok_or_else(|| ReactError::Other("writer registration missing".to_string()))?;
+        assert!(
+            matches!(registry.admit_registration(&writer,&mut request).await,Err(error) if error.to_string().contains("Read-only"))
+        );
+        assert_eq!(request.delegation_policy, policy);
+        Ok(())
+    }
+
+    #[test]
+    fn inherited_readonly_cannot_be_promoted_by_mutating_or_absent_child_values() {
+        let agent = MockAgent::new("reader");
+        let mut invocation = AgentInvocationContext {
+            tool_access: Some(echo_core::tools::ToolAccess::ReadOnly),
+            ..Default::default()
+        };
+        for inherited in [None, Some(echo_core::tools::ToolAccess::Mutating)] {
+            apply_subagent_invocation_scope(
+                &mut invocation,
+                &agent,
+                None,
+                inherited,
+                DispatchRequest::policy_from_depth(0),
+            );
+            assert_eq!(
+                invocation.tool_access,
+                Some(echo_core::tools::ToolAccess::ReadOnly)
+            );
+        }
+    }
+
     #[test]
     fn invocation_allowlist_hides_every_unlisted_tool() {
-        let tools = vec![
-            "read_file".to_string(),
-            "write_file".to_string(),
-            "shell".to_string(),
-        ];
+        let agent = MockAgent::new("no-registered-tools");
+        let mut invocation = AgentInvocationContext::default();
         let allowed = vec!["read_file".to_string()];
-        let disabled = invocation_disabled_tools(tools.clone(), Some(&allowed)).unwrap_or_default();
-        assert_eq!(
-            disabled,
-            HashSet::from(["write_file".to_string(), "shell".to_string()])
+        apply_subagent_invocation_scope(
+            &mut invocation,
+            &agent,
+            Some(&allowed),
+            None,
+            DispatchRequest::policy_from_depth(0),
         );
-        assert!(invocation_disabled_tools(tools.clone(), None).is_none());
-        assert!(invocation_disabled_tools(tools, Some(&[])).is_none());
+        assert_eq!(
+            invocation.allowed_tools,
+            Some(HashSet::from(["read_file".to_string()]))
+        );
+        assert_eq!(invocation.visible_tools, Some(HashSet::new()));
+        apply_subagent_invocation_scope(
+            &mut invocation,
+            &agent,
+            None,
+            None,
+            DispatchRequest::policy_from_depth(0),
+        );
+        assert!(invocation.allowed_tools.is_none());
+        assert!(invocation.visible_tools.is_none());
+        apply_subagent_invocation_scope(
+            &mut invocation,
+            &agent,
+            Some(&[]),
+            None,
+            DispatchRequest::policy_from_depth(0),
+        );
+        assert!(invocation.allowed_tools.is_none());
+        assert!(invocation.visible_tools.is_none());
+    }
+
+    #[tokio::test]
+    async fn legacy_empty_scope_keeps_all_mode_invocations_unrestricted() -> Result<()> {
+        for mode in [
+            ExecutionMode::Sync,
+            ExecutionMode::Fork,
+            ExecutionMode::Teammate,
+        ] {
+            for allowed_tools in [None, Some(Vec::new())] {
+                let registry = Arc::new(SubagentRegistry::new());
+                let agent = MockAgent::new("legacy-scope").with_response("complete");
+                registry
+                    .register(
+                        SubagentDefinition::new("legacy-scope", "legacy"),
+                        Box::new(agent.clone()),
+                    )
+                    .await;
+                let executor = SubagentExecutor::new(registry, SubagentExecutorConfig::default());
+                let context = allowed_tools.map(|tools| SubagentContext {
+                    allowed_tools: Some(tools),
+                    ..SubagentContext::empty()
+                });
+                executor
+                    .dispatch(DispatchRequest {
+                        agent_name: "legacy-scope".into(),
+                        task: "legacy independent consumer".into(),
+                        mode_override: Some(mode.clone()),
+                        cancel: CancellationToken::new(),
+                        parent_agent: "parent".into(),
+                        parent_context: context,
+                        delegation_policy: DispatchRequest::policy_from_depth(0),
+                        runtime_context: None,
+                        message: None,
+                        prompt_payload: None,
+                        prompt_context: None,
+                        constraints: Vec::new(),
+                        background: false,
+                    })
+                    .await?;
+                let invocations = agent.invocation_contexts();
+                let invocation = invocations
+                    .first()
+                    .ok_or_else(|| ReactError::Other("legacy invocation missing".into()))?;
+                assert!(invocation.disabled_tools.is_none());
+                assert!(invocation.allowed_tools.is_none());
+                assert!(invocation.visible_tools.is_none());
+                let runtime = invocation
+                    .runtime
+                    .as_ref()
+                    .ok_or_else(|| ReactError::Other("target policy runtime missing".into()))?;
+                assert_eq!(
+                    runtime.delegation_policy,
+                    Some(DispatchRequest::policy_from_depth(0))
+                );
+                assert!(runtime.run_id.is_none());
+                assert!(runtime.conversation_id.is_none());
+            }
+        }
+        Ok(())
     }
 
     struct DelegateFailedDispatch;
@@ -3835,18 +4502,18 @@ mod tests {
             ""
         }
 
-        fn execute<'a>(&'a self, _task: &'a str) -> futures::future::BoxFuture<'a, Result<String>> {
-            Box::pin(async { Ok("done".to_string()) })
-        }
-
-        fn execute_stream<'a>(
+        fn execute_stream_message_with_invocation_context<'a>(
             &'a self,
-            _task: &'a str,
+            _message: Message,
+            _cancel: CancellationToken,
+            invocation_context: AgentInvocationContext,
         ) -> futures::future::BoxFuture<
             'a,
             Result<futures::stream::BoxStream<'a, Result<AgentEvent>>>,
         > {
-            Box::pin(async {
+            Box::pin(async move {
+                let identity =
+                    echo_core::agent::EventIdentity::from_invocation(&invocation_context)?;
                 let invocation = ToolInvocation {
                     requested_name: "requested_tool".to_string(),
                     requested_args: serde_json::json!({"value": "requested"}),
@@ -3869,6 +4536,11 @@ mod tests {
                     model_content: Vec::new(),
                 };
                 let events = vec![
+                    Ok(source_status(
+                        &identity,
+                        echo_core::agent::ExecutionStatusKind::Started,
+                        0,
+                    )),
                     Ok(AgentEvent::ToolCall {
                         call_id: "call-rich".to_string(),
                         invocation,
@@ -3879,8 +4551,16 @@ mod tests {
                         result,
                     }),
                     Ok(AgentEvent::FinalAnswer("done".to_string())),
+                    Ok(source_status(
+                        &identity,
+                        echo_core::agent::ExecutionStatusKind::Settled,
+                        1,
+                    )),
                 ];
-                Ok(Box::pin(futures::stream::iter(events))
+                Ok(Box::pin(async_stream::stream! {
+                    let _invocation = invocation_context;
+                    for event in events { yield event; }
+                })
                     as futures::stream::BoxStream<'a, Result<AgentEvent>>)
             })
         }
@@ -3899,41 +4579,37 @@ mod tests {
             ""
         }
 
-        fn execute<'a>(&'a self, _task: &'a str) -> futures::future::BoxFuture<'a, Result<String>> {
-            Box::pin(async move { std::future::pending::<Result<String>>().await })
-        }
-
-        fn execute_stream<'a>(
+        fn execute_stream_message_with_invocation_context<'a>(
             &'a self,
-            _task: &'a str,
-        ) -> futures::future::BoxFuture<
-            'a,
-            Result<futures::stream::BoxStream<'a, Result<AgentEvent>>>,
-        > {
-            Box::pin(async move {
-                let (_sender, receiver) = tokio::sync::mpsc::channel(1);
-                Ok(
-                    Box::pin(tokio_stream::wrappers::ReceiverStream::new(receiver))
-                        as futures::stream::BoxStream<'a, Result<AgentEvent>>,
-                )
-            })
-        }
-
-        fn execute_stream_with_invocation_context<'a>(
-            &'a self,
-            _task: &'a str,
+            _message: Message,
             cancel: CancellationToken,
-            _invocation: AgentInvocationContext,
+            invocation: AgentInvocationContext,
         ) -> futures::future::BoxFuture<
             'a,
             Result<futures::stream::BoxStream<'a, Result<AgentEvent>>>,
         > {
             let cancellation_seen = Arc::clone(&self.cancellation_seen);
             Box::pin(async move {
-                let (sender, receiver) = tokio::sync::mpsc::channel(1);
+                let identity = echo_core::agent::EventIdentity::from_invocation(&invocation)?;
+                let (sender, receiver) = tokio::sync::mpsc::channel(2);
                 tokio::spawn(async move {
+                    let _invocation = invocation;
+                    let _ = sender
+                        .send(Ok(source_status(
+                            &identity,
+                            echo_core::agent::ExecutionStatusKind::Started,
+                            0,
+                        )))
+                        .await;
                     cancel.cancelled().await;
                     cancellation_seen.notify_one();
+                    let _ = sender
+                        .send(Ok(source_status(
+                            &identity,
+                            echo_core::agent::ExecutionStatusKind::Cancelled,
+                            1,
+                        )))
+                        .await;
                     let _ = sender.send(Ok(AgentEvent::Cancelled)).await;
                 });
                 Ok(
@@ -4016,13 +4692,11 @@ mod tests {
             ""
         }
 
-        fn execute<'a>(&'a self, _task: &'a str) -> futures::future::BoxFuture<'a, Result<String>> {
-            Box::pin(std::future::pending())
-        }
-
-        fn execute_stream<'a>(
+        fn execute_stream_message_with_invocation_context<'a>(
             &'a self,
-            _task: &'a str,
+            _message: Message,
+            _cancel: CancellationToken,
+            invocation: AgentInvocationContext,
         ) -> futures::future::BoxFuture<
             'a,
             Result<futures::stream::BoxStream<'a, Result<AgentEvent>>>,
@@ -4031,25 +4705,26 @@ mod tests {
             let started = self.started.clone();
             let release = self.release.clone();
             Box::pin(async move {
+                let identity = echo_core::agent::EventIdentity::from_invocation(&invocation)?;
                 started.notify_one();
-                Ok(Box::pin(PendingDropStream {
+                let pending = PendingDropStream {
                     dropped,
-                    physical_eof: Box::pin(async move { release.notified().await }),
+                    physical_eof: Box::pin(async move {
+                        let _invocation = invocation;
+                        release.notified().await
+                    }),
+                };
+                // 原 PendingDropStream 仍拥有 physical EOF；不为非合作 source 猜成功。
+                Ok(futures::stream::once(async move {
+                    Ok(source_status(
+                        &identity,
+                        echo_core::agent::ExecutionStatusKind::Started,
+                        0,
+                    ))
                 })
-                    as futures::stream::BoxStream<'a, Result<AgentEvent>>)
+                .chain(pending)
+                .boxed())
             })
-        }
-
-        fn execute_stream_with_invocation_context<'a>(
-            &'a self,
-            task: &'a str,
-            _cancel: CancellationToken,
-            _invocation: AgentInvocationContext,
-        ) -> futures::future::BoxFuture<
-            'a,
-            Result<futures::stream::BoxStream<'a, Result<AgentEvent>>>,
-        > {
-            self.execute_stream(task)
         }
     }
 
@@ -4067,12 +4742,11 @@ mod tests {
         fn system_prompt(&self) -> &str {
             ""
         }
-        fn execute<'a>(&'a self, _task: &'a str) -> futures::future::BoxFuture<'a, Result<String>> {
-            Box::pin(async { Err(ReactError::Other("stream only".to_string())) })
-        }
-        fn execute_stream<'a>(
+        fn execute_stream_message_with_invocation_context<'a>(
             &'a self,
-            _task: &'a str,
+            _message: Message,
+            _cancel: CancellationToken,
+            invocation: AgentInvocationContext,
         ) -> futures::future::BoxFuture<
             'a,
             Result<futures::stream::BoxStream<'a, Result<AgentEvent>>>,
@@ -4088,7 +4762,14 @@ mod tests {
                 if self.setup {
                     return Err(unknown);
                 }
-                Ok(futures::stream::iter(vec![Ok(AgentEvent::Cancelled), Err(unknown)]).boxed())
+                let identity = echo_core::agent::EventIdentity::from_invocation(&invocation)?;
+                Ok(async_stream::stream! {
+                    let _invocation = invocation;
+                    yield Ok(source_status(&identity, echo_core::agent::ExecutionStatusKind::Started, 0));
+                    yield Ok(source_status(&identity, echo_core::agent::ExecutionStatusKind::Cancelled, 1));
+                    yield Ok(AgentEvent::Cancelled);
+                    yield Err(unknown);
+                }.boxed())
             })
         }
     }
@@ -4264,13 +4945,21 @@ mod tests {
     }
 
     impl TailCleanupAgent {
-        fn events(&self) -> Vec<Result<AgentEvent>> {
-            match self.sequence {
+        fn events(&self, identity: &echo_core::agent::EventIdentity) -> Vec<Result<AgentEvent>> {
+            let started =
+                source_status(identity, echo_core::agent::ExecutionStatusKind::Started, 0);
+            let settled =
+                source_status(identity, echo_core::agent::ExecutionStatusKind::Settled, 1);
+            let mut events = match self.sequence {
                 TailCleanupSequence::AnswerOnly => {
-                    vec![Ok(AgentEvent::FinalAnswer("done".to_string()))]
+                    vec![
+                        Ok(AgentEvent::FinalAnswer("done".to_string())),
+                        Ok(settled.clone()),
+                    ]
                 }
                 TailCleanupSequence::AnswerThenCleanupError => vec![
                     Ok(AgentEvent::FinalAnswer("done".to_string())),
+                    Ok(settled.clone()),
                     Err(ReactError::Other("cleanup close failed".to_string())),
                 ],
                 TailCleanupSequence::EarlyFailureThenCleanupError => vec![
@@ -4282,14 +4971,22 @@ mod tests {
                             "fixture terminal failure",
                         ),
                     }),
+                    Ok(source_status(
+                        identity,
+                        echo_core::agent::ExecutionStatusKind::Failed,
+                        1,
+                    )),
                     Err(ReactError::Other("cleanup close failed".to_string())),
                 ],
                 TailCleanupSequence::AnswerThenTwoCleanupErrors => vec![
                     Ok(AgentEvent::FinalAnswer("done".to_string())),
+                    Ok(settled.clone()),
                     Err(ReactError::Other("first tail cleanup failure".to_string())),
                     Err(ReactError::Other("second tail cleanup failure".to_string())),
                 ],
-            }
+            };
+            events.insert(0, Ok(started));
+            events
         }
     }
 
@@ -4306,40 +5003,22 @@ mod tests {
             ""
         }
 
-        fn execute<'a>(&'a self, _task: &'a str) -> futures::future::BoxFuture<'a, Result<String>> {
-            Box::pin(async { Ok("done".to_string()) })
-        }
-
-        fn execute_stream<'a>(
+        fn execute_stream_message_with_invocation_context<'a>(
             &'a self,
-            _task: &'a str,
-        ) -> futures::future::BoxFuture<
-            'a,
-            Result<futures::stream::BoxStream<'a, Result<AgentEvent>>>,
-        > {
-            let events = self.events();
-            Box::pin(async move {
-                Ok(Box::pin(futures::stream::iter(events))
-                    as futures::stream::BoxStream<'a, Result<AgentEvent>>)
-            })
-        }
-
-        fn execute_stream_with_invocation_context<'a>(
-            &'a self,
-            _task: &'a str,
+            _message: Message,
             _cancel: CancellationToken,
-            _invocation: AgentInvocationContext,
+            invocation: AgentInvocationContext,
         ) -> futures::future::BoxFuture<
             'a,
             Result<futures::stream::BoxStream<'a, Result<AgentEvent>>>,
         > {
-            // Expose the live source directly, like `ReactAgent`/`MockAgent`.
-            // The trait default projects the source and stops forwarding items
-            // after the terminal projection, which would hide this tail before
-            // the executor drain could observe it.
-            let events = self.events();
             Box::pin(async move {
-                Ok(Box::pin(futures::stream::iter(events))
+                let identity = echo_core::agent::EventIdentity::from_invocation(&invocation)?;
+                let events = self.events(&identity);
+                Ok(Box::pin(async_stream::stream! {
+                    let _invocation = invocation;
+                    for event in events { yield event; }
+                })
                     as futures::stream::BoxStream<'a, Result<AgentEvent>>)
             })
         }
@@ -4493,21 +5172,9 @@ mod tests {
         fn system_prompt(&self) -> &str {
             ""
         }
-        fn execute<'a>(&'a self, _task: &'a str) -> futures::future::BoxFuture<'a, Result<String>> {
-            Box::pin(async { Err(ReactError::Other("live source required".to_string())) })
-        }
-        fn execute_stream<'a>(
+        fn execute_stream_message_with_invocation_context<'a>(
             &'a self,
-            _task: &'a str,
-        ) -> futures::future::BoxFuture<
-            'a,
-            Result<futures::stream::BoxStream<'a, Result<AgentEvent>>>,
-        > {
-            Box::pin(async { Err(ReactError::Other("bound invocation required".to_string())) })
-        }
-        fn execute_stream_with_invocation_context<'a>(
-            &'a self,
-            _task: &'a str,
+            _message: Message,
             cancel: CancellationToken,
             invocation: AgentInvocationContext,
         ) -> futures::future::BoxFuture<
@@ -4522,13 +5189,20 @@ mod tests {
                     .map(|value| value.as_str())
                     .unwrap_or(identity.turn_id.as_str())
                     .to_string();
-                let execution_id = identity
-                    .execution_id
-                    .as_ref()
-                    .map(|value| value.as_str().to_string());
+                // unknown与本producer原Started/Settled使用同一个有效身份；
+                // 未显式提供execution时，source_status原本就使用同一turn_id后备。
+                let execution_id = Some(
+                    identity
+                        .execution_id
+                        .as_ref()
+                        .map(|value| value.as_str())
+                        .unwrap_or(identity.turn_id.as_str())
+                        .to_string(),
+                );
                 self.executions.fetch_add(1, Ordering::SeqCst);
                 let source = async_stream::stream! {
                     let _invocation = invocation;
+                    yield Ok(source_status(&identity, echo_core::agent::ExecutionStatusKind::Started, 0));
                     if let Err(error) = tokio::fs::write(&self.effect, b"same-source-entered").await {
                         yield Err(ReactError::Other(error.to_string())); return;
                     }
@@ -4540,6 +5214,7 @@ mod tests {
                     }
                     self.release_terminal.notified().await;
                     yield Ok(AgentEvent::FinalAnswer("same source completed".to_string()));
+                    yield Ok(source_status(&identity, echo_core::agent::ExecutionStatusKind::Settled, 1));
                     self.terminal_seen.notify_one();
                     self.barrier.release_cleanup.notified().await;
                     if let Err(error) = tokio::fs::write(&self.effect, b"same-source-closed").await {
@@ -4724,27 +5399,11 @@ mod tests {
         fn system_prompt(&self) -> &str {
             ""
         }
-        fn execute<'a>(&'a self, _task: &'a str) -> futures::future::BoxFuture<'a, Result<String>> {
-            Box::pin(async { Err(ReactError::Other("fixture requires streaming".to_string())) })
-        }
-        fn execute_stream<'a>(
+        fn execute_stream_message_with_invocation_context<'a>(
             &'a self,
-            task: &'a str,
-        ) -> futures::future::BoxFuture<
-            'a,
-            Result<futures::stream::BoxStream<'a, Result<AgentEvent>>>,
-        > {
-            self.execute_stream_with_invocation_context(
-                task,
-                CancellationToken::new(),
-                AgentInvocationContext::default(),
-            )
-        }
-        fn execute_stream_with_invocation_context<'a>(
-            &'a self,
-            _task: &'a str,
+            _message: Message,
             cancel: CancellationToken,
-            _invocation: AgentInvocationContext,
+            invocation: AgentInvocationContext,
         ) -> futures::future::BoxFuture<
             'a,
             Result<futures::stream::BoxStream<'a, Result<AgentEvent>>>,
@@ -4753,8 +5412,12 @@ mod tests {
             let failure = self.failure;
             let self_barrier = barrier.clone();
             Box::pin(async move {
+                let identity = echo_core::agent::EventIdentity::from_invocation(&invocation)?;
+                let started =
+                    source_status(&identity, echo_core::agent::ExecutionStatusKind::Started, 0);
                 let (sender, receiver) = tokio::sync::mpsc::channel(2);
                 tokio::spawn(async move {
+                    let _invocation = invocation;
                     barrier.started.notify_one();
                     let item = match failure {
                         HeldStreamFailure::Cancellation => {
@@ -4778,24 +5441,36 @@ mod tests {
                         }
                     };
                     let _ = sender.send(item).await;
+                    // 保留原 Err/Error/Cancelled 的观察顺序和首因，独立声明 source 终态。
+                    let terminal = match failure {
+                        HeldStreamFailure::Cancellation | HeldStreamFailure::CancelledEvent => {
+                            echo_core::agent::ExecutionStatusKind::Cancelled
+                        }
+                        HeldStreamFailure::RawError | HeldStreamFailure::ErrorEvent => {
+                            echo_core::agent::ExecutionStatusKind::Failed
+                        }
+                    };
+                    let _ = sender.send(Ok(source_status(&identity, terminal, 1))).await;
                     barrier.cleanup_entered.notify_one();
                     barrier.release_cleanup.notified().await;
                     barrier.physical_stopped.store(true, Ordering::SeqCst);
                     drop(sender);
                 });
                 let observed = self_barrier;
-                Ok(
-                    futures::stream::unfold((receiver, false), move |(mut receiver, seen)| {
-                        let observed = observed.clone();
-                        async move {
-                            if seen {
-                                observed.collector_waiting_eof.notify_one();
+                Ok(futures::stream::once(async move { Ok(started) })
+                    .chain(futures::stream::unfold(
+                        (receiver, false),
+                        move |(mut receiver, seen)| {
+                            let observed = observed.clone();
+                            async move {
+                                if seen {
+                                    observed.collector_waiting_eof.notify_one();
+                                }
+                                receiver.recv().await.map(|item| (item, (receiver, true)))
                             }
-                            receiver.recv().await.map(|item| (item, (receiver, true)))
-                        }
-                    })
-                    .boxed(),
-                )
+                        },
+                    ))
+                    .boxed())
             })
         }
     }
@@ -5400,8 +6075,10 @@ mod tests {
         assert!(final_task.execution.claim.is_none());
         if batch_timeout {
             assert!(
-                matches!(&final_task.execution.status, crate::tasks::TaskStatus::Failed(error)
-                if error.contains("batch timeout"))
+                matches!(&final_task.execution.status, crate::tasks::TaskStatus::TimedOut { error }
+                if error.contains("batch timeout")),
+                "original batch terminal status: {:?}",
+                final_task.execution.status
             );
         } else {
             assert_eq!(
@@ -6028,6 +6705,59 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn controlled_dispatch_claims_scoped_guidance_for_independent_runs() -> Result<()> {
+        let (registry, executor) = make_executor().await;
+        let agent = MockAgent::new("guided")
+            .with_response("done")
+            .with_response("done");
+        registry
+            .register(
+                SubagentDefinition::new("guided", "Guided subagent"),
+                Box::new(agent.clone()),
+            )
+            .await;
+        for (run, instruction) in [("run-a", "只处理甲"), ("run-b", "只处理乙")] {
+            executor
+                .queue_guidance_scoped(run, run, "task-guided", 1, instruction)
+                .map_err(|error| ReactError::Other(error.to_string()))?;
+        }
+
+        for (run, execution, instruction, other_instruction) in [
+            ("run-a", "execution-a", "只处理甲", "只处理乙"),
+            ("run-b", "execution-b", "只处理乙", "只处理甲"),
+        ] {
+            let request = DispatchRequest {
+                agent_name: "guided".to_string(),
+                task: "perform task".to_string(),
+                mode_override: Some(ExecutionMode::Sync),
+                cancel: CancellationToken::new(),
+                parent_agent: "parent".to_string(),
+                parent_context: None,
+                delegation_policy: DispatchRequest::policy_from_depth(0),
+                runtime_context: None,
+                message: None,
+                prompt_payload: None,
+                prompt_context: None,
+                constraints: Vec::new(),
+                background: false,
+            };
+            let identity = SubagentAttemptIdentity::for_run(run, "task-guided", execution, 1)
+                .map_err(|error| ReactError::Other(error.to_string()))?;
+            executor.dispatch_attempt(request, identity).await?;
+            let observed = agent.last_task().unwrap_or_default();
+            assert!(observed.contains("perform task"));
+            assert!(observed.contains("[queued_guidance]"));
+            assert!(observed.contains(instruction));
+            assert!(!observed.contains(other_instruction));
+            assert!(matches!(
+                executor.queue_guidance_scoped(run, run, "task-guided", 1, "late"),
+                Err(SubagentControlError::AttemptAlreadyStarted { .. })
+            ));
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn background_handle_cancels_dispatch() -> Result<()> {
         let (registry, executor) = make_executor().await;
         registry
@@ -6107,6 +6837,89 @@ mod tests {
         Ok(())
     }
 
+    // dispatch/原handle.join已完成后读取全部已发布原件，不按nth取terminal、不吞lag。
+    fn settled_dispatch_envelopes(
+        receiver: &mut tokio::sync::broadcast::Receiver<
+            Arc<super::super::events::SubagentEventEnvelope>,
+        >,
+    ) -> Result<Vec<Arc<super::super::events::SubagentEventEnvelope>>> {
+        let mut observed = Vec::new();
+        loop {
+            match receiver.try_recv() {
+                Ok(envelope) => observed.push(envelope),
+                Err(tokio::sync::broadcast::error::TryRecvError::Empty) => break,
+                Err(error) => return Err(ReactError::Other(error.to_string())),
+            }
+        }
+        Ok(observed)
+    }
+
+    // 当前Mock source明确拥有Started/Final/Settled；原collector会发布一次确认正文。
+    // 校验完整事件种类、正文、唯一terminal及每一条transport因果链，不能只过滤terminal过关。
+    fn assert_native_mock_dispatch_envelopes(
+        observed: &[Arc<super::super::events::SubagentEventEnvelope>],
+        started_agent: &str,
+        completed_agent: &str,
+        expected_text: &str,
+    ) -> Result<()> {
+        let started = observed
+            .first()
+            .ok_or_else(|| ReactError::Other("dispatch start envelope missing".into()))?;
+        assert!(matches!(&started.payload.event,
+            SubagentEvent::DispatchStarted { agent, .. } if agent == started_agent));
+        let terminal = observed
+            .last()
+            .ok_or_else(|| ReactError::Other("dispatch terminal envelope missing".into()))?;
+        assert!(matches!(&terminal.payload.event,
+            SubagentEvent::DispatchCompleted { agent, outcome, .. }
+                if agent == completed_agent && outcome.status == SubagentStatus::Completed));
+        let mut texts = Vec::new();
+        let mut started_count = 0_usize;
+        let mut terminal_count = 0_usize;
+        for (index, envelope) in observed.iter().enumerate() {
+            assert_eq!(envelope.stream_id, started.stream_id);
+            assert_eq!(
+                envelope.sequence,
+                u64::try_from(index.saturating_add(1))
+                    .map_err(|error| ReactError::Other(error.to_string()))?
+            );
+            assert_eq!(envelope.conversation_id, started.conversation_id);
+            assert_eq!(envelope.message_id, started.message_id);
+            assert_eq!(envelope.run_id, started.run_id);
+            assert_eq!(envelope.execution_id, started.execution_id);
+            if index > 0 {
+                assert_eq!(envelope.parent_event_id.as_ref(), Some(&started.event_id));
+            }
+            match &envelope.payload.event {
+                SubagentEvent::DispatchStarted { agent, .. } => {
+                    started_count = started_count.saturating_add(1);
+                    assert_eq!(agent, started_agent);
+                    assert_eq!(envelope.payload.invocation.agent_name, started_agent);
+                }
+                SubagentEvent::DispatchTokenDelta { agent, content, .. } => {
+                    assert_eq!(agent, completed_agent);
+                    assert_eq!(envelope.payload.invocation.agent_name, completed_agent);
+                    texts.push(content.as_str());
+                }
+                SubagentEvent::DispatchCompleted { agent, outcome, .. } => {
+                    terminal_count = terminal_count.saturating_add(1);
+                    assert_eq!(agent, completed_agent);
+                    assert_eq!(envelope.payload.invocation.agent_name, completed_agent);
+                    assert_eq!(outcome.status, SubagentStatus::Completed);
+                }
+                other => {
+                    return Err(ReactError::Other(format!(
+                        "unexpected event in completed native Mock source: {other:?}"
+                    )));
+                }
+            }
+        }
+        assert_eq!(started_count, 1);
+        assert_eq!(terminal_count, 1);
+        assert_eq!(texts, vec![expected_text]);
+        Ok(())
+    }
+
     #[tokio::test]
     async fn dispatch_started_preserves_chat_identity() -> std::result::Result<(), String> {
         let (registry, executor) = make_executor().await;
@@ -6168,7 +6981,13 @@ mod tests {
             }
             other => return Err(format!("expected DispatchStarted, got {other:?}")),
         }
-        let started_envelope = envelopes.recv().await.map_err(|error| error.to_string())?;
+        let observed =
+            settled_dispatch_envelopes(&mut envelopes).map_err(|error| error.to_string())?;
+        assert_native_mock_dispatch_envelopes(&observed, "identity", "identity", "done")
+            .map_err(|error| error.to_string())?;
+        let started_envelope = observed
+            .first()
+            .ok_or_else(|| "identity start envelope missing".to_string())?;
         assert_eq!(started_envelope.sequence, 1);
         assert_eq!(
             started_envelope
@@ -6190,30 +7009,18 @@ mod tests {
         );
         assert_eq!(started_envelope.payload.invocation.attempt, Some(3));
         assert_eq!(started_envelope.payload.invocation.plan_revision, Some(7));
-        let terminal = envelopes.recv().await.map_err(|error| error.to_string())?;
-        assert_eq!(terminal.sequence, 2);
-        assert_eq!(
-            terminal.parent_event_id,
-            Some(started_envelope.event_id.clone())
-        );
-        assert!(matches!(
-            terminal.payload.event,
-            SubagentEvent::DispatchCompleted { .. }
-        ));
+        for envelope in &observed {
+            assert_eq!(
+                envelope.payload.invocation.task_id.as_deref(),
+                Some("task-identity")
+            );
+            assert_eq!(envelope.payload.invocation.attempt, Some(3));
+            assert_eq!(envelope.payload.invocation.plan_revision, Some(7));
+        }
         Ok(())
     }
 
-    // NOTE: a unit test for multimodal dispatch forwarding (verifying a subagent
-    // receives the Message via execute_stream_message_with_cancel) is not
-    // feasible with MockAgent — the trait-object vtable routes the default
-    // trait method rather than MockAgent's override for this added method, so
-    // the message path can't be exercised in isolation. Subagent multimodal
-    // forwarding is instead verified by: (1) the text-path dispatch tests
-    // above, (2) compile-time coverage of the DispatchRequest.message field
-    // and execute_agent_streaming branch, and (3) desktop UI manual testing of
-    // attachment-bearing complex tasks. MockAgent retains the override +
-    // message-recording fields so real agents and future test harnesses can
-    // use them.
+    // 完整 Message、history 与只读上界由 canonical_consumer_tests 及 MockAgent typed 记录实测。
 
     #[tokio::test]
     async fn test_dispatch_not_found() -> Result<()> {
@@ -6415,22 +7222,8 @@ mod tests {
             Some(SubagentEvent::DispatchCompleted { outcome, .. })
                 if outcome.status == SubagentStatus::Completed
         ));
-        let mut sequences = Vec::new();
-        let mut agents = Vec::new();
-        for _ in 0..2 {
-            let envelope = envelopes
-                .recv()
-                .await
-                .map_err(|error| ReactError::Other(error.to_string()))?;
-            sequences.push(envelope.sequence);
-            agents.push(envelope.payload.invocation.agent_name.clone());
-        }
-        assert_eq!(sequences, vec![1, 2]);
-        assert_eq!(agents, vec!["primary", "recovery"]);
-        assert!(matches!(
-            envelopes.try_recv(),
-            Err(tokio::sync::broadcast::error::TryRecvError::Empty)
-        ));
+        let observed = settled_dispatch_envelopes(&mut envelopes)?;
+        assert_native_mock_dispatch_envelopes(&observed, "primary", "recovery", "recovered")?;
         Ok(())
     }
 
@@ -6677,23 +7470,32 @@ mod tests {
         assert_ne!(first.output, second.output);
         assert_ne!(first.output, "cached");
         assert_ne!(second.output, "cached");
-        let mut sequences_by_stream = HashMap::<String, Vec<u64>>::new();
-        for _ in 0..4 {
-            let envelope = envelopes
-                .recv()
-                .await
-                .map_err(|error| ReactError::Other(error.to_string()))?;
-            sequences_by_stream
+        let observed = settled_dispatch_envelopes(&mut envelopes)?;
+        let mut by_stream =
+            HashMap::<String, Vec<Arc<super::super::events::SubagentEventEnvelope>>>::new();
+        for envelope in observed {
+            by_stream
                 .entry(envelope.stream_id.as_str().to_string())
                 .or_default()
-                .push(envelope.sequence);
+                .push(envelope);
         }
-        assert_eq!(sequences_by_stream.len(), 2);
-        assert!(
-            sequences_by_stream
-                .values()
-                .all(|sequences| sequences.as_slice() == [1, 2])
-        );
+        assert_eq!(by_stream.len(), 2);
+        let mut actual_outputs = Vec::new();
+        for stream in by_stream.values() {
+            let output: String = stream
+                .iter()
+                .filter_map(|envelope| match &envelope.payload.event {
+                    SubagentEvent::DispatchTokenDelta { content, .. } => Some(content.as_str()),
+                    _ => None,
+                })
+                .collect();
+            assert_native_mock_dispatch_envelopes(stream, "explorer", "explorer", &output)?;
+            actual_outputs.push(output);
+        }
+        let mut expected_outputs = vec![first.output, second.output];
+        actual_outputs.sort();
+        expected_outputs.sort();
+        assert_eq!(actual_outputs, expected_outputs);
         Ok(())
     }
 
@@ -6884,20 +7686,8 @@ mod tests {
 
         let result = handle.join().await?;
         assert_eq!(result.output, "team result");
-        let started = envelopes
-            .recv()
-            .await
-            .map_err(|error| ReactError::Other(error.to_string()))?;
-        let terminal = envelopes
-            .recv()
-            .await
-            .map_err(|error| ReactError::Other(error.to_string()))?;
-        assert_eq!(started.sequence, 1);
-        assert_eq!(terminal.sequence, 2);
-        assert!(matches!(
-            terminal.payload.event,
-            SubagentEvent::DispatchCompleted { .. }
-        ));
+        let observed = settled_dispatch_envelopes(&mut envelopes)?;
+        assert_native_mock_dispatch_envelopes(&observed, "tm", "tm", "team result")?;
         Ok(())
     }
 
@@ -7618,24 +8408,72 @@ mod tests {
                 result.isolation_observed
             ));
         }
-        let started = events.recv().await.map_err(|error| error.to_string())?;
-        let observed = events.recv().await.map_err(|error| error.to_string())?;
-        let completed = events.recv().await.map_err(|error| error.to_string())?;
-        if !matches!(started.as_ref(), SubagentEvent::DispatchStarted { .. }) {
-            return Err(format!("first event was not started: {started:?}"));
+        let mut observed = Vec::new();
+        loop {
+            match events.try_recv() {
+                Ok(event) => observed.push(event),
+                Err(tokio::sync::broadcast::error::TryRecvError::Empty) => break,
+                Err(error) => return Err(error.to_string()),
+            }
         }
-        if !matches!(
-            observed.as_ref(),
-            SubagentEvent::DispatchIsolationObserved { isolation, .. }
-                if isolation.as_str() == "sandbox"
-        ) {
-            return Err(format!(
-                "second event was not worktree observation: {observed:?}"
-            ));
+        assert!(matches!(
+            observed.first().map(AsRef::as_ref),
+            Some(SubagentEvent::DispatchStarted { .. })
+        ));
+        assert!(matches!(observed.last().map(AsRef::as_ref),
+            Some(SubagentEvent::DispatchCompleted { outcome, .. })
+                if outcome.status == SubagentStatus::Completed));
+        let mut worktree_index = None;
+        let mut completion_index = None;
+        let mut text = Vec::new();
+        let mut starts = 0_usize;
+        let mut completions = 0_usize;
+        for (index, event) in observed.iter().enumerate() {
+            match event.as_ref() {
+                SubagentEvent::DispatchStarted { parent, agent, .. } => {
+                    starts = starts.saturating_add(1);
+                    assert_eq!((parent.as_str(), agent.as_str()), ("parent", "writer"));
+                }
+                SubagentEvent::DispatchIsolationObserved {
+                    parent,
+                    agent,
+                    isolation,
+                    ..
+                } => {
+                    assert_eq!((parent.as_str(), agent.as_str()), ("parent", "writer"));
+                    assert_eq!(isolation.as_str(), "sandbox");
+                    assert!(
+                        worktree_index.replace(index).is_none(),
+                        "duplicate worktree observation"
+                    );
+                }
+                SubagentEvent::DispatchTokenDelta {
+                    parent,
+                    agent,
+                    content,
+                    ..
+                } => {
+                    assert_eq!((parent.as_str(), agent.as_str()), ("parent", "writer"));
+                    text.push(content.as_str());
+                }
+                SubagentEvent::DispatchCompleted { parent, agent, .. } => {
+                    completions = completions.saturating_add(1);
+                    assert_eq!((parent.as_str(), agent.as_str()), ("parent", "writer"));
+                    completion_index = Some(index);
+                }
+                other => return Err(format!("unexpected worktree source event: {other:?}")),
+            }
         }
-        if !matches!(completed.as_ref(), SubagentEvent::DispatchCompleted { .. }) {
-            return Err(format!("third event was not completed: {completed:?}"));
-        }
+        assert_eq!((starts, completions), (1, 1));
+        assert_eq!(text, vec!["done"]);
+        let worktree_index =
+            worktree_index.ok_or_else(|| "worktree observation missing".to_string())?;
+        let completion_index =
+            completion_index.ok_or_else(|| "worktree completion missing".to_string())?;
+        assert!(
+            worktree_index < completion_index,
+            "worktree must be observed before original completion"
+        );
         Ok(())
     }
 
@@ -8041,5 +8879,680 @@ mod tests {
             !wt_factory.labels.lock().unwrap().is_empty(),
             "worktree factory should have been invoked"
         );
+    }
+
+    fn guarded_team_definition(member: &str) -> SubagentDefinition {
+        super::super::builder::SubagentBuilder::new("guarded-team")
+            .team(super::super::team::TeamSpec {
+                strategy: super::super::team::TeamStrategy::Pipeline(vec![member.to_string()]),
+                manager: String::new(),
+                subagents: Vec::new(),
+                config: super::super::team::TeamConfig::default(),
+            })
+            .build()
+    }
+
+    struct RequireActualTeamGuard(Arc<AtomicUsize>);
+
+    #[async_trait::async_trait]
+    impl super::super::registry::SubagentRegistrationAdmission for RequireActualTeamGuard {
+        async fn admit(
+            &self,
+            _registration: &super::super::registry::SubagentRegistration,
+            request: &DispatchRequest,
+        ) -> Result<()> {
+            if !request.runtime_context.as_ref().is_some_and(|runtime| {
+                runtime
+                    .resource_guards
+                    .iter()
+                    .any(|guard| guard.retains::<DispatchGuardDrop>())
+            }) {
+                return Err(ReactError::Other(
+                    "actual Team member lost its original physical guard".to_string(),
+                ));
+            }
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn team_admission_and_member_invocation_keep_guards_without_retained_runtime_leak()
+    -> Result<()> {
+        let (registry, executor) = make_executor().await;
+        let member = MockAgent::new("guarded-member").with_response("done");
+        registry
+            .register(
+                SubagentDefinition::new("guarded-member", "actual member"),
+                Box::new(member.clone()),
+            )
+            .await;
+        registry
+            .register(
+                guarded_team_definition("guarded-member"),
+                Box::new(MockAgent::new("guarded-team")),
+            )
+            .await;
+        let checks = Arc::new(AtomicUsize::new(0));
+        registry
+            .set_registration_admission(Some(Arc::new(RequireActualTeamGuard(checks.clone()))))
+            .await;
+        let drops = Arc::new(AtomicUsize::new(0));
+        let mut request = unknown_request(ExecutionMode::Team, CancellationToken::new());
+        request.agent_name = "guarded-team".to_string();
+        request.runtime_context = Some(echo_core::tools::ExternalRunContext {
+            run_id: Some("guarded-team-run".to_string()),
+            resource_guards: vec![InvocationResourceGuard::new(DispatchGuardDrop(
+                drops.clone(),
+            ))],
+            ..echo_core::tools::ExternalRunContext::default()
+        });
+        executor.dispatch(request).await?;
+        assert_eq!(checks.load(Ordering::SeqCst), 2);
+        let contexts = member.take_invocation_contexts();
+        assert!(
+            contexts
+                .first()
+                .and_then(|context| context.runtime.as_ref())
+                .is_some_and(|runtime| runtime
+                    .resource_guards
+                    .iter()
+                    .any(|guard| guard.retains::<DispatchGuardDrop>()))
+        );
+        assert_eq!(executor.team_runtime_handles("guarded-team-run").len(), 1);
+        assert_eq!(drops.load(Ordering::SeqCst), 0);
+        drop(contexts);
+        assert_eq!(
+            drops.load(Ordering::SeqCst),
+            1,
+            "retained completed Team runtime leaked invocation lease"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn team_caller_drop_keeps_guard_until_original_member_physical_eof() -> Result<()> {
+        let (registry, executor) = make_executor().await;
+        let dropped = Arc::new(AtomicBool::new(false));
+        let started = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        registry
+            .register(
+                SubagentDefinition::new("held-team-member", "original producer"),
+                Box::new(NonCooperativeTeamAgent {
+                    dropped: dropped.clone(),
+                    started: started.clone(),
+                    release: release.clone(),
+                }),
+            )
+            .await;
+        registry
+            .register(
+                guarded_team_definition("held-team-member"),
+                Box::new(MockAgent::new("guarded-team")),
+            )
+            .await;
+        let drops = Arc::new(AtomicUsize::new(0));
+        let mut request = unknown_request(ExecutionMode::Team, CancellationToken::new());
+        request.agent_name = "guarded-team".to_string();
+        request.runtime_context = Some(echo_core::tools::ExternalRunContext {
+            resource_guards: vec![InvocationResourceGuard::new(DispatchGuardDrop(
+                drops.clone(),
+            ))],
+            ..echo_core::tools::ExternalRunContext::default()
+        });
+        let caller = tokio::spawn(async move { executor.dispatch(request).await });
+        tokio::time::timeout(Duration::from_secs(3), started.notified())
+            .await
+            .map_err(|error| ReactError::Other(error.to_string()))?;
+        caller.abort();
+        assert!(caller.await.is_err_and(|error| error.is_cancelled()));
+        assert!(!dropped.load(Ordering::SeqCst));
+        assert_eq!(drops.load(Ordering::SeqCst), 0);
+        release.notify_one();
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while !dropped.load(Ordering::SeqCst) || drops.load(Ordering::SeqCst) != 1 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .map_err(|error| {
+            ReactError::Other(format!(
+                "original Team cleanup did not release guard: {error}"
+            ))
+        })?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn team_unknown_member_settlement_retains_original_invocation_guard() -> Result<()> {
+        let (registry, executor) = make_executor().await;
+        registry
+            .register(
+                SubagentDefinition::new("unknown-cleanup", "unknown producer"),
+                Box::new(UnknownCleanupAgent {
+                    setup: true,
+                    panic_setup: false,
+                }),
+            )
+            .await;
+        registry
+            .register(
+                guarded_team_definition("unknown-cleanup"),
+                Box::new(MockAgent::new("guarded-team")),
+            )
+            .await;
+        let drops = Arc::new(AtomicUsize::new(0));
+        let mut request = unknown_request(ExecutionMode::Team, CancellationToken::new());
+        request.agent_name = "guarded-team".to_string();
+        request.runtime_context = Some(echo_core::tools::ExternalRunContext {
+            resource_guards: vec![InvocationResourceGuard::new(DispatchGuardDrop(
+                drops.clone(),
+            ))],
+            ..echo_core::tools::ExternalRunContext::default()
+        });
+        let result = executor.dispatch(request).await;
+        assert!(matches!(
+            result,
+            Err(ReactError::ExecutionNotSettled { .. })
+        ));
+        assert_eq!(
+            drops.load(Ordering::SeqCst),
+            0,
+            "unknown Team producer released physical guard"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn direct_teammate_setup_unknown_retains_last_invocation_guard_in_original_keyed_owner()
+    -> Result<()> {
+        let registry = Arc::new(SubagentRegistry::new());
+        registry
+            .register(
+                SubagentDefinition::new("unknown-cleanup", "direct setup unknown"),
+                Box::new(UnknownCleanupAgent {
+                    setup: true,
+                    panic_setup: false,
+                }),
+            )
+            .await;
+        let executor = SubagentExecutor::new(
+            registry,
+            SubagentExecutorConfig {
+                max_concurrent_forks: 1,
+                ..SubagentExecutorConfig::default()
+            },
+        );
+        let drops = Arc::new(AtomicUsize::new(0));
+        let mut request = unknown_request(ExecutionMode::Sync, CancellationToken::new());
+        request.runtime_context = Some(echo_core::tools::ExternalRunContext {
+            resource_guards: vec![InvocationResourceGuard::new(DispatchGuardDrop(
+                drops.clone(),
+            ))],
+            ..echo_core::tools::ExternalRunContext::default()
+        });
+        // This is deliberately the public handle API, not dispatch(mode=Teammate).
+        // The default Agent wrapper returns during setup, before it can build
+        // an invocation-retaining stream, leaving this the last guard owner.
+        let result = executor.dispatch_teammate(request).await?.join().await;
+        assert!(
+            matches!(result, Err(ReactError::ExecutionNotSettled { run_id, execution_id: Some(execution_id) })
+            if run_id == "unknown-original" && execution_id == "unknown-attempt")
+        );
+        assert_eq!(drops.load(Ordering::SeqCst), 0);
+        assert_eq!(executor.local_fork_admission.active_count(), 1);
+        // Borrowed-resource retention does not consume a second process slot.
+        let probe = executor
+            .local_fork_admission
+            .issue("direct-teammate-capacity-probe")
+            .map_err(|error| ReactError::Other(error.to_string()))?;
+        drop(probe);
+        assert_eq!(executor.local_fork_admission.active_count(), 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn direct_teammate_original_eof_releases_guard_after_normal_join_or_observer_drop()
+    -> Result<()> {
+        for observer_drop in [false, true] {
+            let (registry, executor) = make_executor().await;
+            let barrier = Arc::new(StreamSettlementBarrier::default());
+            let release_terminal = Arc::new(tokio::sync::Notify::new());
+            let terminal_seen = Arc::new(tokio::sync::Notify::new());
+            let cancelled_seen = Arc::new(tokio::sync::Notify::new());
+            let executions = Arc::new(AtomicUsize::new(0));
+            let directory = tempfile::tempdir()?;
+            let effect = directory.path().join("direct-original-source.txt");
+            registry
+                .register(
+                    SubagentDefinition::new("direct-held", "original direct producer"),
+                    Box::new(LiveObservationAgent {
+                        barrier: barrier.clone(),
+                        release_terminal: release_terminal.clone(),
+                        terminal_seen: terminal_seen.clone(),
+                        cancelled_seen: cancelled_seen.clone(),
+                        effect: effect.clone(),
+                        cancelled: observer_drop,
+                        executions: executions.clone(),
+                    }),
+                )
+                .await;
+            let drops = Arc::new(AtomicUsize::new(0));
+            let mut request = unknown_request(ExecutionMode::Sync, CancellationToken::new());
+            request.agent_name = "direct-held".to_string();
+            request.runtime_context = Some(echo_core::tools::ExternalRunContext {
+                run_id: Some("direct-original-source".to_string()),
+                resource_guards: vec![InvocationResourceGuard::new(DispatchGuardDrop(
+                    drops.clone(),
+                ))],
+                ..echo_core::tools::ExternalRunContext::default()
+            });
+            let mut handle = Some(executor.dispatch_teammate(request).await?);
+            tokio::time::timeout(Duration::from_secs(3), barrier.started.notified())
+                .await
+                .map_err(|error| ReactError::Other(error.to_string()))?;
+            assert_eq!(executor.local_fork_admission.active_count(), 1);
+            assert_eq!(drops.load(Ordering::SeqCst), 0);
+            if observer_drop {
+                drop(handle.take());
+                tokio::time::timeout(Duration::from_secs(3), cancelled_seen.notified())
+                    .await
+                    .map_err(|error| ReactError::Other(error.to_string()))?;
+                assert!(!barrier.physical_stopped.load(Ordering::SeqCst));
+                assert_eq!(drops.load(Ordering::SeqCst), 0);
+            }
+            release_terminal.notify_one();
+            tokio::time::timeout(Duration::from_secs(3), terminal_seen.notified())
+                .await
+                .map_err(|error| ReactError::Other(error.to_string()))?;
+            // A valid terminal projection is still not physical cleanup.
+            assert!(!barrier.physical_stopped.load(Ordering::SeqCst));
+            assert_eq!(drops.load(Ordering::SeqCst), 0);
+            assert_eq!(executor.local_fork_admission.active_count(), 1);
+            barrier.release_cleanup.notify_one();
+            if let Some(handle) = handle {
+                let result = handle.join().await?;
+                assert_eq!(result.outcome.status, SubagentStatus::Completed);
+            }
+            tokio::time::timeout(Duration::from_secs(3), async {
+                while !barrier.physical_stopped.load(Ordering::SeqCst)
+                    || drops.load(Ordering::SeqCst) != 1
+                {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .map_err(|error| {
+                ReactError::Other(format!("direct original cleanup did not settle: {error}"))
+            })?;
+            assert_eq!(executor.local_fork_admission.active_count(), 0);
+            assert_eq!(executions.load(Ordering::SeqCst), 1);
+            assert_eq!(tokio::fs::read(&effect).await?, b"same-source-closed");
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod canonical_consumer_tests {
+    use super::*;
+    use crate::agent::subagent::events::SubagentEventBus;
+    use echo_core::agent::{
+        AgentPhase, AssistantMessageBlock, AssistantPhase, ExecutionStatus, ExecutionStatusKind,
+    };
+    use futures::future::BoxFuture;
+    use futures::stream::BoxStream;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct NativeSource {
+        observed: Arc<Mutex<Vec<serde_json::Value>>>,
+        before_eof: Arc<tokio::sync::Notify>,
+        release_eof: Arc<tokio::sync::Notify>,
+        tail_error: bool,
+        safe_final_only: bool,
+        unsettled: Option<&'static str>,
+    }
+    fn status(kind: ExecutionStatusKind, sequence: u64) -> AgentEvent {
+        AgentEvent::ExecutionStatus(ExecutionStatus {
+            adapter_generated: false,
+            execution_id: "native-execution".into(),
+            request_id: Some("native-request".into()),
+            sequence,
+            phase: AgentPhase::Thinking,
+            status: kind,
+            reason: None,
+        })
+    }
+    fn block(phase: AssistantPhase, text: &str) -> AgentEvent {
+        AgentEvent::AssistantMessage {
+            block: AssistantMessageBlock {
+                provider_source: None,
+                block_id: format!("{phase:?}"),
+                request_id: "native-request".into(),
+                sequence: 0,
+                phase,
+                delta: text.into(),
+                complete: true,
+                provider: None,
+                reasoning: None,
+            },
+        }
+    }
+    impl Agent for NativeSource {
+        fn name(&self) -> &str {
+            "native-source"
+        }
+        fn model_name(&self) -> &str {
+            "fixture"
+        }
+        fn system_prompt(&self) -> &str {
+            ""
+        }
+        fn execute<'a>(&'a self, _task: &'a str) -> BoxFuture<'a, Result<String>> {
+            Box::pin(async { Err(ReactError::Other("text result fallback forbidden".into())) })
+        }
+        fn execute_stream<'a>(
+            &'a self,
+            _task: &'a str,
+        ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
+            Box::pin(async { Err(ReactError::Other("text stream downgrade forbidden".into())) })
+        }
+        fn execute_stream_with_invocation_context<'a>(
+            &'a self,
+            _task: &'a str,
+            _cancel: CancellationToken,
+            _invocation: AgentInvocationContext,
+        ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
+            Box::pin(async { Err(ReactError::Other("rich Text was downgraded".into())) })
+        }
+        fn execute_stream_message_with_invocation_context<'a>(
+            &'a self,
+            message: Message,
+            _cancel: CancellationToken,
+            invocation: AgentInvocationContext,
+        ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
+            Box::pin(async move {
+                assert_eq!(
+                    invocation.tool_access,
+                    Some(echo_core::tools::ToolAccess::ReadOnly)
+                );
+                self.observed.lock().map_err(|_| ReactError::Other("observation lock poisoned".into()))?.push(serde_json::json!({
+                    "message":message, "history":invocation.history,
+                    "execution":invocation.runtime.as_ref().and_then(|runtime|runtime.execution_id.clone()),
+                }));
+                let before_eof = self.before_eof.clone();
+                let release_eof = self.release_eof.clone();
+                let tail_error = self.tail_error;
+                let safe_final_only = self.safe_final_only;
+                let unsettled = self.unsettled;
+                let stream = async_stream::stream! {
+                    let _resources = invocation.resource_guards;
+                    yield Ok(status(ExecutionStatusKind::Started, 0));
+                    if matches!(unsettled,Some("cancelled"|"failed")) {
+                        let mut terminal=status(if unsettled==Some("cancelled") {ExecutionStatusKind::Cancelled} else {ExecutionStatusKind::Failed},1);
+                        if let AgentEvent::ExecutionStatus(status)=&mut terminal {status.reason=Some("native-terminal-reason".into());}
+                        yield Ok(terminal);before_eof.notify_one();release_eof.notified().await;
+                        if tail_error { yield Err(ReactError::Other("real native tail cleanup failed".into())); }
+                        return;
+                    }
+                    yield Ok(block(AssistantPhase::Reasoning, "独立推理"));
+                    let progress = block(AssistantPhase::Commentary, "进度");
+                    yield Ok(progress.clone()); yield Ok(progress);
+                    if !safe_final_only { yield Ok(block(AssistantPhase::FinalAnswer, "最终结果")); }
+                    if let Some(kind)=unsettled.filter(|kind|*kind!="duplicate") {
+                        yield Err(ReactError::ExecutionNotSettled {run_id:"native-run".into(),execution_id:Some(if kind=="foreign" {"foreign"} else {"native-execution"}.into())});
+                    }
+                    yield Ok(AgentEvent::LlmUsage { model:"fixture".into(), prompt_tokens:3, completion_tokens:2, total_tokens:5, cached_prompt_tokens:0, cache_creation_prompt_tokens:0, usage_reported:true, observation: None, });
+                    let final_text=if safe_final_only {"Guard确认的安全结果"} else {"最终结果"};
+                    yield Ok(AgentEvent::FinalAnswer(final_text.into()));
+                    let mut terminal=status(ExecutionStatusKind::Settled,1);
+                    if let AgentEvent::ExecutionStatus(status)=&mut terminal {
+                        if unsettled==Some("synthetic") {status.adapter_generated=true;}
+                        if unsettled==Some("foreign") {status.execution_id="foreign".into();}
+                    }
+                    yield Ok(terminal.clone());
+                    if unsettled==Some("duplicate") {
+                        yield Err(ReactError::ExecutionNotSettled {run_id:"native-run".into(),execution_id:Some("native-execution".into())});
+                        yield Ok(terminal);
+                    }
+                    before_eof.notify_one(); release_eof.notified().await;
+                    if tail_error { yield Err(ReactError::Other("real native tail cleanup failed".into())); }
+                };
+                Ok(Box::pin(stream) as BoxStream<'a, Result<AgentEvent>>)
+            })
+        }
+    }
+    struct GuardDrop(Arc<AtomicUsize>);
+    impl Drop for GuardDrop {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    #[tokio::test]
+    async fn canonical_subagent_keeps_rich_text_and_waits_for_source_eof() -> Result<()> {
+        for (tail_error, safe_final_only, unsettled) in [
+            (false, false, None),
+            (true, false, None),
+            (false, true, None),
+            (false, false, Some("synthetic")),
+            (false, false, Some("foreign")),
+            (false, false, Some("valid")),
+            (false, false, Some("duplicate")),
+            (false, false, Some("cancelled")),
+            (false, false, Some("failed")),
+            (true, false, Some("cancelled")),
+            (true, false, Some("failed")),
+        ] {
+            let observed = Arc::new(Mutex::new(Vec::new()));
+            let before_eof = Arc::new(tokio::sync::Notify::new());
+            let release_eof = Arc::new(tokio::sync::Notify::new());
+            let drops = Arc::new(AtomicUsize::new(0));
+            let source = Arc::new(NativeSource {
+                observed: observed.clone(),
+                before_eof: before_eof.clone(),
+                release_eof: release_eof.clone(),
+                tail_error,
+                safe_final_only,
+                unsettled,
+            });
+            let mut current = Message::user("带元数据的文本 🧭".into());
+            current.name = Some("original-name".into());
+            current.role = echo_core::llm::types::Role::System;
+            let expected = serde_json::to_value(&current)?;
+            let prior = Message::user("原history".into());
+            let expected_history = serde_json::to_value(vec![prior.clone()])?;
+            let invocation = AgentInvocationContext {
+                runtime: Some(echo_core::tools::ExternalRunContext {
+                    run_id: Some("native-run".into()),
+                    turn_id: Some("native-turn".into()),
+                    execution_id: Some("native-execution".into()),
+                    ..Default::default()
+                }),
+                tool_access: Some(echo_core::tools::ToolAccess::ReadOnly),
+                resource_guards: vec![echo_core::tools::InvocationResourceGuard::new(GuardDrop(
+                    drops.clone(),
+                ))],
+                ..Default::default()
+            };
+            let identity = EventIdentity::from_invocation(&invocation)?;
+            let bus = SubagentEventBus::new();
+            let mut events = bus.subscribe();
+            let publisher = bus.publisher(
+                identity.clone(),
+                SubagentInvocationIdentity::from_lineage(
+                    "parent",
+                    "native-source",
+                    &identity,
+                    None,
+                )?,
+            )?;
+            publisher.emit(SubagentEvent::DispatchStarted {
+                parent: "parent".into(),
+                agent: "native-source".into(),
+                mode: ExecutionMode::Sync,
+                task: "typed".into(),
+                execution_id: Some("native-execution".into()),
+                run_id: Some("native-run".into()),
+                conversation_id: None,
+                message_id: None,
+                background: false,
+            })?;
+            let compiled = CompiledSubagentInvocation {
+                messages: vec![prior, current],
+                ..Default::default()
+            };
+            let mut running = tokio::spawn(async move {
+                SubagentExecutor::execute_agent_streaming(
+                    source,
+                    compiled,
+                    CancellationToken::new(),
+                    invocation,
+                    "parent",
+                    "native-source",
+                    ExecutionMode::Sync,
+                    Instant::now(),
+                    Some("native-execution".into()),
+                    Some("native-run".into()),
+                    None,
+                    publisher,
+                    Arc::new(Mutex::new(None)),
+                )
+                .await
+            });
+            tokio::select! {
+                entered = tokio::time::timeout(Duration::from_secs(2), before_eof.notified()) => {
+                    entered.map_err(|_| ReactError::Other("source did not reach EOF gate".into()))?;
+                },
+                early = &mut running => {
+                    let result = early.map_err(|error| ReactError::Other(error.to_string()))?;
+                    return match result {
+                        Err(error) => Err(error),
+                        Ok(_) => Err(ReactError::Other("source returned before original EOF gate".into())),
+                    };
+                },
+            }
+            assert!(
+                !running.is_finished(),
+                "Final确认/Settled不能替代原source物理EOF"
+            );
+            assert_eq!(drops.load(Ordering::SeqCst), 0);
+            release_eof.notify_one();
+            let result = running
+                .await
+                .map_err(|error| ReactError::Other(error.to_string()))?;
+            if unsettled == Some("cancelled") {
+                assert!(
+                    matches!(result,Err(ReactError::Agent(error)) if matches!(error.as_ref(),AgentError::Cancelled(reason) if reason=="native-terminal-reason"))
+                );
+            } else if unsettled == Some("failed") {
+                assert!(
+                    matches!(result,Err(ReactError::Other(reason)) if reason=="native-terminal-reason")
+                );
+            } else if matches!(unsettled, Some("synthetic" | "foreign" | "duplicate")) {
+                assert!(
+                    matches!(result,Err(ReactError::ExecutionNotSettled {run_id,execution_id:Some(execution)}) if run_id=="native-run" && execution==if unsettled==Some("foreign") {"foreign"} else {"native-execution"})
+                );
+            } else if tail_error {
+                assert!(result.is_err());
+            } else {
+                let result = result?;
+                assert_eq!(
+                    result.output,
+                    if safe_final_only {
+                        "Guard确认的安全结果"
+                    } else {
+                        "最终结果"
+                    }
+                );
+                assert_eq!(result.tokens_used, Some(5));
+            }
+            let rows = observed
+                .lock()
+                .map_err(|_| ReactError::Other("observation lock poisoned".into()))?;
+            let row = rows
+                .first()
+                .ok_or_else(|| ReactError::Other("typed request missing".into()))?;
+            assert_eq!(row.get("message"), Some(&expected));
+            assert_eq!(row.get("history"), Some(&expected_history));
+            let mut text = String::new();
+            let mut reasoning = String::new();
+            while let Ok(event) = events.try_recv() {
+                match event.as_ref() {
+                    SubagentEvent::DispatchTokenDelta { content, .. } => text.push_str(content),
+                    SubagentEvent::DispatchThinkingDelta { content, .. } => {
+                        reasoning.push_str(content)
+                    }
+                    _ => {}
+                }
+            }
+            assert_eq!(
+                text,
+                if matches!(unsettled, Some("cancelled" | "failed")) {
+                    ""
+                } else if safe_final_only {
+                    "进度Guard确认的安全结果"
+                } else {
+                    "进度最终结果"
+                },
+                "重复block及Final确认不能双拼，Guard安全最终正文不能漏"
+            );
+            assert_eq!(
+                reasoning,
+                if matches!(unsettled, Some("cancelled" | "failed")) {
+                    ""
+                } else {
+                    "独立推理"
+                }
+            );
+            assert_eq!(drops.load(Ordering::SeqCst), 1);
+        }
+        Ok(())
+    }
+    #[tokio::test]
+    async fn attachment_failure_drain_uses_the_same_native_terminal_qualification() -> Result<()> {
+        for mode in ["valid", "synthetic", "foreign"] {
+            let mut output = echo_core::agent::AgentOutputProjection::default();
+            let pending = Arc::new(Mutex::new(Some(ReactError::ExecutionNotSettled {
+                run_id: "native-run".into(),
+                execution_id: Some("native-execution".into()),
+            })));
+            let first = Arc::new(Mutex::new(Some(ReactError::Other(
+                "original attachment failure".into(),
+            ))));
+            let mut terminal = status(ExecutionStatusKind::Settled, 1);
+            if let AgentEvent::ExecutionStatus(status) = &mut terminal {
+                if mode == "synthetic" {
+                    status.adapter_generated = true;
+                }
+                if mode == "foreign" {
+                    status.execution_id = "foreign".into();
+                }
+            }
+            let mut source = futures::stream::iter(vec![
+                Ok(status(ExecutionStatusKind::Started, 0)),
+                Ok(terminal),
+            ]);
+            SubagentExecutor::drain_source_stream(
+                &mut source,
+                &first,
+                &mut output,
+                &pending,
+                "native-run",
+            )
+            .await;
+            assert_eq!(
+                pending
+                    .lock()
+                    .map_err(|_| ReactError::Other("pending lock poisoned".into()))?
+                    .is_none(),
+                mode == "valid"
+            );
+            assert!(
+                matches!(SubagentExecutor::take_first_cause(&first),Some(ReactError::Other(message)) if message=="original attachment failure")
+            );
+        }
+        Ok(())
     }
 }

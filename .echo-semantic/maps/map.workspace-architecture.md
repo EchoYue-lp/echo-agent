@@ -291,3 +291,7 @@ Rust facade、外部 SDK Host、docs 与 examples 展示同一 capability；采�
 
 
 本次875主线新CI撤回依赖故障由 finding.framework-yanked-zip-ci 单独跟踪；原quinn/YAML问题及其已完成证据不改写。媒体构建改为原发布版本源码的最小ZIP9适配，原工具行为/分层/审核策略不变；当前candidate媒体/独立解析结果不代正式新锁全门禁、消费者或精确mainCI。
+
+当前设计导航：[ADR 0100：Polars 的 zstd 依赖修复](../../docs/adr/0100-zstd-safe-chain-vendoring.md) 登记已采用的两 Polars 最小补丁设计：Framework 唯一维护源码及完整五项归属声明；唯一审计 helper 按真实消费锁的包记录与依赖引用判定应投影集合，原媒体三项继续必需，完整数据消费者应为五项，未选入 Polars 的消费者保留三项。生产实现、正式新锁与来源、完整依赖门禁、SDK 保留合同及实际 Host 验收仍待完成；此为当前设计导航，不回写历史源码引用、状态、观察时间或证据资格。
+
+2026-10-27 本地实现后继：`Cargo.toml` / `Cargo.lock` 选择 `vendor/polars-arrow-0.55.2/`、`vendor/polars-parquet-0.55.2/` 的两处 manifest 补丁及 zstd 0.14.3 链；`vendor/registry-origins.toml` / `scripts/generate-vendored-media-audit-lock.py` 继续是唯一归属与审计算法，按真实包记录/依赖引用选择应投影集合，完整五声明与实际 CLI 三来源均有实际控制。`scripts/tests/test_vendored_media_audit_lock.py` 的16项控制、`echo-tools/tests/zstd_data_compat.rs` 的原工具/错误/Excel-Parquet场景及相关原用例合计28项Rust测试、原数据分析示例编译均取得限定本地证据；首次测试 runtime 夹具错误保留并按既有 multi_thread 模式修复，不作为生产依赖反例。完整 actual/五来源官方 audit 的 fetch/yanked 均已实际通过，原 HTTPS 与 no-fetch 索引错误保留而不冒通过。`.cargo/cargo-deny-duplicate-baseline.json` 仅在原四类 scanner自然0、49组107身份精同和独立复审后，按Root授权维护新锁绑定；原旧绑定caller1与新绑定同raw读回0分别保留。上述不刷新本map的历史YAML/source_refs、Finding或旧Evidence状态，也不证明SDK5352、Host、远端main/CI或完整合流矩阵已通过。正式依赖说明见 `vendor/README.md`、`docs/zh/36-data-quality-statistics.md`；原件位于本仓 `.echo-semantic/local/zstd-safe-chain-implementation-20261027/`，编译target已在制品保全和reader核对后准确clean。

@@ -27,29 +27,24 @@ Capability and preference profiles are available from the stable
 
 An LLM's context window vanishes after each request ends, and a process can crash mid-loop. Without a runtime checkpoint, a long task interrupted halfway requires starting over, and a user wanting to continue yesterday's conversation must repeat themselves.
 
-`RuntimeStateStore` saves the `AgentCheckpoint` runtime fields (messages + active skills + blocked reason + timestamp) as the run progresses. The next time an Agent is launched with the same `conversation_id`, it restores the previous runtime state — providing **thread continuity**. The public `current_plan` field remains readable in older checkpoints, but ReactAgent does not restore it as a task plan or write it into new checkpoints.
+`RuntimeStateStore` 保存 `AgentCheckpoint` 的当前运行字段（消息、激活技能、blocked reason、working directory 与时间戳）。同一 runtime-state 身份可以恢复当前合法格式，实现线程连续性；计划与依赖图由 `TaskRevisionService` 持有，checkpoint 不保存计划副本。raw Store CRUD仍独立保留，旧格式拒绝不构成删除用户原件或迁移数据的许可。
 
 ### How It Works
 
+```text
+产品 conversation_id
+        │  可由 invocation 显式拆分 runtime_state_id
+        ▼
+FileRuntimeStateStore/runtime_state/_runtime_owners/<编码身份>.json
+  owner：版本2 + 显式 RuntimeStateVersion（Unmanaged/Managed/Retired）
+  checkpoint：schema3 消息payload + active_skills/blocked_reason/working_dir/timestamp
+  managed：保原 epoch/revision/pending effect/ack 证明
+  scope/index：仍为当前版本1
 ```
-conversation_id: "user-123-chat-5"
-                │
-                ▼
-FileRuntimeStateStore (./agent-data/runtime_state/_runtime_owners/):
-<encoded-runtime-id>.json
-{
-  "runtime_state_id": "user-123-chat-5",
-  "scope_id": "user-123-chat-5",
-  "phase": "active",
-  "checkpoint": {
-    "messages_json":  "...full message history...",
-    "current_plan":   null,
-    "active_skills":  ["doc-writing"],
-    "blocked_reason": null,
-    "timestamp":      "2026-06-14T..."
-  }
-}
-```
+
+上图是字段职责示意，不是可直接写入的记录。当前runtime payload不猜旧数组/缺版本，
+无cursor的runtime-only用途仍合法；会话log manifest和当前message marker也按各自合同
+校验。完整格式、raw与managed边界见ADR0103。
 
 ### Usage
 

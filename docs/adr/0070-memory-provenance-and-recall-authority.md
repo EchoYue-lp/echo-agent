@@ -108,6 +108,25 @@ The framework owns evidence validation, durable status transitions, and recall
 eligibility. The embedding host owns who may issue an approval; the framework
 cannot authenticate a self-described reviewer string. `MemoryApproval` is an
 explicit caller receipt, not a permission grant inferred from LLM confidence.
+
+## 2026-10-30：四个公开 Store 安装入口共用原权威约束
+
+`set_store`、`install_store`、`set_memory_store`、`install_memory_store`
+都复用 manager Store 的同一 `Arc` 身份检查。安装 manager 后，另一 Store
+返回既有 `ReactError::Other`，公开 Store、manager、压缩 promoter、自动
+recall 和层级工具保持原后端。同步入口先检查身份并取得 context 锁，锁忙
+返回错误；异步入口等待锁前不发布状态，取得锁后到发布结束之间没有 await。
+
+`set_store` 与 `install_store` 返回既有 `Result<()>`，只调整自动注入
+Store 和 promoter，不注册或替换任何记忆工具；另两个安全入口继续负责
+approved-memory recall/search 与已安装 manager 的层级工具。没有 manager
+时允许真实 A→B 替换，同一 manager Store 的 Arc 克隆也仍合法，不自动
+更换 manager、复制数据或改变应用策略。原始 Store KV 仍为独立调用能力。
+
+`set_store` 属于 SDK 已接受的 external_contract；其 source operation、
+alias 和三语言 raw Store 能力继续保留。Host 必须消费框架错误后才返回成功，
+SDK 错误传播、真实三语言正反控制及 EKO 调用点适配为交付依赖，不能归为
+非阻断遥测。`install_store` 保留原有 async 边界；不新增操作或 wire 合同。
 No second Store, SQLite migration, task state, or approval UI is introduced.
 
 An external writer holding a raw Store can still bypass the layered manager's

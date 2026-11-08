@@ -125,7 +125,11 @@ fn script_command(
     Ok((command, Some(profile.clone())))
 }
 
-fn validate_script_path(script_path: &str, working_dir: Option<&Path>) -> Result<PathBuf> {
+fn validate_script_path(
+    file_system: &dyn echo_core::tools::filesystem::FileSystem,
+    script_path: &str,
+    working_dir: Option<&Path>,
+) -> Result<PathBuf> {
     let trimmed = script_path.trim();
     if trimmed.is_empty() {
         return Err(ReactError::from(ToolError::InvalidParameter {
@@ -151,25 +155,34 @@ fn validate_script_path(script_path: &str, working_dir: Option<&Path>) -> Result
 
     let base = match working_dir {
         Some(path) => path.to_path_buf(),
-        None => std::env::current_dir().map_err(|error| ToolError::ExecutionFailed {
-            tool: "run_code".to_string(),
-            message: format!("Cannot resolve the current working directory: {error}"),
+        None => file_system.current_dir().map_err(|error| match error {
+            ReactError::Io(error) => ReactError::from(ToolError::ExecutionFailed {
+                tool: "run_code".to_string(),
+                message: format!("Cannot resolve the current working directory: {error}"),
+            }),
+            error => error,
         })?,
     };
-    let canonical_base = base
-        .canonicalize()
-        .map_err(|error| ToolError::ExecutionFailed {
-            tool: "run_code".to_string(),
-            message: format!("Cannot access the execution working directory: {error}"),
+    let canonical_base = file_system
+        .canonicalize(&base)
+        .map_err(|error| match error {
+            ReactError::Io(error) => ReactError::from(ToolError::ExecutionFailed {
+                tool: "run_code".to_string(),
+                message: format!("Cannot access the execution working directory: {error}"),
+            }),
+            error => error,
         })?;
     let resolved = base.join(relative);
-    let canonical_script = resolved
-        .canonicalize()
-        .map_err(|error| ToolError::ExecutionFailed {
-            tool: "run_code".to_string(),
-            message: format!("Cannot access script '{trimmed}': {error}"),
+    let canonical_script = file_system
+        .canonicalize(&resolved)
+        .map_err(|error| match error {
+            ReactError::Io(error) => ReactError::from(ToolError::ExecutionFailed {
+                tool: "run_code".to_string(),
+                message: format!("Cannot access script '{trimmed}': {error}"),
+            }),
+            error => error,
         })?;
-    if !canonical_script.starts_with(&canonical_base) || !canonical_script.is_file() {
+    if !canonical_script.starts_with(&canonical_base) || !file_system.is_file(&canonical_script)? {
         return Err(ReactError::from(ToolError::InvalidParameter {
             name: "script_path".to_string(),
             message: "Script must be a file inside the execution working directory".to_string(),
@@ -181,6 +194,7 @@ fn validate_script_path(script_path: &str, working_dir: Option<&Path>) -> Result
 
 /// Sandboxed inline or persisted-script execution tool.
 pub struct RunCodeTool {
+    file_system: Arc<dyn echo_core::tools::filesystem::FileSystem>,
     /// Interior-mutable so `Tool::set_sandbox` (a `&self` method) can inject
     /// the executor after construction (via `set_sandbox_manager` →
     /// `ToolManager::apply_sandbox`), without requiring `&mut self`.
@@ -196,6 +210,7 @@ pub struct RunCodeTool {
 impl Default for RunCodeTool {
     fn default() -> Self {
         Self {
+            file_system: Arc::new(crate::filesystem::LocalFileSystem),
             sandbox: Mutex::new(None),
             script_profile_resolver: Mutex::new(None),
             timeout_secs: 60,
@@ -205,6 +220,14 @@ impl Default for RunCodeTool {
 }
 
 impl RunCodeTool {
+    pub fn with_file_system(
+        mut self,
+        file_system: Arc<dyn echo_core::tools::filesystem::FileSystem>,
+    ) -> Self {
+        self.file_system = file_system;
+        self
+    }
+
     pub fn new() -> Self {
         Self::default()
     }
@@ -348,8 +371,25 @@ impl Tool for RunCodeTool {
                         (SandboxCommand::code(&language, code), "inline", None, None)
                     }
                     (None, Some(script_path)) => {
-                        let relative =
-                            validate_script_path(script_path, ctx.working_dir.as_deref())?;
+                        let file_system = self.file_system.clone();
+                        let script_path = script_path.to_string();
+                        let working_dir = ctx.working_dir.clone();
+                        let guards = ctx.resource_guards.clone();
+                        let relative = tokio::task::spawn_blocking(move || {
+                            let _guards = guards;
+                            validate_script_path(
+                                file_system.as_ref(),
+                                &script_path,
+                                working_dir.as_deref(),
+                            )
+                        })
+                        .await
+                        .map_err(|error| {
+                            ToolError::ExecutionFailed {
+                                tool: "run_code".into(),
+                                message: format!("Script target preparation failed: {error}"),
+                            }
+                        })??;
                         let (command, profile) =
                             script_command(&language, &relative, resolved_script_profile.as_ref())?;
                         (command, "script", Some(relative), profile)
@@ -381,7 +421,10 @@ impl Tool for RunCodeTool {
             if let Some(dir) = &ctx.working_dir {
                 sandbox_cmd = sandbox_cmd.with_working_dir(dir.clone());
             }
-            sandbox_cmd = sandbox_cmd.with_timeout(timeout_duration);
+            sandbox_cmd = sandbox_cmd
+                .with_timeout(timeout_duration)
+                .with_resource_guards(ctx.resource_guards.clone())
+                .with_cancel(ctx.cancel.clone());
 
             let Some(sandbox) = sandbox else {
                 return Ok(sandbox_unavailable_result(
@@ -419,6 +462,19 @@ impl Tool for RunCodeTool {
                     .extend(profile.read_only_paths.iter().cloned());
             }
 
+            echo_core::tools::native_execution::admit_native_execution(
+                ctx,
+                &mut sandbox_cmd,
+                self.name(),
+            )
+            .await?;
+            sandbox_cmd.ensure_physical_resource_ownership(
+                sandbox.supports_physical_resource_ownership(),
+            )?;
+            if ctx.native_execution_admission.is_some() {
+                // cpu_time_secs 在本框架是 wall-clock 上限；不能覆盖已扣准入的原命令剩余预算。
+                limits.cpu_time_secs = None;
+            }
             match sandbox
                 .execute_with_isolation_receipt(sandbox_cmd, limits, ctx.cancel.clone())
                 .await
@@ -608,6 +664,11 @@ mod tests {
             self.isolation
         }
 
+        fn supports_physical_resource_ownership(&self) -> bool {
+            // 仅此合同记录器在所有执行入口保有原 command；不声称真实 OS/native 资格。
+            true
+        }
+
         fn is_available(&self) -> BoxFuture<'_, bool> {
             let available = self.available;
             Box::pin(async move { available })
@@ -615,8 +676,15 @@ mod tests {
 
         fn execute(
             &self,
-            _command: SandboxCommand,
+            command: SandboxCommand,
         ) -> BoxFuture<'_, std::result::Result<ExecutionResult, ReactError>> {
+            *self
+                .seen
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(RecordedCall {
+                command,
+                limits: ResourceLimits::unrestricted(),
+            });
             let result = self.result.clone();
             let observation = self.observation.clone();
             Box::pin(async move {
@@ -707,6 +775,82 @@ mod tests {
         ]
         .into_iter()
         .collect()
+    }
+
+    #[tokio::test]
+    async fn native_admission_preserves_original_code_executor_isolation_and_unknown_guard()
+    -> Result<()> {
+        struct Admission(Arc<tokio::sync::Semaphore>);
+        impl echo_core::tools::NativeExecutionResourceAdmission for Admission {
+            fn admit<'a>(
+                &'a self,
+                cancel: &'a CancellationToken,
+                deadline: std::time::Instant,
+            ) -> BoxFuture<
+                'a,
+                std::result::Result<
+                    echo_core::tools::InvocationResourceGuard,
+                    echo_core::tools::NativeExecutionAdmissionError,
+                >,
+            > {
+                Box::pin(async move {
+                    use echo_core::tools::NativeExecutionAdmissionError;
+                    let permit = tokio::select! {
+                        biased;
+                        _ = cancel.cancelled() => return Err(NativeExecutionAdmissionError::Cancelled),
+                        _ = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)) => return Err(NativeExecutionAdmissionError::Deadline),
+                        permit = self.0.clone().acquire_owned() => permit.map_err(|_| NativeExecutionAdmissionError::Closed)?,
+                    };
+                    Ok(echo_core::tools::InvocationResourceGuard::new(permit))
+                })
+            }
+        }
+        let capacity = Arc::new(tokio::sync::Semaphore::new(1));
+        let context = ToolContext {
+            native_execution_admission: Some(Arc::new(Admission(capacity.clone()))),
+            ..ToolContext::default()
+        };
+        // 合同控制：记录器保有原 command，并声明原 typed Unknown，不声称真实 OS 隔离。
+        let sandbox = Arc::new(RecordingSandbox {
+            isolation: IsolationLevel::OsSandbox,
+            actual_isolation: None,
+            available: true,
+            result: success_execution("unused"),
+            observation: Some((
+                "original-run".to_string(),
+                Some("original-execution".to_string()),
+            )),
+            seen: std::sync::Mutex::new(None),
+        });
+        let tool = RunCodeTool::new().with_sandbox(sandbox.clone());
+        let result = tool
+            .execute_with_context(code_params("bash", "echo effect"), &context)
+            .await;
+        assert!(
+            matches!(result, Err(ReactError::ExecutionNotSettled { run_id, execution_id })
+            if run_id == "original-run" && execution_id.as_deref() == Some("original-execution"))
+        );
+        assert_eq!(capacity.available_permits(), 0);
+        assert!(context.resource_guards.is_empty());
+        let call = sandbox
+            .seen
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take()
+            .ok_or_else(|| ReactError::Other("missing original code dispatch".to_string()))?;
+        assert_eq!(
+            call.command.minimum_isolation,
+            Some(IsolationLevel::OsSandbox)
+        );
+        assert_eq!(call.command.resource_guards.len(), 1);
+        assert!(call.command.timeout <= Duration::from_secs(60));
+        assert_eq!(
+            call.limits.cpu_time_secs, None,
+            "limits must not restart the spent command budget"
+        );
+        drop(call);
+        assert_eq!(capacity.available_permits(), 1);
+        Ok(())
     }
 
     fn script_params(language: &str, script_path: &str) -> HashMap<String, serde_json::Value> {

@@ -2,7 +2,7 @@
 //!
 //! 展示 Agent 的多轮对话能力：
 //! 1. chat() —— 保留历史上下文的对话
-//! 2. chat_stream() —— 流式多轮对话
+//! 2. chat_stream() —— 按原生状态投影正文与推理，每轮读取到真实 EOF
 //! 3. reset() —— 清除上下文开始新会话
 //!
 //! RuntimeStateStore 可恢复对话上下文；任务计划由版本化任务图持有，
@@ -16,7 +16,10 @@
 // 演示函数按需在 main() 中启用；未启用的部分保留为参考，允许暂时未用。
 #![allow(dead_code)]
 
-use echo_agent::agent::{Agent, AgentEvent};
+use echo_agent::agent::{
+    Agent, AgentEvent, AgentOutputProjection, AssistantPhase, ExecutionStatusKind,
+};
+use echo_agent::error::{AgentError, AgentTerminalKind, ReactError};
 use echo_agent::prelude::*;
 use echo_agent::tool;
 use futures::StreamExt;
@@ -153,16 +156,122 @@ async fn demo_chat_stream() -> echo_agent::error::Result<()> {
         std::io::stdout().flush().ok();
 
         let mut stream = agent.chat_stream(msg).await?;
+        let owner_run = agent.current_run_id();
+        let mut output = AgentOutputProjection::default();
+        let mut first_error = None;
+        let mut unresolved = None::<ReactError>;
+        let same_source = |error: &ReactError, projection: &AgentOutputProjection| {
+            matches!(error, ReactError::ExecutionNotSettled { run_id, execution_id }
+                if owner_run.as_deref() == Some(run_id.as_str())
+                    && execution_id.as_deref().is_some()
+                    && execution_id.as_deref() == projection.execution_id())
+        };
 
+        // 每轮读取同一 chat source 到真实 EOF，下一轮才复用会话上下文。
         while let Some(event) = stream.next().await {
-            match event? {
-                AgentEvent::Token(token) => {
-                    print!("{token}");
-                    std::io::stdout().flush().ok();
+            let observed = match event {
+                Err(error @ ReactError::ExecutionNotSettled { .. }) => {
+                    // 未结算观察不是终态；foreign 观察不会被这条 source 的完成覆盖。
+                    if unresolved
+                        .as_ref()
+                        .is_none_or(|prior| same_source(prior, &output))
+                    {
+                        unresolved = Some(error);
+                    }
+                    Ok(())
                 }
-                AgentEvent::FinalAnswer(_) => break,
-                _ => {}
+                Ok(AgentEvent::ExecutionStatus(status)) => {
+                    output.observe_status(&status).map(|changed| {
+                        if changed
+                            && matches!(
+                                status.status,
+                                ExecutionStatusKind::Settled
+                                    | ExecutionStatusKind::Failed
+                                    | ExecutionStatusKind::Cancelled
+                            )
+                            && unresolved
+                                .as_ref()
+                                .is_some_and(|prior| same_source(prior, &output))
+                        {
+                            unresolved = None;
+                        }
+                        if let Some(error) = output.terminal_failure() {
+                            first_error.get_or_insert(error);
+                        }
+                    })
+                }
+                Ok(AgentEvent::AssistantMessage { block }) => {
+                    output.observe_block(&block).map(|delta| {
+                        if let Some(delta) = delta {
+                            // 只显示投影后的可见文本；签名、密文和重放载体不直接输出。
+                            match delta.block.phase {
+                                AssistantPhase::Reasoning if !delta.text.is_empty() => {
+                                    println!("\n[推理] {}", delta.text)
+                                }
+                                AssistantPhase::Commentary if !delta.text.is_empty() => {
+                                    println!("\n[进度] {}", delta.text)
+                                }
+                                AssistantPhase::Reasoning | AssistantPhase::Commentary => {}
+                                _ => {
+                                    print!("{}", delta.text);
+                                    std::io::stdout().flush().ok();
+                                }
+                            }
+                        }
+                    })
+                }
+                Ok(AgentEvent::LlmUsage {
+                    model,
+                    prompt_tokens,
+                    completion_tokens,
+                    total_tokens,
+                    usage_reported,
+                    ..
+                }) => {
+                    if usage_reported {
+                        println!(
+                            "\n[LLM 用量] model={model}, prompt={prompt_tokens}, completion={completion_tokens}, total={total_tokens}"
+                        );
+                    } else {
+                        println!("\n[LLM 用量] model={model}，上游未报告用量");
+                    }
+                    Ok(())
+                }
+                Ok(AgentEvent::FinalAnswer(answer)) => output.confirm_answer(&answer),
+                Ok(AgentEvent::Error { failure, .. }) => Err(match failure.terminal_kind {
+                    AgentTerminalKind::Cancelled => AgentError::Cancelled(failure.message).into(),
+                    AgentTerminalKind::TimedOut => AgentError::Timeout(failure.message).into(),
+                    AgentTerminalKind::PermissionDenied => {
+                        AgentError::PermissionDenied(failure.message).into()
+                    }
+                    _ => ReactError::Other(failure.message),
+                }),
+                Ok(AgentEvent::Cancelled) => {
+                    Err(AgentError::Cancelled("原生 Agent source 已取消".into()).into())
+                }
+                Err(error) => Err(error),
+                _ => Ok(()),
+            };
+            if let Err(error) = observed {
+                first_error.get_or_insert(error);
             }
+        }
+        if let Some(error) = unresolved {
+            return Err(error);
+        }
+        if let Some(error) = first_error {
+            return Err(error);
+        }
+        let final_answer = output.finish()?;
+        // 原 source EOF 后只补尚未展示的安全最终正文，确认通知本身不重印。
+        if let Some(missing) = output.take_final_presentation()? {
+            print!("{missing}");
+            std::io::stdout().flush().ok();
+        }
+        if final_answer.trim().is_empty() {
+            return Err(ReactError::Other(
+                "demo17 验收失败：流式对话返回空答案".into(),
+            ));
         }
         println!("\n");
     }

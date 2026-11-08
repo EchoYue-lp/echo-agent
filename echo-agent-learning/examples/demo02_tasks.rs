@@ -39,7 +39,7 @@ async fn main() -> Result<()> {
    - 尽量构建宽而浅的任务 DAG，而非线性链
 3. 执行任务时，在一次回复中尽量并行调用多个工具
 4. 完成后用 task_update 原子更新任务状态
-5. 所有任务完成后，用 final_answer 给出答案
+5. 所有任务完成后，以原生正文给出答案
 "#;
 
     // 使用 AgentBuilder 创建 Agent（启用任务规划）

@@ -12,9 +12,9 @@
 //!   The framework persists this automatically at `run_core_loop` finalization.
 //! - **RuntimeStateStore** — ReAct runtime checkpoint (messages +
 //!   active_skills + blocked_reason) used to resume an in-flight conversation
-//!   across process restarts. The public `current_plan` field only supports
-//!   legacy Store round trips and is not restored by ReactAgent. See
-//!   [`crate::state`].
+//!   across process restarts. 运行时checkpoint不保存计划；任务图与计划artifact由
+//!   TaskRevisionService 单一权威持有。合法raw Store CRUD与多Store实现仍保留。
+//!   See [`crate::state`].
 //!
 //! # Quick Start
 //!

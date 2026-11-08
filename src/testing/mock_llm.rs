@@ -42,7 +42,7 @@ use std::time::Duration;
 /// Enum of preset responses (text, tool calls, scripted streams, or errors)
 enum MockLlmResponse {
     Content(String, Option<crate::llm::types::Usage>),
-    ToolCalls(Message, Option<crate::llm::types::Usage>),
+    ToolCalls(Box<Message>, Option<crate::llm::types::Usage>),
     Stream(Vec<StreamChunk>),
     Err(ReactError),
 }
@@ -56,8 +56,8 @@ enum MockLlmResponse {
 /// reproduce that wire shape instead of certifying the impossible
 /// single-chunk shape the old mock emitted (F-TST-01-P1-01).
 pub enum StreamChunk {
-    /// A content or tool-call delta without terminal information.
-    Delta(DeltaMessage),
+    /// 原完整delta的间接载体，减少脚本枚举大小；用Box::new(delta)构造，不改变delta值。
+    Delta(Box<DeltaMessage>),
     /// Terminal chunk: finish reason + provider-reported usage.
     Terminal {
         finish_reason: Option<String>,
@@ -81,9 +81,11 @@ pub struct MockLlmClient {
     /// The list of messages received on each call, recorded in order
     calls: Arc<Mutex<Vec<Vec<Message>>>>,
     user_ids: Arc<Mutex<Vec<Option<String>>>>,
-    tool_choices: Arc<Mutex<Vec<Option<String>>>>,
+    tool_choices: Arc<Mutex<Vec<Option<crate::llm::ToolChoice>>>>,
     response_formats: Arc<Mutex<Vec<Option<crate::llm::ResponseFormat>>>>,
     tool_counts: Arc<Mutex<Vec<usize>>>,
+    #[cfg(test)]
+    temperatures: Arc<Mutex<Vec<Option<f32>>>>,
     /// Optional delay before returning each response. When set, `chat` and
     /// `chat_stream` sleep for this duration, but will return early with a
     /// Cancelled error if the request's `cancel_token` is triggered. This lets
@@ -108,6 +110,8 @@ impl MockLlmClient {
             tool_choices: Arc::new(Mutex::new(Vec::new())),
             response_formats: Arc::new(Mutex::new(Vec::new())),
             tool_counts: Arc::new(Mutex::new(Vec::new())),
+            #[cfg(test)]
+            temperatures: Arc::new(Mutex::new(Vec::new())),
             delay: None,
         }
     }
@@ -185,6 +189,7 @@ impl MockLlmClient {
         arguments: impl Into<String>,
     ) -> Self {
         let tc = ToolCall {
+            provider_source: None,
             id: id.into(),
             call_type: "function".to_string(),
             function: FunctionCall {
@@ -196,7 +201,7 @@ impl MockLlmClient {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .push_back(MockLlmResponse::ToolCalls(
-                Message::assistant_with_tools(vec![tc]),
+                Box::new(Message::assistant_with_tools(vec![tc])),
                 None,
             ));
         self
@@ -213,6 +218,7 @@ impl MockLlmClient {
         reasoning_content: impl Into<String>,
     ) -> Self {
         let tc = ToolCall {
+            provider_source: None,
             id: id.into(),
             call_type: "function".to_string(),
             function: FunctionCall {
@@ -226,7 +232,7 @@ impl MockLlmClient {
         self.responses
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .push_back(MockLlmResponse::ToolCalls(message, None));
+            .push_back(MockLlmResponse::ToolCalls(Box::new(message), None));
         self
     }
 
@@ -239,6 +245,7 @@ impl MockLlmClient {
         usage: crate::llm::types::Usage,
     ) -> Self {
         let tc = ToolCall {
+            provider_source: None,
             id: id.into(),
             call_type: "function".to_string(),
             function: FunctionCall {
@@ -250,7 +257,7 @@ impl MockLlmClient {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .push_back(MockLlmResponse::ToolCalls(
-                Message::assistant_with_tools(vec![tc]),
+                Box::new(Message::assistant_with_tools(vec![tc])),
                 Some(usage),
             ));
         self
@@ -262,7 +269,7 @@ impl MockLlmClient {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .push_back(MockLlmResponse::ToolCalls(
-                Message::assistant_with_tools(calls),
+                Box::new(Message::assistant_with_tools(calls)),
                 None,
             ));
         self
@@ -303,13 +310,11 @@ impl MockLlmClient {
     ///     ..Default::default()
     /// };
     /// let mock = MockLlmClient::new().with_stream_script(vec![
-    ///     StreamChunk::Delta(DeltaMessage {
+    ///     StreamChunk::Delta(Box::new(DeltaMessage {
     ///         role: Some("assistant".to_string()),
     ///         content: Some("Hello".to_string()),
-    ///         reasoning_content: None,
-    ///         reasoning_blocks: None,
-    ///         tool_calls: None,
-    ///     }),
+    ///         ..Default::default()
+    ///     })),
     ///     StreamChunk::Terminal {
     ///         finish_reason: Some("stop".to_string()),
     ///         usage: Some(usage),
@@ -352,7 +357,7 @@ impl MockLlmClient {
     }
 
     /// Tool-choice values received by each request.
-    pub fn all_tool_choices(&self) -> Vec<Option<String>> {
+    pub fn all_tool_choices(&self) -> Vec<Option<crate::llm::ToolChoice>> {
         self.tool_choices
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -381,6 +386,14 @@ impl MockLlmClient {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .len()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn all_temperatures(&self) -> Vec<Option<f32>> {
+        self.temperatures
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     /// Clear all recorded call history (response queue is unaffected)
@@ -425,13 +438,18 @@ impl MockLlmClient {
 
 enum PopResult {
     Content(String, Option<crate::llm::types::Usage>),
-    ToolCalls(Message, Option<crate::llm::types::Usage>),
+    ToolCalls(Box<Message>, Option<crate::llm::types::Usage>),
     Stream(Vec<StreamChunk>),
 }
 
 impl LlmClient for MockLlmClient {
     fn chat(&self, request: ChatRequest) -> BoxFuture<'_, Result<ChatResponse>> {
         Box::pin(async move {
+            #[cfg(test)]
+            self.temperatures
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(request.temperature);
             // Record this call
             self.tool_counts
                 .lock()
@@ -477,7 +495,7 @@ impl LlmClient for MockLlmClient {
                     },
                 }),
                 PopResult::ToolCalls(message, usage) => Ok(ChatResponse {
-                    message,
+                    message: *message,
                     finish_reason: Some("tool_calls".to_string()),
                     usage: usage.clone(),
                     raw: crate::llm::types::ChatCompletionResponse {
@@ -497,6 +515,7 @@ impl LlmClient for MockLlmClient {
                     for chunk in chunks {
                         match chunk {
                             StreamChunk::Delta(delta) => {
+                                let delta = *delta;
                                 if let Some(t) = delta.content {
                                     text.push_str(&t);
                                 }
@@ -592,10 +611,12 @@ impl LlmClient for MockLlmClient {
                     let stream = futures::stream::iter([
                         Ok(ChatChunk {
                             delta: DeltaMessage {
+                                provider_response: None,
                                 role: Some("assistant".to_string()),
                                 content: Some(text),
                                 reasoning_content: None,
                                 reasoning_blocks: None,
+                                assistant_blocks: None,
                                 tool_calls: None,
                             },
                             finish_reason: None,
@@ -603,10 +624,12 @@ impl LlmClient for MockLlmClient {
                         }),
                         Ok(ChatChunk {
                             delta: DeltaMessage {
+                                provider_response: None,
                                 role: None,
                                 content: None,
                                 reasoning_content: None,
                                 reasoning_blocks: None,
+                                assistant_blocks: None,
                                 tool_calls: None,
                             },
                             finish_reason: Some("stop".to_string()),
@@ -623,6 +646,7 @@ impl LlmClient for MockLlmClient {
                         .into_iter()
                         .enumerate()
                         .map(|(i, tc)| DeltaToolCall {
+                            provider_source: tc.provider_source,
                             index: i as u32,
                             id: Some(tc.id),
                             call_type: Some(tc.call_type),
@@ -637,10 +661,12 @@ impl LlmClient for MockLlmClient {
                     let stream = futures::stream::iter([
                         Ok(ChatChunk {
                             delta: DeltaMessage {
+                                provider_response: message.provider_response,
                                 role: Some("assistant".to_string()),
                                 content,
                                 reasoning_content,
                                 reasoning_blocks: message.reasoning_blocks,
+                                assistant_blocks: message.assistant_blocks,
                                 tool_calls: Some(delta_calls),
                             },
                             finish_reason: None,
@@ -648,10 +674,12 @@ impl LlmClient for MockLlmClient {
                         }),
                         Ok(ChatChunk {
                             delta: DeltaMessage {
+                                provider_response: None,
                                 role: None,
                                 content: None,
                                 reasoning_content: None,
                                 reasoning_blocks: None,
+                                assistant_blocks: None,
                                 tool_calls: None,
                             },
                             finish_reason: Some("tool_calls".to_string()),
@@ -666,7 +694,7 @@ impl LlmClient for MockLlmClient {
                         for chunk in chunks {
                             match chunk {
                             StreamChunk::Delta(delta) => yield Ok(ChatChunk {
-                                delta,
+                                delta: *delta,
                                 finish_reason: None,
                                 usage: None,
                             }),
@@ -675,10 +703,12 @@ impl LlmClient for MockLlmClient {
                                 usage,
                             } => yield Ok(ChatChunk {
                                 delta: DeltaMessage {
+                                    provider_response: None,
                                     role: None,
                                     content: None,
                                     reasoning_content: None,
                                     reasoning_blocks: None,
+                                    assistant_blocks: None,
                                     tool_calls: None,
                                 },
                                 finish_reason,

@@ -35,12 +35,13 @@ type LocalEventStream = Pin<Box<dyn Stream<Item = SandboxStreamEvent> + Send>>;
 
 struct StartedLocalCommand {
     stream: LocalEventStream,
-    task: tokio::task::JoinHandle<LocalChildTerminal>,
+    task: tokio::sync::oneshot::Receiver<LocalChildTerminal>,
 }
 
 enum LocalChildTerminal {
     Completed,
     Failed(SandboxError),
+    Unsettled(SandboxError, String),
     Abandoned(std::result::Result<(), String>),
 }
 
@@ -49,6 +50,7 @@ struct LocalChildRequest {
     stdout: Option<tokio::process::ChildStdout>,
     stderr: Option<tokio::process::ChildStderr>,
     process_group_id: Option<u32>,
+    require_physical_resource_ownership: bool,
     events: mpsc::Sender<SandboxStreamEvent>,
     timeout: std::time::Duration,
     max_output_bytes: usize,
@@ -391,9 +393,19 @@ impl LocalSandbox {
         timeout: std::time::Duration,
         stdin: Option<&str>,
         sandbox_type: &'static str,
+        cancel: Option<Arc<CancellationToken>>,
+        resource_ownership: (Vec<echo_core::tools::InvocationResourceGuard>, bool),
     ) -> Result<ExecutionResult> {
-        self.run_command_controlled(command, timeout, stdin, sandbox_type, None)
-            .await
+        ensure_local_execution_supported()?;
+        self.run_command_controlled(
+            command,
+            timeout,
+            stdin,
+            sandbox_type,
+            cancel,
+            resource_ownership,
+        )
+        .await
     }
 
     async fn run_command_controlled(
@@ -403,9 +415,8 @@ impl LocalSandbox {
         stdin: Option<&str>,
         sandbox_type: &'static str,
         cancel: Option<Arc<CancellationToken>>,
+        resource_ownership: (Vec<echo_core::tools::InvocationResourceGuard>, bool),
     ) -> Result<ExecutionResult> {
-        ensure_local_execution_supported()?;
-
         if cancel.as_ref().is_some_and(|token| token.is_cancelled()) {
             return Err(echo_core::error::ReactError::Sandbox(Box::new(
                 SandboxError::Cancelled(
@@ -415,7 +426,14 @@ impl LocalSandbox {
         }
 
         let StartedLocalCommand { mut stream, task } = self
-            .start_command_stream(command, timeout, stdin, sandbox_type, cancel)
+            .start_command_stream(
+                command,
+                timeout,
+                stdin,
+                sandbox_type,
+                cancel,
+                resource_ownership,
+            )
             .await?;
         let mut completion = None;
         while let Some(event) = stream.next().await {
@@ -435,6 +453,12 @@ impl LocalSandbox {
                     "Local sandbox stream ended without a completion event".to_string(),
                 )))
             }),
+            Ok(LocalChildTerminal::Unsettled(_, operation_id)) => {
+                Err(echo_core::error::ReactError::ExecutionNotSettled {
+                    run_id: operation_id,
+                    execution_id: None,
+                })
+            }
             Ok(LocalChildTerminal::Failed(error)) => {
                 Err(echo_core::error::ReactError::Sandbox(Box::new(error)))
             }
@@ -461,12 +485,21 @@ impl LocalSandbox {
         timeout: std::time::Duration,
         stdin: Option<&str>,
         sandbox_type: &'static str,
+        cancel: Option<Arc<CancellationToken>>,
+        resource_ownership: (Vec<echo_core::tools::InvocationResourceGuard>, bool),
     ) -> Result<LocalEventStream> {
         let StartedLocalCommand { stream, task } = self
-            .start_command_stream(command, timeout, stdin, sandbox_type, None)
+            .start_command_stream(
+                command,
+                timeout,
+                stdin,
+                sandbox_type,
+                cancel,
+                resource_ownership,
+            )
             .await?;
-        // Streaming callers own the receiver. Dropping it wakes the detached
-        // owner task, which performs kill + wait before it exits.
+        // 流调用者持有原事件 receiver；丢弃它唤醒同一个 child owner 做 kill + wait。
+        // terminal receiver 只是观察，不能用它的退出冒充物理终结。
         drop(task);
         Ok(stream)
     }
@@ -478,7 +511,15 @@ impl LocalSandbox {
         stdin: Option<&str>,
         sandbox_type: &'static str,
         cancel: Option<Arc<CancellationToken>>,
+        resource_ownership: (Vec<echo_core::tools::InvocationResourceGuard>, bool),
     ) -> Result<StartedLocalCommand> {
+        let (resource_guards, require_physical_resource_ownership) = resource_ownership;
+        if tokio::time::Instant::now().checked_add(timeout).is_none() {
+            return Err(SandboxError::StartFailed(
+                "local command timeout exceeds the monotonic clock range".to_string(),
+            )
+            .into());
+        }
         if stdin.is_some() {
             command.stdin(std::process::Stdio::piped());
         }
@@ -487,6 +528,10 @@ impl LocalSandbox {
         command.stderr(std::process::Stdio::piped());
         command.kill_on_drop(true);
 
+        let operation_id = format!("local-native:{}", uuid::Uuid::new_v4());
+        let resources = local_native_resource_owners()
+            .issue(operation_id.clone())
+            .map_err(|error| echo_core::error::ReactError::Other(error.to_string()))?;
         let mut child = command.spawn().map_err(|e| {
             echo_core::error::ReactError::Sandbox(Box::new(SandboxError::StartFailed(format!(
                 "Failed to spawn process: {e}"
@@ -499,7 +544,10 @@ impl LocalSandbox {
         let max_output_bytes = self.config.max_output_bytes;
         let (tx, rx) = mpsc::channel(STREAM_CHANNEL_CAPACITY);
         let failure_events = tx.clone();
-        let task = tokio::spawn(async move {
+        let (terminal_tx, task) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            // 原 child task 继续拥有原 Child／PGID／资源；Unknown 只结束观察，不结束物理 owner。
+            let held_guards = resource_guards.clone();
             let terminal = run_streaming_child(
                 &mut child,
                 LocalChildRequest {
@@ -507,6 +555,7 @@ impl LocalSandbox {
                     stdout: stdout_pipe,
                     stderr: stderr_pipe,
                     process_group_id,
+                    require_physical_resource_ownership,
                     events: tx,
                     timeout,
                     max_output_bytes,
@@ -515,14 +564,119 @@ impl LocalSandbox {
                 },
             )
             .await;
+            let terminal = settle_local_command_resources(
+                terminal,
+                resources,
+                resource_guards,
+                operation_id.clone(),
+            );
+            let unsettled = matches!(&terminal, LocalChildTerminal::Unsettled(_, _));
             emit_local_terminal_failure(&failure_events, &terminal).await;
-            terminal
+            let _ = terminal_tx.send(terminal);
+            if unsettled {
+                // 不重放命令、不另起 supervisor，也不再向未知目标重复发 kill。
+                // 同一个原 owner 只观察原 child wait 与原进程组消失，再核销同一代 fence。
+                reconcile_original_local_child(&mut child, process_group_id, &operation_id).await;
+            }
+            drop(held_guards);
         });
         let stream = Box::pin(futures::stream::unfold(rx, |mut receiver| async move {
             receiver.recv().await.map(|event| (event, receiver))
         }));
         Ok(StartedLocalCommand { stream, task })
     }
+}
+
+/// 仅复用原 child owner 给既有 Skill direct fallback／探测，不宣称 OS 隔离。
+/// 原公开 LocalSandbox 平台限制仍在各 executor 入口，调用方的 env_clear／环境保持。
+pub(crate) async fn run_direct_skill_command(
+    command: Command,
+    native_command: SandboxCommand,
+    max_output_bytes: usize,
+) -> Result<ExecutionResult> {
+    native_command.ensure_physical_resource_ownership(cfg!(unix))?;
+    LocalSandbox::new(LocalConfig {
+        enable_os_sandbox: false,
+        allow_network: true,
+        max_output_bytes,
+        ..LocalConfig::default()
+    })
+    .run_command_controlled(
+        command,
+        native_command.timeout,
+        None,
+        "direct",
+        native_command.cancel,
+        (
+            native_command.resource_guards,
+            native_command.require_physical_resource_ownership,
+        ),
+    )
+    .await
+}
+
+async fn reconcile_original_local_child(
+    child: &mut tokio::process::Child,
+    process_group_id: Option<u32>,
+    operation_id: &str,
+) {
+    loop {
+        let waited = child.wait().await.is_ok();
+        #[cfg(unix)]
+        let absent = match process_group_id {
+            Some(group) => verify_process_group_absent(group).await.is_ok(),
+            None => false,
+        };
+        #[cfg(not(unix))]
+        let absent = {
+            let _ = process_group_id;
+            true
+        };
+        if waited && absent {
+            if let Some(fence) = local_native_resource_owners().uncertainty(operation_id) {
+                local_native_resource_owners().confirm_uncertain_stopped(&fence);
+            }
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+}
+
+fn settle_local_command_resources(
+    terminal: LocalChildTerminal,
+    resources: echo_core::agent::admission::KeyedExecutionLease,
+    resource_guards: Vec<echo_core::tools::InvocationResourceGuard>,
+    operation_id: String,
+) -> LocalChildTerminal {
+    match terminal {
+        LocalChildTerminal::Unsettled(error, _) => {
+            tracing::error!(operation_id = %operation_id, error = %error,
+                "local physical cleanup is unproved; original child owner and resources retained");
+            resources.retain_unknown_with_resources(Some(Box::new(resource_guards)));
+            LocalChildTerminal::Unsettled(error, operation_id)
+        }
+        LocalChildTerminal::Abandoned(Err(error)) => {
+            tracing::error!(operation_id = %operation_id, error = %error,
+                "local receiver detached with unproved cleanup; original child owner retained");
+            resources.retain_unknown_with_resources(Some(Box::new(resource_guards)));
+            LocalChildTerminal::Unsettled(SandboxError::IoError(error), operation_id)
+        }
+        settled => {
+            drop(resource_guards);
+            drop(resources);
+            settled
+        }
+    }
+}
+
+fn local_native_resource_owners()
+-> &'static Arc<echo_core::agent::admission::KeyedExecutionAdmission> {
+    // 复用既有 keyed unknown fence；不配置容量、不调度、不重跑命令。
+    static OWNERS: std::sync::LazyLock<Arc<echo_core::agent::admission::KeyedExecutionAdmission>> =
+        std::sync::LazyLock::new(|| {
+            Arc::new(echo_core::agent::admission::KeyedExecutionAdmission::default())
+        });
+    &OWNERS
 }
 
 /// Validate a path for safe inclusion in a macOS Seatbelt sandbox profile.
@@ -681,7 +835,7 @@ fn ensure_local_execution_supported() -> Result<()> {
     }
 }
 
-pub(super) async fn cleanup_child_process(
+pub(crate) async fn cleanup_child_process(
     child: &mut tokio::process::Child,
     process_group_id: Option<u32>,
 ) -> std::result::Result<(), String> {
@@ -744,6 +898,36 @@ fn signal_process_group(process_group_id: u32, signal: i32) -> std::result::Resu
     }
 }
 
+fn original_process_group_absent(
+    process_group_id: Option<u32>,
+) -> std::result::Result<bool, String> {
+    #[cfg(unix)]
+    {
+        let group = process_group_id
+            .and_then(|group| i32::try_from(group).ok())
+            .filter(|group| *group > 1)
+            .ok_or_else(|| "missing valid original process-group id".to_string())?;
+        // SAFETY: signal 0 only observes the captured original process group, never a caller-supplied target.
+        let observed = unsafe { libc::kill(-group, 0) };
+        if observed == 0 {
+            return Ok(false);
+        }
+        let error = std::io::Error::last_os_error();
+        if error.raw_os_error() == Some(libc::ESRCH) {
+            Ok(true)
+        } else {
+            Err(format!(
+                "cannot establish original process-group absence: {error}"
+            ))
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = process_group_id;
+        Err("original process-group observation unavailable on this platform".to_string())
+    }
+}
+
 #[cfg(unix)]
 async fn verify_process_group_absent(process_group_id: u32) -> std::result::Result<(), String> {
     let process_group_id = i32::try_from(process_group_id)
@@ -780,6 +964,7 @@ async fn run_streaming_child(
         mut stdout,
         mut stderr,
         process_group_id,
+        require_physical_resource_ownership,
         events: tx,
         timeout,
         max_output_bytes,
@@ -806,7 +991,7 @@ async fn run_streaming_child(
             );
         };
         let write = tokio::select! {
-            _ = tx.closed() => {
+            biased;            _ = tx.closed() => {
                 drop(child_stdin);
                 let cleanup = cleanup_child_process(child, process_group_id).await;
                 return abandoned_local_terminal(cleanup);
@@ -846,10 +1031,39 @@ async fn run_streaming_child(
     }
 
     loop {
-        if stdout.is_none() && stderr.is_none() && status.is_some() {
+        if require_physical_resource_ownership
+            && cancel.as_ref().is_some_and(|token| token.is_cancelled())
+        {
+            let cleanup = cleanup_child_process(child, process_group_id).await;
+            return local_cancellation_terminal(
+                "owning run cancelled before owned-group closure",
+                cleanup,
+            );
+        }
+        if require_physical_resource_ownership && tokio::time::Instant::now() >= deadline.deadline()
+        {
+            let cleanup = cleanup_child_process(child, process_group_id).await;
+            return local_timeout_terminal(
+                cleanup,
+                retained_stdout,
+                retained_stderr,
+                start.elapsed(),
+                sandbox_type,
+                timeout,
+                &tx,
+            )
+            .await;
+        }
+        if stdout.is_none()
+            && stderr.is_none()
+            && status.is_some()
+            && (!require_physical_resource_ownership
+                || original_process_group_absent(process_group_id).unwrap_or(false))
+        {
             break;
         }
         tokio::select! {
+            biased;
             _ = tx.closed() => {
                 let cleanup = cleanup_child_process(child, process_group_id).await;
                 return abandoned_local_terminal(cleanup);
@@ -873,6 +1087,8 @@ async fn run_streaming_child(
                     &tx,
                 ).await;
             }
+            _ = tokio::time::sleep(std::time::Duration::from_millis(10)),
+                if require_physical_resource_ownership && status.is_some() && stdout.is_none() && stderr.is_none() => {}
             read = async {
                 match stdout.as_mut() {
                     Some(pipe) => pipe.read(&mut stdout_buffer).await,
@@ -994,6 +1210,7 @@ fn local_failure_after_cleanup(
     primary: String,
     cleanup: std::result::Result<(), String>,
 ) -> LocalChildTerminal {
+    let unsettled = cleanup.is_err();
     let message = match cleanup {
         Ok(()) => primary,
         Err(cleanup) => format!(
@@ -1002,7 +1219,11 @@ fn local_failure_after_cleanup(
             bounded_terminal_fact(&cleanup)
         ),
     };
-    LocalChildTerminal::Failed(SandboxError::IoError(message))
+    if unsettled {
+        LocalChildTerminal::Unsettled(SandboxError::IoError(message), String::new())
+    } else {
+        LocalChildTerminal::Failed(SandboxError::IoError(message))
+    }
 }
 
 fn local_cancellation_terminal(
@@ -1080,7 +1301,7 @@ async fn emit_local_terminal_failure(
     events: &mpsc::Sender<SandboxStreamEvent>,
     terminal: &LocalChildTerminal,
 ) {
-    if let LocalChildTerminal::Failed(error) = terminal {
+    if let LocalChildTerminal::Failed(error) | LocalChildTerminal::Unsettled(error, _) = terminal {
         let _ = events
             .send(SandboxStreamEvent::Failed {
                 failure: stream_failure_from_error(error),
@@ -1216,6 +1437,12 @@ impl SandboxExecutor for LocalSandbox {
         }
     }
 
+    fn supports_physical_resource_ownership(&self) -> bool {
+        // 仅此实现的原 Unix process-group owner：持 Child/guard 到 wait+drain，
+        // cleanup 未知仍由同一 task 等实际组消失后核销；不是对任意 Unix 后端的推断。
+        cfg!(unix)
+    }
+
     fn is_available(&self) -> BoxFuture<'_, bool> {
         Box::pin(async {
             if cfg!(windows) {
@@ -1248,6 +1475,8 @@ impl SandboxExecutor for LocalSandbox {
 
     fn execute(&self, command: SandboxCommand) -> BoxFuture<'_, Result<ExecutionResult>> {
         Box::pin(async move {
+            command
+                .ensure_physical_resource_ownership(self.supports_physical_resource_ownership())?;
             ensure_local_execution_supported()?;
             let timeout = command.timeout;
             let cmd = match &command.kind {
@@ -1259,8 +1488,18 @@ impl SandboxExecutor for LocalSandbox {
                     .build_code_command(language, code, &command)
                     .map_err(|e| echo_core::error::ReactError::Sandbox(Box::new(e)))?,
             };
-            self.run_command(cmd, timeout, command.stdin.as_deref(), self.sandbox_type())
-                .await
+            self.run_command(
+                cmd,
+                timeout,
+                command.stdin.as_deref(),
+                self.sandbox_type(),
+                command.cancel.clone(),
+                (
+                    command.resource_guards.clone(),
+                    command.require_physical_resource_ownership,
+                ),
+            )
+            .await
         })
     }
 
@@ -1269,6 +1508,8 @@ impl SandboxExecutor for LocalSandbox {
         command: SandboxCommand,
     ) -> BoxFuture<'a, Result<Pin<Box<dyn Stream<Item = SandboxStreamEvent> + Send + 'a>>>> {
         Box::pin(async move {
+            command
+                .ensure_physical_resource_ownership(self.supports_physical_resource_ownership())?;
             ensure_local_execution_supported()?;
             let timeout = command.timeout;
             let cmd = match &command.kind {
@@ -1280,8 +1521,18 @@ impl SandboxExecutor for LocalSandbox {
                     .build_code_command(language, code, &command)
                     .map_err(|error| echo_core::error::ReactError::Sandbox(Box::new(error)))?,
             };
-            self.run_command_stream(cmd, timeout, command.stdin.as_deref(), self.sandbox_type())
-                .await
+            self.run_command_stream(
+                cmd,
+                timeout,
+                command.stdin.as_deref(),
+                self.sandbox_type(),
+                command.cancel.clone(),
+                (
+                    command.resource_guards.clone(),
+                    command.require_physical_resource_ownership,
+                ),
+            )
+            .await
         })
     }
 
@@ -1322,6 +1573,8 @@ impl SandboxExecutor for LocalSandbox {
         cancel: Option<Arc<CancellationToken>>,
     ) -> BoxFuture<'_, Result<ExecutionResult>> {
         Box::pin(async move {
+            command
+                .ensure_physical_resource_ownership(self.supports_physical_resource_ownership())?;
             ensure_local_execution_supported()?;
             let timeout = limits
                 .cpu_time_secs
@@ -1344,7 +1597,11 @@ impl SandboxExecutor for LocalSandbox {
                     timeout,
                     command.stdin.as_deref(),
                     sandbox.sandbox_type(),
-                    cancel,
+                    cancel.or_else(|| command.cancel.clone()),
+                    (
+                        command.resource_guards.clone(),
+                        command.require_physical_resource_ownership,
+                    ),
                 )
                 .await
         })
@@ -1392,6 +1649,357 @@ mod tests {
     use echo_core::sandbox::{SandboxOutputChannel, SandboxStreamEvent};
     use futures::StreamExt;
     use std::sync::Arc;
+
+    #[tokio::test]
+    async fn unknown_cleanup_retains_the_original_guard_on_the_exact_fence()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        struct DropCounter(Arc<std::sync::atomic::AtomicUsize>);
+        impl Drop for DropCounter {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+        let dropped = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let operation_id = format!("controlled-native-unknown:{}", uuid::Uuid::new_v4());
+        let owners = local_native_resource_owners();
+        let lease = owners.issue(operation_id.clone())?;
+        let terminal = settle_local_command_resources(
+            local_failure_after_cleanup(
+                "controlled failure".to_string(),
+                Err("cleanup unproved".to_string()),
+            ),
+            lease,
+            vec![echo_core::tools::InvocationResourceGuard::new(DropCounter(
+                dropped.clone(),
+            ))],
+            operation_id.clone(),
+        );
+        assert!(
+            matches!(terminal, LocalChildTerminal::Unsettled(_, ref id) if *id == operation_id)
+        );
+        assert_eq!(dropped.load(std::sync::atomic::Ordering::SeqCst), 0);
+        let fence = owners
+            .uncertainty(&operation_id)
+            .ok_or("missing original uncertainty fence")?;
+        // 纯资源负控，没有实际 process；不把模拟 cleanup failure 当真实 OS 失败。
+        assert!(owners.confirm_uncertain_stopped(&fence));
+        assert_eq!(dropped.load(std::sync::atomic::Ordering::SeqCst), 1);
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn original_unknown_owner_requires_real_child_exit_before_confirming_the_fence()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let capacity = Arc::new(tokio::sync::Semaphore::new(1));
+        let permit = capacity.clone().acquire_owned().await?;
+        let mut command = Command::new("sh");
+        command
+            .args(["-c", "sleep 30"])
+            .process_group(0)
+            .kill_on_drop(true);
+        let mut child = command.spawn()?;
+        let process_group_id = child.id().ok_or("missing original native child id")?;
+        let operation_id = format!("controlled-native-owner:{}", uuid::Uuid::new_v4());
+        let lease = local_native_resource_owners().issue(operation_id.clone())?;
+        // 受控注入清理未知，实际 child 仍活着；不能把它误写成已发生的 OS 清理故障。
+        let terminal = settle_local_command_resources(
+            local_failure_after_cleanup(
+                "controlled unknown".to_string(),
+                Err("closure not yet established".to_string()),
+            ),
+            lease,
+            vec![echo_core::tools::InvocationResourceGuard::new(permit)],
+            operation_id.clone(),
+        );
+        assert!(matches!(terminal, LocalChildTerminal::Unsettled(_, _)));
+        let owned_id = operation_id.clone();
+        let mut owner = tokio::spawn(async move {
+            reconcile_original_local_child(&mut child, Some(process_group_id), &owned_id).await;
+        });
+        let closed_while_live =
+            tokio::time::timeout(std::time::Duration::from_millis(20), &mut owner)
+                .await
+                .is_ok();
+        let fence_while_live = local_native_resource_owners()
+            .uncertainty(&operation_id)
+            .is_some();
+        let available_while_live = capacity.available_permits();
+        signal_process_group(process_group_id, libc::SIGKILL)?;
+        tokio::time::timeout(std::time::Duration::from_secs(3), owner).await??;
+        verify_process_group_absent(process_group_id).await?;
+        assert!(
+            !closed_while_live,
+            "an observation deadline was treated as physical closure"
+        );
+        assert!(fence_while_live);
+        assert_eq!(available_while_live, 0);
+        assert!(
+            local_native_resource_owners()
+                .uncertainty(&operation_id)
+                .is_none()
+        );
+        assert_eq!(capacity.available_permits(), 1);
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn direct_skill_probe_discards_output_while_draining_both_real_pipes()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let mut command = Command::new("sh");
+        command.args([
+            "-c",
+            "head -c 1048576 /dev/zero; head -c 1048576 /dev/zero >&2",
+        ]);
+        let output = run_direct_skill_command(
+            command,
+            SandboxCommand::program("sh", vec![]).with_timeout(std::time::Duration::from_secs(5)),
+            0,
+        )
+        .await?;
+        assert_eq!(output.exit_code, 0);
+        assert!(output.stdout.is_empty());
+        assert!(output.stderr.is_empty());
+        assert_eq!(output.stdout_bytes, 1_048_576);
+        assert_eq!(output.stderr_bytes, 1_048_576);
+        assert!(output.output_truncated);
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn direct_skill_owner_keeps_resources_through_cancel_timeout_and_caller_drop()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+        struct Guard {
+            pid: Arc<AtomicU32>,
+            dropped: Arc<AtomicBool>,
+            live_at_release: Arc<AtomicBool>,
+            _permit: tokio::sync::OwnedSemaphorePermit,
+        }
+        impl Drop for Guard {
+            fn drop(&mut self) {
+                if let Ok(pid) = i32::try_from(self.pid.load(Ordering::SeqCst))
+                    && pid > 0
+                {
+                    // SAFETY: signal 0 checks the original child-owned process group only.
+                    let exists = unsafe { libc::kill(-pid, 0) } == 0;
+                    self.live_at_release.store(exists, Ordering::SeqCst);
+                }
+                self.dropped.store(true, Ordering::SeqCst);
+            }
+        }
+        for mode in ["cancel", "timeout", "caller-drop"] {
+            let root =
+                std::env::temp_dir().join(format!("direct-skill-owner-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir_all(&root)?;
+            let capacity = Arc::new(tokio::sync::Semaphore::new(1));
+            let pid = Arc::new(AtomicU32::new(0));
+            let dropped = Arc::new(AtomicBool::new(false));
+            let live_at_release = Arc::new(AtomicBool::new(false));
+            let guard = Guard {
+                pid: pid.clone(),
+                dropped: dropped.clone(),
+                live_at_release: live_at_release.clone(),
+                _permit: capacity.clone().acquire_owned().await?,
+            };
+            let cancel = Arc::new(CancellationToken::new());
+            let owner_cancel = cancel.clone();
+            let mut command = Command::new("sh");
+            command
+                .args(["-c", "echo $$ > owner.pid; sleep 30"])
+                .current_dir(&root);
+            let timeout = if mode == "timeout" {
+                std::time::Duration::from_millis(500)
+            } else {
+                std::time::Duration::from_secs(30)
+            };
+            let execution = tokio::spawn(async move {
+                run_direct_skill_command(
+                    command,
+                    SandboxCommand::program("sh", vec![])
+                        .with_timeout(timeout)
+                        .with_cancel(Some(owner_cancel))
+                        .with_resource_guards(vec![
+                            echo_core::tools::InvocationResourceGuard::new(guard),
+                        ]),
+                    usize::MAX,
+                )
+                .await
+            });
+            let barrier = wait_for_pid(&root.join("owner.pid")).await;
+            let owner_pid = match barrier {
+                Ok(pid) => pid,
+                Err(error) => {
+                    cancel.cancel();
+                    let _ = execution.await;
+                    std::fs::remove_dir_all(root)?;
+                    return Err(error.into());
+                }
+            };
+            pid.store(owner_pid, Ordering::SeqCst);
+            assert_eq!(capacity.available_permits(), 0);
+            match mode {
+                "cancel" => {
+                    cancel.cancel();
+                    let result = execution.await?;
+                    assert!(
+                        matches!(result, Err(echo_core::error::ReactError::Sandbox(error)) if matches!(*error, SandboxError::Cancelled(_)))
+                    );
+                }
+                "timeout" => {
+                    let result = execution.await??;
+                    assert!(result.timed_out);
+                }
+                _ => {
+                    execution.abort();
+                    assert!(execution.await.is_err());
+                }
+            }
+            verify_process_group_absent(owner_pid).await?;
+            for _ in 0..100 {
+                if dropped.load(Ordering::SeqCst) {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+            assert!(
+                dropped.load(Ordering::SeqCst),
+                "mode {mode} lost its original physical resource owner"
+            );
+            assert!(
+                !live_at_release.load(Ordering::SeqCst),
+                "mode {mode} released resources before the original group disappeared"
+            );
+            assert_eq!(capacity.available_permits(), 1);
+            std::fs::remove_dir_all(root)?;
+        }
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn normal_root_exit_and_pipe_eof_do_not_release_a_live_owned_group()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        for mode in ["natural", "cancel", "deadline"] {
+            let root = std::env::temp_dir()
+                .join(format!("local-group-after-eof-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir_all(&root)?;
+            let capacity = Arc::new(tokio::sync::Semaphore::new(1));
+            let permit = capacity.clone().acquire_owned().await?;
+            let cancel = Arc::new(CancellationToken::new());
+            let timeout = if mode == "deadline" {
+                std::time::Duration::from_secs(2)
+            } else {
+                std::time::Duration::from_secs(10)
+            };
+            // 合法 nested sh + 重定向后台负载，父 exit/EOF 后后代仍在同组。
+            let tail = if mode == "deadline" { "; sleep 1" } else { "" };
+            let payload = format!(
+                "echo $$ > leader.pid; sh -c 'while [ ! -e release ]; do sleep 0.02; done' >/dev/null 2>&1 & echo $! > descendant.pid{tail}"
+            );
+            let mut command = SandboxCommand::shell(payload)
+                .with_working_dir(&root)
+                .with_timeout(timeout)
+                .with_cancel(Some(cancel.clone()))
+                .with_resource_guards(vec![echo_core::tools::InvocationResourceGuard::new(permit)]);
+            command.require_physical_resource_ownership = true;
+            let sandbox = LocalSandbox::new(LocalConfig {
+                enable_os_sandbox: false,
+                ..LocalConfig::default()
+            });
+            let started = tokio::time::Instant::now();
+            let mut execution = tokio::spawn(async move { sandbox.execute(command).await });
+            let leader = wait_for_pid(&root.join("leader.pid")).await;
+            let descendant = wait_for_pid(&root.join("descendant.pid")).await;
+            let (leader, descendant) = match (leader, descendant) {
+                (Ok(leader), Ok(descendant)) => (leader, descendant),
+                _ => {
+                    cancel.cancel();
+                    let _ = execution.await;
+                    std::fs::remove_dir_all(root)?;
+                    return Err("owned group fixture did not publish its original pids".into());
+                }
+            };
+            for _ in 0..300 {
+                if !process_exists(leader)? {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+            let root_exited = !process_exists(leader)?;
+            let descendant_live = process_exists(descendant)?;
+            let capacity_while_live = capacity.available_permits();
+            let early = tokio::time::timeout(std::time::Duration::from_millis(20), &mut execution)
+                .await
+                .ok();
+            let completed_before_group = early.is_some();
+            if early.is_some() || mode == "natural" {
+                std::fs::write(root.join("release"), "release")?;
+            } else if mode == "cancel" {
+                cancel.cancel();
+            } else {
+                // 仅在原 deadline 后放行；若错误地在父退出时重启预算，会自然成功，不能蒙混成 timeout。
+                tokio::time::sleep_until(
+                    started
+                        .checked_add(std::time::Duration::from_millis(2200))
+                        .ok_or("test release deadline overflow")?,
+                )
+                .await;
+                std::fs::write(root.join("release"), "release")?;
+            }
+            let result = match early {
+                Some(result) => result,
+                None => {
+                    match tokio::time::timeout(std::time::Duration::from_secs(5), &mut execution)
+                        .await
+                    {
+                        Ok(result) => result,
+                        Err(_) => {
+                            cancel.cancel();
+                            let _ = signal_process_group(leader, libc::SIGKILL);
+                            let _ = std::fs::write(root.join("release"), "release");
+                            execution.await
+                        }
+                    }
+                }
+            };
+            let closure = verify_process_group_absent(leader).await;
+            eprintln!(
+                "owned local group: mode={mode}; root_exited={root_exited}; descendant_live={descendant_live}; capacity={capacity_while_live}; early={completed_before_group}; elapsed={:?}; result={result:?}",
+                started.elapsed()
+            );
+            std::fs::remove_dir_all(root)?;
+            closure?;
+            assert!(
+                root_exited && descendant_live,
+                "fixture must reach real root-exit/EOF while original descendant remains alive"
+            );
+            assert_eq!(capacity_while_live, 0);
+            assert!(
+                !completed_before_group,
+                "root wait/EOF was incorrectly treated as owned-group closure"
+            );
+            match mode {
+                "natural" => {
+                    let result = result??;
+                    assert!(result.success());
+                }
+                "cancel" => {
+                    assert!(
+                        matches!(result?, Err(echo_core::error::ReactError::Sandbox(error)) if matches!(*error, SandboxError::Cancelled(_)))
+                    );
+                }
+                _ => {
+                    let result = result??;
+                    assert!(result.timed_out, "deadline restarted after root exit/EOF");
+                }
+            }
+            assert_eq!(capacity.available_permits(), 1);
+        }
+        Ok(())
+    }
 
     #[cfg(unix)]
     async fn wait_for_pid(path: &std::path::Path) -> std::result::Result<u32, String> {
@@ -1662,7 +2270,7 @@ mod tests {
         emit_local_terminal_failure(&events, &terminal).await;
         assert!(matches!(
             &terminal,
-            LocalChildTerminal::Failed(SandboxError::IoError(message))
+            LocalChildTerminal::Unsettled(SandboxError::IoError(message), _)
                 if message.contains("timed out")
                     && message.contains("process group still exists")
         ));
@@ -1683,7 +2291,7 @@ mod tests {
         );
         assert!(matches!(
             terminal,
-            LocalChildTerminal::Failed(SandboxError::IoError(message))
+            LocalChildTerminal::Unsettled(SandboxError::IoError(message), _)
                 if message.contains("failed to read stdout")
                     && message.contains("process group still exists")
         ));

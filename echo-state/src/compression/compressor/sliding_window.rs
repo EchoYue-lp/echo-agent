@@ -53,7 +53,7 @@ impl ContextCompressor for SlidingWindowCompressor {
 
             let system_tokens = message_tokens(&system_msgs, tokenizer.as_ref());
             let conversation_limit = input.token_limit.saturating_sub(system_tokens);
-            let (evicted, kept) = select_recent_tail(
+            let (evicted, kept, evicted_prefix_len) = select_recent_tail(
                 conv_msgs,
                 conversation_limit,
                 self.recent_token_budget,
@@ -61,7 +61,6 @@ impl ContextCompressor for SlidingWindowCompressor {
                 self.recent_token_budget.is_some(),
                 tokenizer.as_ref(),
             )?;
-            let split_at = evicted.len();
 
             let mut messages = system_msgs;
             messages.extend(kept);
@@ -78,7 +77,9 @@ impl ContextCompressor for SlidingWindowCompressor {
                         .clone()
                         .or(input.current_query.clone()),
                 );
-            if split_at > 0 && self.recent_token_budget.is_none() {
+            if let Some(split_at) = evicted_prefix_len
+                && self.recent_token_budget.is_none()
+            {
                 checkpoint = checkpoint.with_covered_range(
                     system_count,
                     system_count.saturating_add(split_at).saturating_sub(1),
@@ -152,7 +153,8 @@ pub(crate) fn ensure_request_fits(
 
 /// One pure selector shared by semantic compression and its safety fallback.
 /// Older turns are kept whole. A large active turn may drop older execution
-/// blocks, but never its request or half of a tool-call/result block.
+/// blocks, but never its request or half of a tool-call/result block. The last
+/// tool batch without a later assistant response is still current model input.
 pub(crate) fn select_recent_tail(
     messages: Vec<Message>,
     input_limit: usize,
@@ -160,10 +162,9 @@ pub(crate) fn select_recent_tail(
     message_cap: usize,
     protect_request: bool,
     tokenizer: &dyn Tokenizer,
-) -> Result<(Vec<Message>, Vec<Message>)> {
-    let latest_user = protect_request
-        .then(|| messages.iter().rposition(is_user_request))
-        .flatten();
+) -> Result<(Vec<Message>, Vec<Message>, Option<usize>)> {
+    let latest_request = messages.iter().rposition(is_user_request);
+    let latest_user = protect_request.then_some(latest_request).flatten();
     let request_cost = latest_user
         .and_then(|index| messages.get(index))
         .map(|message| message_tokens(std::slice::from_ref(message), tokenizer))
@@ -173,20 +174,7 @@ pub(crate) fn select_recent_tail(
             format!("latest user request needs {request_cost} tokens, available input budget is {input_limit}")
         ).into());
     }
-    // The soft recent allowance can expand to fit one request; the hard input
-    // limit still wins. No user input is silently truncated to make it fit.
-    let budget = recent_tokens
-        .unwrap_or(input_limit)
-        .max(request_cost)
-        .min(input_limit);
-    let cap = if recent_tokens.is_some() {
-        usize::MAX
-    } else {
-        message_cap.max(usize::from(latest_user.is_some()))
-    };
     let mut selected = vec![false; messages.len()];
-    let mut cost = request_cost;
-    let mut count = usize::from(latest_user.is_some());
     if let Some(index) = latest_user
         && let Some(slot) = selected.get_mut(index)
     {
@@ -224,6 +212,56 @@ pub(crate) fn select_recent_tail(
         units.push(start..end);
         start = end;
     }
+    // 后继assistant消息才表明原工具组已被模型消费；没有它的新工具组仍是当前输入。
+    // 复用原分组边界，不从工具正文猜意图，也不另建持久化交付frontier。
+    let pending_tool_unit = messages
+        .iter()
+        .rposition(|message| message.role == Role::Assistant)
+        .filter(|index| latest_request.is_none_or(|user| *index > user))
+        .filter(|index| {
+            messages.get(*index).is_some_and(|message| {
+                message
+                    .tool_calls
+                    .as_ref()
+                    .is_some_and(|calls| !calls.is_empty())
+            })
+        })
+        .and_then(|index| units.iter().find(|unit| unit.start == index));
+    if let Some(unit) = pending_tool_unit {
+        // 消息条数模式也不能用旧组挤掉新请求；当前工具输入与所属请求一起保留。
+        if let Some(index) = latest_request
+            && let Some(slot) = selected.get_mut(index)
+        {
+            *slot = true;
+        }
+        for slot in selected.get_mut(unit.clone()).unwrap_or_default() {
+            *slot = true;
+        }
+    }
+    let required_cost = messages
+        .iter()
+        .zip(&selected)
+        .filter(|(_, required)| **required)
+        .fold(0usize, |cost, (message, _)| {
+            cost.saturating_add(message_tokens(std::slice::from_ref(message), tokenizer))
+        });
+    if required_cost > input_limit {
+        return Err(echo_core::error::AgentError::ContextLimitExceeded(format!(
+            "latest request and unconsumed tool batch need {required_cost} tokens, available input budget is {input_limit}"
+        )).into());
+    }
+    // 当前请求和未消费工具组可突破soft recent，但不能扩大原hard input预算。
+    let budget = recent_tokens
+        .unwrap_or(input_limit)
+        .max(required_cost)
+        .min(input_limit);
+    let mut cost = required_cost;
+    let mut count = selected.iter().filter(|selected| **selected).count();
+    let cap = if recent_tokens.is_some() {
+        usize::MAX
+    } else {
+        message_cap.max(count)
+    };
     if recent_tokens.is_some() {
         // Consider complete turns newest first, splitting only the active one.
         let mut turns = vec![0usize];
@@ -239,8 +277,21 @@ pub(crate) fn select_recent_tail(
                 continue;
             };
             let turn_cost = message_tokens(messages.get(from..to).unwrap_or_default(), tokenizer);
-            let already = latest_user.is_some_and(|index| index >= from && index < to);
-            let extra = turn_cost.saturating_sub(if already { request_cost } else { 0 });
+            let selected_cost = messages
+                .get(from..to)
+                .unwrap_or_default()
+                .iter()
+                .zip(selected.get(from..to).unwrap_or_default())
+                .filter(|(_, selected)| **selected)
+                .fold(0usize, |cost, (message, _)| {
+                    cost.saturating_add(message_tokens(std::slice::from_ref(message), tokenizer))
+                });
+            let already = selected
+                .get(from..to)
+                .unwrap_or_default()
+                .iter()
+                .any(|selected| *selected);
+            let extra = turn_cost.saturating_sub(selected_cost);
             if cost.saturating_add(extra) <= budget {
                 for slot in selected.get_mut(from..to).unwrap_or_default() {
                     *slot = true;
@@ -252,7 +303,10 @@ pub(crate) fn select_recent_tail(
                     .rev()
                     .filter(|unit| unit.start >= from && unit.end <= to)
                 {
-                    if latest_user == Some(unit.start) {
+                    if selected
+                        .get(unit.clone())
+                        .is_some_and(|slots| slots.iter().all(|slot| *slot))
+                    {
                         continue;
                     }
                     let extra =
@@ -272,7 +326,10 @@ pub(crate) fn select_recent_tail(
         }
     } else {
         for unit in units.iter().rev() {
-            if latest_user == Some(unit.start) {
+            if selected
+                .get(unit.clone())
+                .is_some_and(|slots| slots.iter().all(|slot| *slot))
+            {
                 continue;
             }
             let extra = message_tokens(messages.get(unit.clone()).unwrap_or_default(), tokenizer);
@@ -287,6 +344,10 @@ pub(crate) fn select_recent_tail(
             count = count.saturating_add(extra_count);
         }
     }
+    // 直接从同一次选择记录判定前缀，不能把非连续驱逐数量伪报成covered_range。
+    let prefix_len = selected.iter().take_while(|keep| !**keep).count();
+    let evicted_count = selected.iter().filter(|keep| !**keep).count();
+    let evicted_prefix_len = (prefix_len > 0 && prefix_len == evicted_count).then_some(prefix_len);
     let mut kept = Vec::new();
     let mut evicted = Vec::new();
     for (index, message) in messages.into_iter().enumerate() {
@@ -296,7 +357,7 @@ pub(crate) fn select_recent_tail(
             evicted.push(message);
         }
     }
-    Ok((evicted, kept))
+    Ok((evicted, kept, evicted_prefix_len))
 }
 
 #[cfg(test)]
@@ -304,6 +365,205 @@ mod tests {
     use super::*;
     use echo_core::llm::types::{FunctionCall, Message, ToolCall};
     use echo_core::tokenizer::HeuristicTokenizer;
+
+    #[test]
+    fn unconsumed_tool_group_expands_recent_allowance_inside_original_hard_budget() -> Result<()> {
+        let tokenizer = HeuristicTokenizer;
+        let page = "fresh page 完整🚀 ".repeat(180);
+        let result = Message::tool_result("new-page".into(), "read_artifact".into(), page.clone());
+        let page_tokens = message_tokens(std::slice::from_ref(&result), &tokenizer);
+        assert!(page_tokens > 400 && page_tokens <= 2000);
+        let mut call = Message::assistant(String::new());
+        call.tool_calls = Some(vec![ToolCall {
+            provider_source: None,
+            id: "new-page".into(),
+            call_type: "function".into(),
+            function: FunctionCall {
+                name: "read_artifact".into(),
+                arguments: "{\"offset\":23628,\"limit\":2000}".into(),
+            },
+        }]);
+        let request = Message::user("按原文继续读取，不丢页".into());
+        let (evicted, kept, _) = select_recent_tail(
+            vec![
+                Message::user("old history ".repeat(1000)),
+                Message::assistant("old answer".into()),
+                request.clone(),
+                call.clone(),
+                result.clone(),
+            ],
+            8000,
+            Some(400),
+            1,
+            true,
+            &tokenizer,
+        )?;
+        assert!(kept.iter().any(|message| {
+            message.role == Role::User
+                && message.content.as_text_ref() == request.content.as_text_ref()
+        }));
+        assert!(kept.iter().any(|message| {
+            message
+                .tool_calls
+                .as_ref()
+                .is_some_and(|calls| calls.iter().any(|call| call.id == "new-page"))
+        }));
+        assert!(
+            kept.iter().any(|message| {
+                message.tool_call_id.as_deref() == Some("new-page")
+                    && message.content.as_text_ref() == Some(page.as_str())
+            }),
+            "尚未交模型的新工具页必须完整保留"
+        );
+        assert!(message_tokens(&kept, &tokenizer) <= 8000);
+        assert_eq!(evicted.len(), 2);
+        Ok(())
+    }
+
+    #[test]
+    fn unconsumed_tool_group_over_hard_budget_returns_original_typed_limit() {
+        let tokenizer = HeuristicTokenizer;
+        let mut call = Message::assistant(String::new());
+        call.tool_calls = Some(vec![ToolCall {
+            provider_source: None,
+            id: "too-large".into(),
+            call_type: "function".into(),
+            function: FunctionCall {
+                name: "read_artifact".into(),
+                arguments: "{}".into(),
+            },
+        }]);
+        let result = select_recent_tail(
+            vec![
+                Message::user("current request".into()),
+                call,
+                Message::tool_result(
+                    "too-large".into(),
+                    "read_artifact".into(),
+                    "unconsumed page ".repeat(8000),
+                ),
+            ],
+            8000,
+            Some(400),
+            1,
+            true,
+            &tokenizer,
+        );
+        assert!(matches!(
+            result,
+            Err(echo_core::error::ReactError::Agent(error))
+                if matches!(error.as_ref(), echo_core::error::AgentError::ContextLimitExceeded(_))
+        ));
+    }
+
+    #[test]
+    fn count_window_does_not_pin_an_old_tool_group_ahead_of_a_new_request() -> Result<()> {
+        let call = Message::assistant_with_tools(vec![ToolCall {
+            provider_source: None,
+            id: "old-call".into(),
+            call_type: "function".into(),
+            function: FunctionCall {
+                name: "read".into(),
+                arguments: "{}".into(),
+            },
+        }]);
+        let (_, kept, _) = select_recent_tail(
+            vec![
+                Message::user("old request".into()),
+                call,
+                Message::tool_result("old-call".into(), "read".into(), "old result".into()),
+                Message::user("new request".into()),
+            ],
+            8000,
+            None,
+            1,
+            false,
+            &HeuristicTokenizer,
+        )?;
+        assert_eq!(kept.len(), 1);
+        assert_eq!(
+            kept.first()
+                .and_then(|message| message.content.as_text_ref()),
+            Some("new request")
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn count_window_nonprefix_eviction_does_not_claim_a_prefix_covered_range() -> Result<()> {
+        let call = |id: &str| {
+            Message::assistant_with_tools(vec![ToolCall {
+                provider_source: None,
+                id: id.into(),
+                call_type: "function".into(),
+                function: FunctionCall {
+                    name: "read".into(),
+                    arguments: "{}".into(),
+                },
+            }])
+        };
+        let output = SlidingWindowCompressor::new(1)
+            .compress(CompressionInput {
+                messages: vec![
+                    Message::user("current request".into()),
+                    call("old"),
+                    Message::tool_result("old".into(), "read".into(), "already consumed".into()),
+                    call("new"),
+                    Message::tool_result("new".into(), "read".into(), "unconsumed".into()),
+                ],
+                token_limit: 8000,
+                current_query: None,
+                focus_instructions: None,
+                cancel_token: None,
+                tokenizer: None,
+            })
+            .await?;
+        assert_eq!(output.messages.len(), 3);
+        assert_eq!(output.evicted.len(), 2);
+        assert!(
+            output
+                .checkpoint
+                .as_ref()
+                .is_some_and(|checkpoint| checkpoint.covered_range.is_none())
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn count_window_keeps_the_current_request_with_its_unconsumed_tool_group() -> Result<()> {
+        let call = Message::assistant_with_tools(vec![ToolCall {
+            provider_source: None,
+            id: "current-call".into(),
+            call_type: "function".into(),
+            function: FunctionCall {
+                name: "read".into(),
+                arguments: "{}".into(),
+            },
+        }]);
+        let (_, kept, _) = select_recent_tail(
+            vec![
+                Message::user("current request".into()),
+                call,
+                Message::tool_result(
+                    "current-call".into(),
+                    "read".into(),
+                    "current result".into(),
+                ),
+            ],
+            8000,
+            None,
+            1,
+            false,
+            &HeuristicTokenizer,
+        )?;
+        assert_eq!(kept.len(), 3);
+        assert_eq!(
+            kept.first()
+                .and_then(|message| message.content.as_text_ref()),
+            Some("current request")
+        );
+        Ok(())
+    }
 
     #[tokio::test]
     async fn token_tail_keeps_complete_turns_and_splits_large_active_tool_work() -> Result<()> {
@@ -335,6 +595,7 @@ mod tests {
         );
         let mut call = Message::assistant(String::new());
         call.tool_calls = Some(vec![ToolCall {
+            provider_source: None,
             id: "c".to_string(),
             call_type: "function".to_string(),
             function: FunctionCall {
@@ -396,6 +657,7 @@ mod tests {
             ["a", "b"]
                 .iter()
                 .map(|id| ToolCall {
+                    provider_source: None,
                     id: id.to_string(),
                     call_type: "function".to_string(),
                     function: FunctionCall {
@@ -472,20 +734,41 @@ mod tests {
     #[tokio::test]
     async fn compression_is_token_bounded_and_keeps_tool_groups_atomic() -> Result<()> {
         let compressor = SlidingWindowCompressor::new(40);
-        let mut call = Message::assistant(String::new());
-        call.tool_calls = Some(vec![ToolCall {
-            id: "call-1".to_string(),
-            call_type: "function".to_string(),
+        let call = Message::assistant_with_tools(vec![ToolCall {
+            provider_source: None,
+            id: "call-1".into(),
+            call_type: "function".into(),
             function: FunctionCall {
-                name: "lookup".to_string(),
-                arguments: "{}".to_string(),
+                name: "lookup".into(),
+                arguments: "{}".into(),
             },
         }]);
-        let result =
-            Message::tool_result("call-1".to_string(), "lookup".to_string(), "r".repeat(400));
+        let unconsumed = vec![
+            Message::user("old".repeat(100)),
+            call,
+            Message::tool_result("call-1".into(), "lookup".into(), "r".repeat(400)),
+        ];
+        let oversized = compressor
+            .compress(CompressionInput {
+                messages: unconsumed.clone(),
+                token_limit: 35,
+                current_query: None,
+                focus_instructions: None,
+                cancel_token: None,
+                tokenizer: None,
+            })
+            .await;
+        assert!(
+            matches!(oversized, Err(echo_core::error::ReactError::Agent(error))
+            if matches!(error.as_ref(), echo_core::error::AgentError::ContextLimitExceeded(_)))
+        );
+
+        // 真实后继assistant已消费该组后，历史才能沿原35-token预算整组淘汰。
+        let mut historical = unconsumed;
+        historical.push(Message::assistant("consumed response".into()));
         let output = compressor
             .compress(CompressionInput {
-                messages: vec![Message::user("old".repeat(100)), call, result],
+                messages: historical,
                 token_limit: 35,
                 current_query: None,
                 focus_instructions: None,
@@ -493,31 +776,40 @@ mod tests {
                 tokenizer: None,
             })
             .await?;
-
         assert!(message_tokens(&output.messages, &HeuristicTokenizer) <= 35);
+        assert_eq!(output.messages.len(), 1);
+        assert_eq!(
+            output
+                .messages
+                .first()
+                .and_then(|message| message.content.as_text_ref()),
+            Some("consumed response")
+        );
         assert!(
-            output.messages.is_empty(),
-            "oversized tool group must be evicted whole"
+            output
+                .messages
+                .iter()
+                .all(|message| message.role != Role::Tool && message.tool_calls.is_none())
         );
         assert_eq!(output.evicted.len(), 3);
 
-        let mut fitting_call = Message::assistant(String::new());
-        fitting_call.tool_calls = Some(vec![ToolCall {
-            id: "call-2".to_string(),
-            call_type: "function".to_string(),
+        let fitting_call = Message::assistant_with_tools(vec![ToolCall {
+            provider_source: None,
+            id: "call-2".into(),
+            call_type: "function".into(),
             function: FunctionCall {
-                name: "lookup".to_string(),
-                arguments: "{}".to_string(),
+                name: "lookup".into(),
+                arguments: "{}".into(),
             },
         }]);
-        let fitting_result =
-            Message::tool_result("call-2".to_string(), "lookup".to_string(), "ok".to_string());
         let fitting = compressor
             .compress(CompressionInput {
                 messages: vec![
                     Message::user("old".repeat(100)),
+                    Message::assistant("old answer ".repeat(100)),
+                    Message::user("current request".into()),
                     fitting_call,
-                    fitting_result,
+                    Message::tool_result("call-2".into(), "lookup".into(), "ok".into()),
                 ],
                 token_limit: 35,
                 current_query: None,
@@ -526,19 +818,28 @@ mod tests {
                 tokenizer: None,
             })
             .await?;
-        assert_eq!(fitting.messages.len(), 2);
-        assert!(
+        assert!(message_tokens(&fitting.messages, &HeuristicTokenizer) <= 35);
+        assert_eq!(fitting.messages.len(), 3);
+        assert_eq!(
             fitting
                 .messages
                 .first()
-                .is_some_and(|message| message.tool_calls.is_some())
+                .and_then(|message| message.content.as_text_ref()),
+            Some("current request")
         );
         assert!(
             fitting
                 .messages
                 .get(1)
+                .is_some_and(|message| message.tool_calls.is_some())
+        );
+        assert!(
+            fitting
+                .messages
+                .get(2)
                 .is_some_and(|message| message.role == Role::Tool)
         );
+        assert_eq!(fitting.evicted.len(), 2);
         Ok(())
     }
 }

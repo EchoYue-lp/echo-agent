@@ -6,32 +6,68 @@
 
 use agent_client_protocol::Stdio;
 use echo_agent::acp::{AcpAgentAdapter, AcpSessionContext};
-use echo_agent::agent::{Agent, AgentEvent, CancellationToken};
+use echo_agent::agent::{
+    Agent, AgentEvent, AgentInvocationContext, AgentPhase, CancellationToken, EventIdentity,
+    ExecutionStatus, ExecutionStatusKind,
+};
 use echo_agent::error::Result;
 use echo_agent::llm::types::Message;
 use futures::future::BoxFuture;
-use futures::stream::{self, BoxStream, StreamExt};
+use futures::stream::BoxStream;
 use std::sync::Mutex;
 
 struct ExampleSessionAgent {
     session_id: String,
-    messages: Mutex<Vec<String>>,
+    messages: Mutex<Vec<Message>>,
 }
 
 impl ExampleSessionAgent {
-    fn chat_stream_owned<'a>(
+    /// 确定性示例本身就是原生 source；状态来自本次执行，保留完整值到原 EOF。
+    fn response_source<'a>(
         &'a self,
-        message: String,
+        answer: String,
+        message: Message,
+        cancel: CancellationToken,
+        invocation: AgentInvocationContext,
     ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
-        let answer = {
-            let mut messages = self
-                .messages
-                .lock()
-                .unwrap_or_else(|error| error.into_inner());
-            messages.push(message.clone());
-            format!("{} turn {}: {}", self.session_id, messages.len(), message)
-        };
-        Box::pin(async move { Ok(stream::iter(vec![Ok(AgentEvent::FinalAnswer(answer))]).boxed()) })
+        Box::pin(async move {
+            let identity = EventIdentity::from_invocation(&invocation)?;
+            let execution_id = identity
+                .execution_id
+                .as_ref()
+                .map(|value| value.as_str())
+                .unwrap_or(identity.turn_id.as_str())
+                .to_string();
+            let request_id = identity
+                .message_id
+                .as_ref()
+                .map(|value| value.as_str().to_string())
+                .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+            let status = move |kind, sequence| {
+                AgentEvent::ExecutionStatus(ExecutionStatus {
+                    adapter_generated: false,
+                    execution_id: execution_id.clone(),
+                    request_id: Some(request_id.clone()),
+                    sequence,
+                    phase: AgentPhase::Thinking,
+                    status: kind,
+                    reason: None,
+                })
+            };
+            let source = async_stream::stream! {
+                let _message = message;
+                let _invocation = invocation;
+                yield Ok(status(ExecutionStatusKind::Started, 0));
+                if cancel.is_cancelled() {
+                    yield Ok(status(ExecutionStatusKind::Cancelled, 1));
+                    yield Ok(AgentEvent::Cancelled);
+                    return;
+                }
+                yield Ok(AgentEvent::FinalAnswer(answer));
+                yield Ok(status(ExecutionStatusKind::Settled, 1));
+            };
+            Ok(Box::pin(source) as BoxStream<'a, Result<AgentEvent>>)
+        })
     }
 }
 
@@ -48,31 +84,37 @@ impl Agent for ExampleSessionAgent {
         "Echo ACP prompts for the learning example."
     }
 
-    fn execute<'a>(&'a self, task: &'a str) -> BoxFuture<'a, Result<String>> {
-        Box::pin(async move { Ok(task.to_string()) })
-    }
-
-    fn execute_stream<'a>(
-        &'a self,
-        task: &'a str,
-    ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
-        let answer = task.to_string();
-        Box::pin(async move { Ok(stream::iter(vec![Ok(AgentEvent::FinalAnswer(answer))]).boxed()) })
-    }
-
-    fn chat_stream<'a>(
-        &'a self,
-        message: &'a str,
-    ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
-        self.chat_stream_owned(message.to_string())
-    }
-
-    fn chat_stream_message_with_cancel<'a>(
+    fn execute_stream_message_with_invocation_context<'a>(
         &'a self,
         message: Message,
-        _cancel: CancellationToken,
+        cancel: CancellationToken,
+        invocation: AgentInvocationContext,
     ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
-        self.chat_stream_owned(message.content.as_text().unwrap_or_default())
+        // fresh execute 保留原来的无会话 echo 行为，不修改 chat 的 turn 计数。
+        let answer = message.content.as_text().unwrap_or_default();
+        self.response_source(answer, message, cancel, invocation)
+    }
+
+    fn chat_stream_message_with_invocation_context<'a>(
+        &'a self,
+        message: Message,
+        cancel: CancellationToken,
+        invocation: AgentInvocationContext,
+    ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
+        let answer = {
+            let mut messages = self
+                .messages
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            messages.push(message.clone());
+            format!(
+                "{} turn {}: {}",
+                self.session_id,
+                messages.len(),
+                message.content.as_text().unwrap_or_default()
+            )
+        };
+        self.response_source(answer, message, cancel, invocation)
     }
 }
 

@@ -125,7 +125,7 @@ const STAGE_INFO: [(&str, &str, &str); 17] = [
     (
         "callback_end",
         "CallbackStage(End)",
-        "按真实终态分流 on_tool_end / on_tool_error",
+        "按真实终态分流 on_tool_end_with_id / on_tool_error_with_id",
     ),
     (
         "callback_start",
@@ -419,7 +419,7 @@ async fn demo_intervention_callback() -> echo_agent::error::Result<()> {
         .build()?;
 
     println!("\n  ReactAgentBuilder::add_intervention_callback() → 注册成功");
-    assert!(agent.tool_names().contains(&"final_answer".to_string()));
+    assert!(!agent.tool_names().contains(&"final_answer".to_string()));
 
     println!("  → InterventionCallback ✓");
     Ok(())
@@ -429,6 +429,7 @@ async fn demo_intervention_callback() -> echo_agent::error::Result<()> {
 
 /// 追踪管线事件的回调
 struct PipelineTracker {
+    call_ids: Mutex<Vec<(String, &'static str)>>,
     tool_starts: AtomicUsize,
     tool_ends: AtomicUsize,
     add_starts: AtomicUsize,
@@ -439,6 +440,7 @@ struct PipelineTracker {
 impl PipelineTracker {
     fn new() -> Self {
         Self {
+            call_ids: Mutex::new(Vec::new()),
             tool_starts: AtomicUsize::new(0),
             tool_ends: AtomicUsize::new(0),
             add_starts: AtomicUsize::new(0),
@@ -449,12 +451,17 @@ impl PipelineTracker {
 }
 
 impl AgentCallback for PipelineTracker {
-    fn on_tool_start<'a>(
+    fn on_tool_start_with_id<'a>(
         &'a self,
         agent: &'a str,
+        call_id: &'a str,
         tool: &'a str,
         _args: &'a Value,
     ) -> BoxFuture<'a, ()> {
+        self.call_ids
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .push((call_id.to_string(), "start"));
         self.tool_starts.fetch_add(1, Ordering::SeqCst);
         if tool == "add" {
             self.add_starts.fetch_add(1, Ordering::SeqCst);
@@ -463,12 +470,17 @@ impl AgentCallback for PipelineTracker {
         Box::pin(async {})
     }
 
-    fn on_tool_end<'a>(
+    fn on_tool_end_with_id<'a>(
         &'a self,
         agent: &'a str,
+        call_id: &'a str,
         tool: &'a str,
         output: &'a str,
     ) -> BoxFuture<'a, ()> {
+        self.call_ids
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .push((call_id.to_string(), "end"));
         self.tool_ends.fetch_add(1, Ordering::SeqCst);
         if tool == "add" {
             self.add_ends.fetch_add(1, Ordering::SeqCst);
@@ -478,12 +490,17 @@ impl AgentCallback for PipelineTracker {
         Box::pin(async {})
     }
 
-    fn on_tool_error<'a>(
+    fn on_tool_error_with_id<'a>(
         &'a self,
         agent: &'a str,
+        call_id: &'a str,
         tool: &'a str,
         err: &'a echo_agent::error::ReactError,
     ) -> BoxFuture<'a, ()> {
+        self.call_ids
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .push((call_id.to_string(), "error"));
         println!("    📍 ToolError [{agent}] → {tool}: {err}");
         Box::pin(async {})
     }
@@ -509,11 +526,7 @@ async fn demo_agent_callback() -> echo_agent::error::Result<()> {
         MockLlmClient::new()
             .with_model_name("pipeline-mock")
             .then_tool_call("call_add", "add", r#"{"a":15.0,"b":27.0}"#)
-            .then_tool_call(
-                "call_final_answer",
-                "final_answer",
-                r#"{"answer":"15 + 27 = 42"}"#,
-            ),
+            .with_response(r###"15 + 27 = 42"###),
     );
 
     let config = AgentConfig::new(
@@ -540,17 +553,29 @@ async fn demo_agent_callback() -> echo_agent::error::Result<()> {
     let add_ends = tracker.add_ends.load(Ordering::SeqCst);
     let iters = tracker.iterations.load(Ordering::SeqCst);
     println!("\n  管线回调统计:");
-    println!("    on_tool_start: {starts} 次 (对应 CallbackStage(Start))");
-    println!("    on_tool_end:   {ends} 次 (对应 CallbackStage(End))");
+    println!("    on_tool_start_with_id: {starts} 次 (对应 CallbackStage(Start))");
+    println!("    on_tool_end_with_id:   {ends} 次 (对应 CallbackStage(End))");
     println!("    on_iteration:  {iters} 次");
 
     assert_eq!(answer.trim(), "15 + 27 = 42");
     assert_eq!(add_starts, 1, "add should trigger one start callback");
     assert_eq!(add_ends, 1, "add should trigger one end callback");
+    assert_eq!(
+        tracker
+            .call_ids
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .as_slice(),
+        &[
+            ("call_add".to_string(), "start"),
+            ("call_add".to_string(), "end")
+        ],
+        "callback 必须沿用模型原始 call_id，且每个终态只观察一次"
+    );
 
     println!("\n  回调触发的管线阶段:");
-    println!("    on_tool_start → CallbackStage(Start)");
-    println!("    on_tool_end / on_tool_error → CallbackStage(End)");
+    println!("    on_tool_start_with_id → CallbackStage(Start)");
+    println!("    on_tool_end_with_id / on_tool_error_with_id → CallbackStage(End)");
     println!("    on_final_answer → 最终答案输出时触发");
     println!("    on_iteration → 每轮 ReAct 循环结束时触发");
 

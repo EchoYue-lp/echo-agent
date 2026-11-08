@@ -12,6 +12,10 @@ use std::sync::Arc;
 #[derive(Clone, Default)]
 pub struct StandardToolPack {
     cells: Option<Arc<dyn CommandCellRegistry>>,
+    #[cfg(feature = "files")]
+    file_system: Option<Arc<dyn echo_core::tools::filesystem::FileSystem>>,
+    #[cfg(feature = "files")]
+    content_search_provider: Option<Arc<dyn echo_core::tools::search::ContentSearchProvider>>,
 }
 
 impl StandardToolPack {
@@ -21,6 +25,30 @@ impl StandardToolPack {
 
     pub fn with_command_cells(mut self, cells: Arc<dyn CommandCellRegistry>) -> Self {
         self.cells = Some(cells);
+        self
+    }
+
+    /// Bind the existing file tools to one immutable target. Invocation cwd
+    /// still selects the actual checkout within that target.
+    #[cfg(feature = "files")]
+    pub fn with_file_system(
+        mut self,
+        file_system: Arc<dyn echo_core::tools::filesystem::FileSystem>,
+    ) -> Self {
+        self.file_system = Some(file_system);
+        self
+    }
+
+    /// 可选远端内容搜索接缝，只作用于 `grep`。
+    ///
+    /// `None`（默认）时 grep 保持本机遍历；提供者说“不支持”的单次请求也
+    /// 落回同一路径，因此未注入者与既有部署行为完全一致。
+    #[cfg(feature = "files")]
+    pub fn with_content_search_provider(
+        mut self,
+        provider: Option<Arc<dyn echo_core::tools::search::ContentSearchProvider>>,
+    ) -> Self {
+        self.content_search_provider = provider;
         self
     }
 }
@@ -47,7 +75,13 @@ impl ToolPack for StandardToolPack {
                 ShellTool::new().with_cell_launcher(Arc::clone(cells))
             });
             tools.push(ToolPackEntry::new(Box::new(shell)));
-            tools.push(ToolPackEntry::new(Box::new(RunCodeTool::new())));
+            #[allow(unused_mut)]
+            let mut run_code = RunCodeTool::new();
+            #[cfg(feature = "files")]
+            if let Some(file_system) = &self.file_system {
+                run_code = run_code.with_file_system(Arc::clone(file_system));
+            }
+            tools.push(ToolPackEntry::new(Box::new(run_code)));
         }
 
         #[cfg(feature = "files")]
@@ -59,15 +93,37 @@ impl ToolPack for StandardToolPack {
             use crate::files::glob::GlobTool;
             use crate::files::grep::GrepTool;
             use crate::files::repo_map::RepoMapTool;
+            let file_system = self
+                .file_system
+                .clone()
+                .unwrap_or_else(|| Arc::new(crate::files::LocalFileSystem));
             tools.extend([
-                ToolPackEntry::read_only(Box::new(ReadFileTool::new())),
-                ToolPackEntry::read_only(Box::new(ListDirTool::new())),
-                ToolPackEntry::read_only(Box::new(GrepTool::new())),
-                ToolPackEntry::read_only(Box::new(GlobTool::new())),
-                ToolPackEntry::new(Box::new(ApplyPatchTool::new())),
-                ToolPackEntry::read_only(Box::new(DiffTool::new())),
-                ToolPackEntry::read_only(Box::new(RepoMapTool::new())),
-                ToolPackEntry::read_only(Box::new(CodeSearchTool::new())),
+                ToolPackEntry::read_only(Box::new(
+                    ReadFileTool::new().with_file_system(Arc::clone(&file_system)),
+                )),
+                ToolPackEntry::read_only(Box::new(
+                    ListDirTool::new().with_file_system(Arc::clone(&file_system)),
+                )),
+                ToolPackEntry::read_only(Box::new(
+                    GrepTool::new()
+                        .with_file_system(Arc::clone(&file_system))
+                        .with_search_provider(self.content_search_provider.clone()),
+                )),
+                ToolPackEntry::read_only(Box::new(
+                    GlobTool::new().with_file_system(Arc::clone(&file_system)),
+                )),
+                ToolPackEntry::new(Box::new(
+                    ApplyPatchTool::new().with_file_system(Arc::clone(&file_system)),
+                )),
+                ToolPackEntry::read_only(Box::new(
+                    DiffTool::new().with_file_system(Arc::clone(&file_system)),
+                )),
+                ToolPackEntry::read_only(Box::new(
+                    RepoMapTool::new().with_file_system(Arc::clone(&file_system)),
+                )),
+                ToolPackEntry::read_only(Box::new(
+                    CodeSearchTool::new().with_file_system(file_system),
+                )),
             ]);
         }
 
@@ -77,16 +133,47 @@ impl ToolPack for StandardToolPack {
                 GitBlameTool, GitBranchTool, GitCommitTool, GitDiffTool, GitLogTool, GitStatusTool,
             };
             use crate::worktree_tool::{EnterWorktreeTool, ExitWorktreeTool, ListWorktreesTool};
+            #[cfg(feature = "files")]
+            let git_file_system = self.file_system.clone();
+            #[cfg(not(feature = "files"))]
+            let git_file_system = None;
             tools.extend([
-                ToolPackEntry::read_only(Box::new(GitStatusTool)),
-                ToolPackEntry::read_only(Box::new(GitDiffTool)),
-                ToolPackEntry::read_only(Box::new(GitLogTool)),
-                ToolPackEntry::read_only(Box::new(GitBlameTool)),
-                ToolPackEntry::new(Box::new(GitBranchTool)),
-                ToolPackEntry::new(Box::new(GitCommitTool)),
-                ToolPackEntry::new(Box::new(EnterWorktreeTool)),
-                ToolPackEntry::new(Box::new(ExitWorktreeTool)),
-                ToolPackEntry::read_only(Box::new(ListWorktreesTool)),
+                ToolPackEntry::read_only(crate::git::bind_file_system(
+                    GitStatusTool,
+                    git_file_system.clone(),
+                )),
+                ToolPackEntry::read_only(crate::git::bind_file_system(
+                    GitDiffTool,
+                    git_file_system.clone(),
+                )),
+                ToolPackEntry::read_only(crate::git::bind_file_system(
+                    GitLogTool,
+                    git_file_system.clone(),
+                )),
+                ToolPackEntry::read_only(crate::git::bind_file_system(
+                    GitBlameTool,
+                    git_file_system.clone(),
+                )),
+                ToolPackEntry::new(crate::git::bind_file_system(
+                    GitBranchTool,
+                    git_file_system.clone(),
+                )),
+                ToolPackEntry::new(crate::git::bind_file_system(
+                    GitCommitTool,
+                    git_file_system.clone(),
+                )),
+                ToolPackEntry::new(crate::git::bind_file_system(
+                    EnterWorktreeTool,
+                    git_file_system.clone(),
+                )),
+                ToolPackEntry::new(crate::git::bind_file_system(
+                    ExitWorktreeTool,
+                    git_file_system.clone(),
+                )),
+                ToolPackEntry::read_only(crate::git::bind_file_system(
+                    ListWorktreesTool,
+                    git_file_system.clone(),
+                )),
             ]);
         }
 
@@ -116,7 +203,7 @@ impl ToolPack for StandardToolPack {
             tools.extend([
                 ToolPackEntry::read_only(Box::new(WebFetchTool::new())),
                 ToolPackEntry::read_only(Box::new(WebExtractTool)),
-                ToolPackEntry::read_only(Box::new(WebSearchTool::with_duckduckgo())),
+                ToolPackEntry::read_only(Box::new(WebSearchTool::auto())),
             ]);
         }
 
@@ -286,5 +373,113 @@ mod tests {
         ] {
             assert!(!collector.0.contains(&legacy.to_string()));
         }
+    }
+
+    // ── content search seam: default pack stays local, provider is opt-in ──
+
+    #[cfg(feature = "files")]
+    use echo_core::tools::search::{
+        ContentSearchOutcome, ContentSearchProvider, ContentSearchRequest,
+    };
+    #[cfg(feature = "files")]
+    use echo_core::tools::{ToolContext, ToolParameters};
+
+    #[cfg(feature = "files")]
+    #[derive(Default)]
+    struct ToolCollector(Vec<Box<dyn Tool>>);
+
+    #[cfg(feature = "files")]
+    impl ToolRegistrar for ToolCollector {
+        fn register(&mut self, tool: Box<dyn Tool>) {
+            self.0.push(tool);
+        }
+    }
+
+    #[cfg(feature = "files")]
+    fn grep_from(pack: &StandardToolPack) -> std::result::Result<Box<dyn Tool>, String> {
+        let mut collector = ToolCollector::default();
+        pack.install(&mut collector);
+        collector
+            .0
+            .into_iter()
+            .find(|tool| tool.name() == "grep")
+            .ok_or_else(|| "standard pack did not install grep".to_string())
+    }
+
+    #[cfg(feature = "files")]
+    fn grep_params(pattern: &str, path: &str) -> ToolParameters {
+        ToolParameters::from([
+            ("pattern".to_string(), serde_json::json!(pattern)),
+            ("path".to_string(), serde_json::json!(path)),
+        ])
+    }
+
+    /// 只回传一条远端记录；`root` 在本机不存在，本机遍历必然失败。
+    #[cfg(feature = "files")]
+    struct RemoteOnlyProvider;
+
+    #[cfg(feature = "files")]
+    impl ContentSearchProvider for RemoteOnlyProvider {
+        fn search(
+            &self,
+            request: &ContentSearchRequest<'_>,
+        ) -> echo_core::error::Result<Option<ContentSearchOutcome>> {
+            Ok(Some(ContentSearchOutcome {
+                records: vec![format!("{}:1:  remote-pack-hit", request.root.display())],
+                truncated: false,
+            }))
+        }
+    }
+
+    #[cfg(feature = "files")]
+    #[tokio::test]
+    async fn standard_pack_default_grep_keeps_local_behavior() -> std::result::Result<(), String> {
+        // 默认工具包（未设置提供者）与直接构造 GrepTool 的输出必须逐字相同，
+        // 这是“接入接缝后默认路径行为不变”的回归点。
+        let dir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let working = std::fs::canonicalize(dir.path()).map_err(|error| error.to_string())?;
+        std::fs::write(working.join("notes.txt"), "TODO fix this\n")
+            .map_err(|error| error.to_string())?;
+        let ctx = ToolContext {
+            working_dir: Some(working.clone()),
+            ..Default::default()
+        };
+
+        let from_pack = grep_from(&StandardToolPack::new())?
+            .execute_with_context(grep_params("TODO", "notes.txt"), &ctx)
+            .await
+            .map_err(|error| error.to_string())?;
+        let direct = crate::files::grep::GrepTool::new()
+            .execute_with_context(grep_params("TODO", "notes.txt"), &ctx)
+            .await
+            .map_err(|error| error.to_string())?;
+
+        assert!(from_pack.success, "{}", from_pack.error.unwrap_or_default());
+        assert_eq!(from_pack.output, direct.output);
+        assert_eq!(from_pack.truncated, direct.truncated);
+        assert!(from_pack.output.contains("fix this"));
+        Ok(())
+    }
+
+    #[cfg(feature = "files")]
+    #[tokio::test]
+    async fn standard_pack_forwards_content_search_provider_to_grep()
+    -> std::result::Result<(), String> {
+        let dir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let working = std::fs::canonicalize(dir.path()).map_err(|error| error.to_string())?;
+        let ctx = ToolContext {
+            working_dir: Some(working),
+            ..Default::default()
+        };
+        let pack = StandardToolPack::new()
+            .with_content_search_provider(Some(Arc::new(RemoteOnlyProvider)));
+        let result = grep_from(&pack)?
+            .execute_with_context(grep_params("needle", "remote-project"), &ctx)
+            .await
+            .map_err(|error| error.to_string())?;
+
+        assert!(result.success, "{}", result.error.unwrap_or_default());
+        assert!(result.output.contains("remote-pack-hit"));
+        Ok(())
     }
 }

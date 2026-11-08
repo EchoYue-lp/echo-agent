@@ -396,9 +396,13 @@ fn root_readme_feature_tables_match_cargo_metadata() -> Result<(), Box<dyn std::
         .filter(|feature| feature.as_str() != "default")
         .cloned()
         .collect::<BTreeSet<_>>();
-    if expected.len() != 27 || expected.contains("tasks") {
+    if expected.len() != 25
+        || expected.contains("tasks")
+        || expected.contains("a2a")
+        || expected.contains("lsp")
+    {
         return Err(std::io::Error::other(format!(
-            "unexpected root feature set: expected 27 public rows without tasks, found {expected:?}"
+            "退役后应为25个公开feature且不含tasks/a2a/lsp，实际为{expected:?}"
         ))
         .into());
     }
@@ -445,22 +449,22 @@ fn public_checkpoint_docs_do_not_claim_plan_recovery() -> Result<(), Box<dyn std
     let contracts = [
         (
             "README.md",
-            "current_plan",
+            "TaskRevisionService",
             ["messages + plan", "messages + current plan"].as_slice(),
         ),
         (
             "README.zh.md",
-            "current_plan",
+            "TaskRevisionService",
             ["消息 + 计划", "消息 + 当前计划"].as_slice(),
         ),
         (
             "src/memory.rs",
-            "legacy Store round trips",
+            "运行时checkpoint不保存计划",
             ["messages + plan", "messages + current plan"].as_slice(),
         ),
         (
             "src/agent/snapshot.rs",
-            "Legacy `current_plan` values remain raw Store data",
+            "运行时检查点不承载计划文本",
             ["messages + plan", "messages + current plan"].as_slice(),
         ),
         (
@@ -474,7 +478,7 @@ fn public_checkpoint_docs_do_not_claim_plan_recovery() -> Result<(), Box<dyn std
         let content = std::fs::read_to_string(workspace_root.join(path))?;
         if !content.contains(required) {
             violations.push(format!(
-                "{path} must describe the legacy checkpoint plan field"
+                "{path} must describe the current checkpoint and task-graph ownership"
             ));
         }
         for stale in forbidden {
@@ -720,9 +724,10 @@ fn foundational_framework_docs_are_routed_and_structurally_paired()
                 "echo-core",
                 "echo-agent-learning",
                 "echo-agent-sdk",
+                "具名退役与保留owner",
             ]
             .as_slice(),
-            [1, 2, 2, 2, 2, 2, 2, 2, 2].as_slice(),
+            [1, 2, 2, 2, 2, 2, 2, 2, 2, 2].as_slice(),
             (31, 2),
         ),
         (
@@ -763,9 +768,10 @@ fn foundational_framework_docs_are_routed_and_structurally_paired()
                 "Delivery",
                 "Extension",
                 "SDK",
+                "退役后生命周期边界",
             ]
             .as_slice(),
-            [1, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2].as_slice(),
+            [1, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2].as_slice(),
             (70, 12),
         ),
     ];
@@ -1000,7 +1006,23 @@ fn example_manifest_lists_every_demo_once() -> Result<(), Box<dyn std::error::Er
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let readme = std::fs::read_to_string(root.join("examples/README.md"))?;
     let sources = demo_sources()?;
-    assert_eq!(sources.len(), 45 + 21, "unexpected demo source count");
+    assert_eq!(
+        sources.len(),
+        44 + 20,
+        "unexpected retained demo source count"
+    );
+    for retired in ["demo23_a2a.rs", "demo55_lsp_tools.rs"] {
+        assert!(
+            !sources.contains_key(retired),
+            "retired demo remains: {retired}"
+        );
+        assert!(
+            !readme
+                .lines()
+                .any(|line| { line.trim_start().starts_with("- `") && line.contains(retired) }),
+            "retired demo remains in current examples index: {retired}"
+        );
+    }
     for name in sources.keys() {
         let listed = readme
             .lines()
@@ -1111,7 +1133,10 @@ fn plugin_publication_docs_and_demo_share_the_coordinator_receipt_contract()
     })?;
     let demo = std::fs::read_to_string(learning_root.join("examples/demo56_plugin_system.rs"))?;
     for entry in [
-        "PluginCoordinator::new(registry, PluginIntegrator::new())",
+        "let integrator = PluginIntegrator::new()",
+        "integrator.prepare(&mut registry).await",
+        "prepared.dependency_closure(&plugin_id)?",
+        "PluginCoordinator::new(registry, integrator)",
         "coordinator.reconcile(&mut agent).await?",
         "coordinator.disable(&mut agent, &plugin_id).await?",
         "coordinator.shutdown(&mut agent).await?",

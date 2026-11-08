@@ -208,6 +208,7 @@ mod tests {
                 name: "test_tool".to_string(),
                 description: "A test tool".to_string(),
                 parameters: serde_json::json!({}),
+                strict: None,
             },
         }];
         let layout = PromptCacheLayout::from_messages(&msgs, &tools);

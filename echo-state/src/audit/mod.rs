@@ -297,12 +297,8 @@ pub struct AuditCallback {
     diagnostic_delivery_observer: Option<Arc<dyn DiagnosticDeliveryObserver>>,
     agent_name: String,
     session_id: Option<String>,
-    /// tool_call_id → ToolCallInfo（args + start time）
+    /// 原始 call_id → ToolCallInfo；不按工具名猜配同名并发调用。
     tool_calls: Mutex<HashMap<String, ToolCallInfo>>,
-    /// Monotonic counter for generating unique tool_call_ids.
-    /// Using a global counter instead of a per-tool-name sequence avoids
-    /// prefix-collision in the lookup when concurrent calls share a tool name.
-    next_call_id: AtomicU64,
 }
 
 impl AuditCallback {
@@ -319,7 +315,6 @@ impl AuditCallback {
             agent_name: agent_name.into(),
             session_id,
             tool_calls: Mutex::new(HashMap::new()),
-            next_call_id: AtomicU64::new(1),
         }
     }
 
@@ -362,52 +357,8 @@ impl AuditCallback {
         }
     }
 
-    /// 为工具调用生成唯一的 map key。
-    ///
-    /// Key 格式为 `"{tool}#{n}"`：以工具名为前缀 + 全局单调递增序号。前缀让
-    /// [`pop_tool_call`] 能按工具名做前缀匹配（一个工具名下可能有多个并发
-    /// in-flight 调用），全局序号保证 key 唯一、且可比较出最旧的调用。
-    ///
-    /// 之前实现返回 `call_{n}`，而 [`pop_tool_call`] 按 `"{tool}#"` 前缀查 ——
-    /// 两者格式不匹配，pop 永远命中不了，导致 on_tool_end/on_tool_error 的
-    /// duration_ms 恒为 0、input 恒为 Null（P1-13）。统一为 `tool#N` 修复。
-    fn make_tool_call_id(&self, tool: &str) -> String {
-        let n = self.next_call_id.fetch_add(1, Ordering::Relaxed);
-        format!("{}#{}", tool, n)
-    }
-
     fn make_event(&self, event_type: AuditEventType) -> AuditEvent {
         AuditEvent::now(self.session_id.clone(), self.agent_name.clone(), event_type)
-    }
-
-    /// Look up and remove the oldest in-flight tool call by tool name.
-    ///
-    /// Uses an exact-prefix match on the tool-in-key pattern (not
-    /// iteration-order-dependent), then removes and returns the entry
-    /// with the smallest embedded sequence number.  This is deterministic
-    /// even when concurrent calls share a tool name.
-    fn pop_tool_call(&self, tool: &str) -> Option<ToolCallInfo> {
-        let mut map = self
-            .tool_calls
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        // Collect all keys matching this tool's tracking prefix ("{tool}#N").
-        let candidates: Vec<String> = map
-            .keys()
-            .filter(|k| k.starts_with(&format!("{}#", tool)))
-            .cloned()
-            .collect();
-        if candidates.is_empty() {
-            return None;
-        }
-        // Remove the entry with the smallest sequence number (oldest).
-        let key = candidates.into_iter().min_by_key(|k| {
-            k.split('#')
-                .nth(1)
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(u64::MAX)
-        })?;
-        map.remove(&key)
     }
 
     fn remember_tool_call(&self, call_id: String, args: &Value) {
@@ -434,18 +385,6 @@ impl AuditCallback {
 }
 
 impl echo_core::agent::AgentCallback for AuditCallback {
-    fn on_tool_start<'a>(
-        &'a self,
-        _agent: &'a str,
-        tool: &'a str,
-        args: &'a Value,
-    ) -> BoxFuture<'a, ()> {
-        Box::pin(async move {
-            let tool_call_id = self.make_tool_call_id(tool);
-            self.remember_tool_call(tool_call_id, args);
-        })
-    }
-
     fn on_tool_start_with_id<'a>(
         &'a self,
         _agent: &'a str,
@@ -455,30 +394,6 @@ impl echo_core::agent::AgentCallback for AuditCallback {
     ) -> BoxFuture<'a, ()> {
         Box::pin(async move {
             self.remember_tool_call(call_id.to_string(), args);
-        })
-    }
-
-    fn on_tool_end<'a>(
-        &'a self,
-        _agent: &'a str,
-        tool: &'a str,
-        result: &'a str,
-    ) -> BoxFuture<'a, ()> {
-        Box::pin(async move {
-            let (duration_ms, input) = self
-                .pop_tool_call(tool)
-                .map(|info| (info.started_at.elapsed().as_millis() as u64, info.args))
-                .unwrap_or((0, Value::Null));
-
-            let event = self.make_event(AuditEventType::ToolCall {
-                call_id: None,
-                tool: tool.to_string(),
-                input,
-                output: result.to_string(),
-                success: true,
-                duration_ms,
-            });
-            self.record_event(event).await;
         })
     }
 
@@ -500,30 +415,6 @@ impl echo_core::agent::AgentCallback for AuditCallback {
                 input,
                 output: result.to_string(),
                 success: true,
-                duration_ms,
-            });
-            self.record_event(event).await;
-        })
-    }
-
-    fn on_tool_error<'a>(
-        &'a self,
-        _agent: &'a str,
-        tool: &'a str,
-        err: &'a echo_core::error::ReactError,
-    ) -> BoxFuture<'a, ()> {
-        Box::pin(async move {
-            let (duration_ms, input) = self
-                .pop_tool_call(tool)
-                .map(|info| (info.started_at.elapsed().as_millis() as u64, info.args))
-                .unwrap_or((0, Value::Null));
-
-            let event = self.make_event(AuditEventType::ToolCall {
-                call_id: None,
-                tool: tool.to_string(),
-                input,
-                output: err.to_string(),
-                success: false,
                 duration_ms,
             });
             self.record_event(event).await;
@@ -735,7 +626,9 @@ mod tests {
         let logger = Arc::new(RecordingAuditLogger::default());
         let callback = AuditCallback::new(logger.clone(), "agent", Some("session".into()));
         let args = serde_json::json!({"password": "tiny", "count": 9});
-        callback.on_tool_start("agent", "shell", &args).await;
+        callback
+            .on_tool_start_with_id("agent", "retained-success", "shell", &args)
+            .await;
         {
             let calls = callback
                 .tool_calls
@@ -749,12 +642,20 @@ mod tests {
         }
         assert_eq!(args.get("password"), Some(&Value::String("tiny".into())));
         callback
-            .on_tool_end("agent", "shell", "Bearer abcdefghijklmnopqrstuvwxyz")
-            .await;
-        callback.on_tool_start("agent", "shell", &args).await;
-        callback
-            .on_tool_error(
+            .on_tool_end_with_id(
                 "agent",
+                "retained-success",
+                "shell",
+                "Bearer abcdefghijklmnopqrstuvwxyz",
+            )
+            .await;
+        callback
+            .on_tool_start_with_id("agent", "retained-failure", "shell", &args)
+            .await;
+        callback
+            .on_tool_error_with_id(
+                "agent",
+                "retained-failure",
                 "shell",
                 &ReactError::Other("password=abcdefgh".into()),
             )
@@ -770,11 +671,13 @@ mod tests {
         }
         assert!(matches!(
             events.first().map(|e| &e.event_type),
-            Some(AuditEventType::ToolCall { success: true, .. })
+            Some(AuditEventType::ToolCall { call_id: Some(call_id), success: true, .. })
+                if call_id == "retained-success"
         ));
         assert!(matches!(
             events.get(1).map(|e| &e.event_type),
-            Some(AuditEventType::ToolCall { success: false, .. })
+            Some(AuditEventType::ToolCall { call_id: Some(call_id), success: false, .. })
+                if call_id == "retained-failure"
         ));
         Ok(())
     }
@@ -821,6 +724,14 @@ mod tests {
             .await;
 
         let events = logger.query(AuditFilter::default()).await?;
+        assert_eq!(events.len(), 2);
+        assert!(
+            callback
+                .tool_calls
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .is_empty()
+        );
         assert!(matches!(
             events.first().map(|event| &event.event_type),
             Some(AuditEventType::ToolCall { call_id: Some(call_id), input, output, success: true, .. })

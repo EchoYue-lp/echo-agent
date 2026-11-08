@@ -1,5 +1,6 @@
 pub mod feishu;
 pub mod qq;
+pub mod weixin;
 
 use super::types::*;
 use echo_core::error::{ChannelError, ReactError, Result};

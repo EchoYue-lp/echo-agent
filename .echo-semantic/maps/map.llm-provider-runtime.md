@@ -105,3 +105,13 @@ that preserves the original client Arc/config. evidence.configured-client-constr
 and focused tests; the Map's earlier observation and other scenarios retain
 their historical qualification. No new live model authority or SDK operation is
 introduced, and existing Behavior statuses remain unchanged.
+
+
+## 原生消息候选的增量职责
+
+本段只记录当前 `source:69225014cbf5d5b28fa8e8bff9fd368792c1ad199efbb8afb55b5b688f01ac5f`／发布输入 `590824d2…95188` 的增量，保留本对象原
+`observed_at`、风险、未知项与历史结论。`echo-integration/src/providers/native_message.rs`
+是现有 provider 的共享消息/来源/phase 转换，不拥有执行成功或业务 TaskRun 权威。
+Anthropic/Responses 继续保留 native reasoning 签名、opaque block 和来源；最终候选
+回到原 ReAct/Guard/Critic/Stop/持久化与结算。依据为 ADR 0101 与原 Provider104、
+ReAct407 中完整43项 native合同；原回执保持 epoch08/profile 范围，不重标为当前新跑。

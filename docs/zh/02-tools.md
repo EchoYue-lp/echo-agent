@@ -37,17 +37,15 @@ ToolManager                      ← 注册表 + 执行器
     └─ to_openai_tools()          ← 序列化为 OpenAI function-calling 格式
 
 内置工具（builtin）：
-    ├─ final_answer              ← Agent 输出最终结果（必须注册）
     ├─ task_create / task_update ← 版本化任务图 CRUD
     ├─ task_list                 ← 读取已提交任务图版本
     ├─ agent_tool                ← 分派任务给已注册 Subagent
     ├─ human_in_loop             ← 向人类请求文本输入
     ├─ recall / search_memory    ← 已批准记忆的 Store 召回
     ├─ remember / forget         ← 安装 MemoryLayerManager 后的 journal 写入
-    └─ think                     ← CoT 显式思维工具（已被 CoT 文本方案替代）
 
 扩展工具（开箱即用）：
-    ├─ tools/files       ← 文件读写（2 个工具）
+    ├─ tools/files       ← 文件操作（原标准 files 块，产物读取独立）
     ├─ tools/shell       ← Shell 命令执行
     ├─ tools/web         ← Web 搜索 + 网页获取（feature: web）
     ├─ tools/media       ← PDF、Excel、Word、图片（feature: media）
@@ -58,7 +56,7 @@ ToolManager                      ← 注册表 + 执行器
     ├─ tools/database    ← SQL 数据库工具（feature: database）
     └─ tools/others      ← 数学计算、天气查询等示例工具
 
-总计：26 个功能分类，67 个已注册工具。
+实际注册集合取决于 features，以 StandardToolPack 与运行时 ToolManager 为准。
 ```
 
 ---
@@ -166,6 +164,24 @@ ToolResult::success("output")
     .with_mime_type("text/csv")
     .with_truncated(true)
 ```
+
+### 远端失败与重试权威
+
+`ToolError::RemoteFailure` 承载工具身份、安全诊断、可选 HTTP 状态和既有
+`ToolFailure`，保留类别、恢复、副作用和 retry-after 事实；`SearchProvider::search`
+与普通 `ExecutionFailed` 构造方式不变。超时、取消继续使用已有变体；无法分类的旧错误
+沿原保守分类处理，不通过错误文案决定重试。
+
+Shell的`SandboxExecutor::execute_stream`默认适配可能先完成整个缓冲执行，再返回错误；
+建流失败不代表命令尚未开始。已有`RemoteFailure`中的`ToolFailure`原样进入结果，保留
+已知无副作用、可能/已确认副作用、恢复方式和重试提示；缺少类型化声明的错误与流内失败
+按可能副作用保守处理。耗时记录实际等待，不能把等待后失败一律记作0毫秒。
+
+provider 不新增失败重试。DDG 仍保留 HTML→Instant Answer 原策略，一次逻辑尝试
+可以包含两次 HTTP 请求。只有 ToolManager 执行有限重试，保留有效 Retry-After，
+通过原 context 取消等待；server 最低等待超过现有30秒上限时返回原失败，不提前请求。
+SDK direct 只投影事实，不自动继承该重试循环，也不因此接受新的错误值。
+源码、消费者与实际资格边界见 [ADR0095](../adr/0095-structured-tool-remote-failures.md)。
 
 ### ToolResultKind
 
@@ -533,7 +549,6 @@ agent.add_tools(vec![
 
 | 工具名 | 模块 | 说明 |
 |--------|------|------|
-| `final_answer` | builtin | 输出最终结果（自动注册） |
 | `task_create` | builtin | 原子创建任务图或追加任务 |
 | `task_update` | builtin | 应用乐观并发任务图 patch |
 | `task_list` | builtin | 读取已提交任务图版本 |
@@ -573,6 +588,21 @@ agent.add_tools(vec![
 字符串、布尔值和超范围整数返回明确错误，零尺寸仍被支持。原工具 schema 约束数值范围，直接
 执行还要求 serde_json 整数表示；`1.0` 等浮点表示明确报错，不使用默认值。此约束
 不新增资源限额。
+
+`generate_chart` 的默认 JSON 分支保留原 pretty JSON `output`，保留原 Text kind，并以 `data` 和 `mime_type=application/vnd.vegalite.v5+json`
+声明完整公开 spec；这是新增的可选公开副本，不能据 output 未变就称整个序列化返回无变化。
+只在原 pretty JSON 不超过既有 `DEFAULT_TOOL_OUTPUT_ARTIFACT_THRESHOLD_BYTES`（1MiB）的
+字节预算时附加 data/MIME；这是副本资格，不限制原工具执行或截断返回。超大 spec 仍保留原
+output，由既有 artifact/截断机制处理。没有 Guard 改写或预算截断时，tool→Message 仍消费原 output，新增 data 不直接替代它。
+配置了 Guard 或输出预算时仍由原 pipeline 决定；新增 data/MIME 也会参加 Guard 检查，
+可能影响该路径，不能泛称全部模型 wire 不变。内容替换后原 pipeline 会清理这些投影，
+不在其后补回。
+HTML 分支保持原独立页面文本，
+不冒充 JSON spec。MIME 使用 [JupyterLab 的既有 Vega-Lite 格式](https://github.com/jupyterlab/jupyterlab/blob/main/packages/vega5-extension/src/index.ts)，不是应用私有协议。
+该声明只说明公开产物格式，不证明工具是 builtin、不赋予额外权限或执行/最终发布资格。
+消费方须核对原调用/执行来源以及成功、未截断和完整 schema；失败或经 Guard 替换后
+缺失的结构化投影不能靠输出字符串补造。扩展主动声明相同格式时可被视为公开图表，
+同名但只返回普通文本的工具不因此成为图表 producer。
 
 ---
 
@@ -633,3 +663,65 @@ let agent = ReactAgentBuilder::new()
 ```
 
 详见 [demo64_tool_pipeline.rs](../../echo-agent-learning/tests/example_contracts/demo64_tool_pipeline.rs)。
+
+## 绑定实际位置的文件工具
+
+原标准 files 块的 `read_file`、`list_dir`、`grep`、`glob`、`apply_patch`、
+`diff`、`repo_map`、`code_search` 可使用一个不可变的
+`tools::filesystem::FileSystem`。通过 `StandardToolPack::with_file_system`
+或 `ReactAgentBuilder::file_system` 注入；未注入时继续本机 I/O。
+每次调用仍使用真实 `ToolContext.working_dir`，包括隔离 checkout，
+不新增 remote 工具名或模型可见的目标参数。
+
+同步 provider 操作在调用方已有 blocking 边界执行，原工具将 invocation guards
+保留至实际 I/O 结算。本机错误保留实际种类，远端错误保留原类型化恢复事实。
+不确定写入不能自动重放，也不能假称已经回滚；原子写必须在目标上确实原子，
+无法支持时明确报错。原 Git checkpoint 算法提供文件/结构化执行适配入口，
+Git 查询失败不代表可以静默跳过恢复保护。
+
+文件工具注入不会自动替换模型前项目上下文。已有 InstructionProvider 的应用应
+经同一 provider 成功准备规则，再显式配置 `auto_project_rules(false)`，
+避免框架自动本机规则流重复读取。原 InstructionResolver 也提供
+`resolve_with_file_system`，复用优先级并返回来源错误。
+Skill 后续激活、资源和脚本保持自身来源；用户级来源不继承项目远端 executor。
+
+执行复用现有 `ReactAgent::set_sandbox_executor`。绑定目标的 Git、持久化
+`run_code` 脚本校验使用匹配环境；`run_code` 仍要求真实 OsSandbox 收据。
+后台 command cell 携实际 executor 和原 guards，请求停止后由原物理 owner
+等待 backend 结算。命令 guards/cancel 只在运行时传递，不序列化。
+已捕获的 `read_artifact` 工具日志继续由原本机产物 owner 读取。
+
+
+`discover_skills_with_sources` 分别接收项目与已有本机 executor，每个 Skill
+及其命令 hook 保留对应来源。应用可用 `HookRegistry::bind_source_executor`
+绑定原 UserConfig/Plugin 项；混合 UserConfig 经
+`register_user_hooks_with_sources` 保留原追加顺序、同一清理/重载身份。
+原 descriptor/prepared 注册也有 `with_source` 入口。
+替换 host executor 不会迁移已绑定 hook。
+目标缺 executor 不裸跑本机，也不以客户端路径检查或覆盖目标 cwd/环境。
+
+应用可一次调用 `set_default_skill_source` 注入已有本机资源，原注册入口捕获
+该来源，不跟随之后的 host executor 变更；项目发现仍显式传入目标来源。
+
+`FileSystem::open_read` 返回标准 reader，不预先读取整个文件。证据摘要和大小校验
+继续使用原有固定大小缓冲区；provider 保留实际 operation 至真实关闭/结算。
+不支持流式读取时明确 Unsupported，不读本机同名文件。
+
+`grep` 另有可选的内容搜索接缝：`tools::search::ContentSearchProvider` 可在远端
+完成匹配、只回传已经排版的记录，避免把候选文件正文逐文件拉回本机。通过
+`StandardToolPack::with_content_search_provider` 或
+`ReactAgentBuilder::content_search_provider` 注入，默认 `None` 表示既有本机
+遍历。提供者返回 `None` 表示不支持该请求，工具落回本机路径且输出与未注入时
+一致；返回错误则按工具既有映射失败，不降级成“没有匹配”。远端结果只沿用原
+`PageRequest` 分页与输出格式，不新增工具名或模型可见参数。
+
+`list_worktrees` 经同一目标 Git executor 和文件 provider 检查原 marker。
+原本机 worktree 创建/清理仍保留目录身份保护。当前非本机
+`enter_worktree`/`exit_worktree` 在预留目录、合并或删除前明确不可用：
+标准 SFTP 缺少原算法要求的 no-follow 持有目录身份和路径重开比较保证，
+路径、mode、mtime 均不能代替。产品另有隔离路径不构成这组公共工具已验收。
+
+决策与验收边界见 [ADR 0098](../adr/0098-project-file-system-adapter.md)。
+此机制本身不提供 SSH 凭据、连接服务或已经合格的 EKO 远程项目工作流。
+
+原生消息与最终候选不占工具注册项。`think`/`final_answer` 控制工具已退役；详见[原生消息合同](../zh/43-native-message-execution.md)。

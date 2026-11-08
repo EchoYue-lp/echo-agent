@@ -1,0 +1,1736 @@
+{
+  "schema_authority": "vendor response bodies only; no proposed Core record shape",
+  "cases": [
+    {
+      "case_id": "stop-end_turn-sequence-__absent__",
+      "wire": {
+        "id": "meta-0",
+        "type": "message",
+        "role": "assistant",
+        "model": "fixture-native-model",
+        "content": [
+          {
+            "type": "thinking",
+            "thinking": "签名推理中文😀",
+            "signature": "signature-original=="
+          },
+          {
+            "type": "text",
+            "text": "公开前文"
+          },
+          {
+            "type": "redacted_thinking",
+            "data": "opaque-original=="
+          },
+          {
+            "type": "text",
+            "text": "公开后文"
+          }
+        ],
+        "usage": {
+          "input_tokens": 11,
+          "output_tokens": 7,
+          "cache_creation_input_tokens": 2,
+          "cache_read_input_tokens": 3,
+          "cache_creation": {
+            "ephemeral_5m_input_tokens": 2,
+            "ephemeral_1h_input_tokens": 0
+          },
+          "service_tier": "future-standard",
+          "vendor_nested": {
+            "mixed": [
+              null,
+              false,
+              "原文😀",
+              {
+                "unknown": 13
+              }
+            ]
+          }
+        },
+        "vendor_execution_status": "not-runtime-authority",
+        "stop_reason": "end_turn"
+      },
+      "expected_boundary": "candidate",
+      "expected_no_runtime_completion": true,
+      "evidence_class": "constructed pinned-schema fixture, not live or executed replay"
+    },
+    {
+      "case_id": "stop-end_turn-sequence-None",
+      "wire": {
+        "id": "meta-1",
+        "type": "message",
+        "role": "assistant",
+        "model": "fixture-native-model",
+        "content": [
+          {
+            "type": "thinking",
+            "thinking": "签名推理中文😀",
+            "signature": "signature-original=="
+          },
+          {
+            "type": "text",
+            "text": "公开前文"
+          },
+          {
+            "type": "redacted_thinking",
+            "data": "opaque-original=="
+          },
+          {
+            "type": "text",
+            "text": "公开后文"
+          }
+        ],
+        "usage": {
+          "input_tokens": 11,
+          "output_tokens": 7,
+          "cache_creation_input_tokens": 2,
+          "cache_read_input_tokens": 3,
+          "cache_creation": {
+            "ephemeral_5m_input_tokens": 2,
+            "ephemeral_1h_input_tokens": 0
+          },
+          "service_tier": "future-standard",
+          "vendor_nested": {
+            "mixed": [
+              null,
+              false,
+              "原文😀",
+              {
+                "unknown": 13
+              }
+            ]
+          }
+        },
+        "vendor_execution_status": "not-runtime-authority",
+        "stop_reason": "end_turn",
+        "stop_sequence": null
+      },
+      "expected_boundary": "candidate",
+      "expected_no_runtime_completion": true,
+      "evidence_class": "constructed pinned-schema fixture, not live or executed replay"
+    },
+    {
+      "case_id": "stop-end_turn-sequence-STOP-中文😀",
+      "wire": {
+        "id": "meta-2",
+        "type": "message",
+        "role": "assistant",
+        "model": "fixture-native-model",
+        "content": [
+          {
+            "type": "thinking",
+            "thinking": "签名推理中文😀",
+            "signature": "signature-original=="
+          },
+          {
+            "type": "text",
+            "text": "公开前文"
+          },
+          {
+            "type": "redacted_thinking",
+            "data": "opaque-original=="
+          },
+          {
+            "type": "text",
+            "text": "公开后文"
+          }
+        ],
+        "usage": {
+          "input_tokens": 11,
+          "output_tokens": 7,
+          "cache_creation_input_tokens": 2,
+          "cache_read_input_tokens": 3,
+          "cache_creation": {
+            "ephemeral_5m_input_tokens": 2,
+            "ephemeral_1h_input_tokens": 0
+          },
+          "service_tier": "future-standard",
+          "vendor_nested": {
+            "mixed": [
+              null,
+              false,
+              "原文😀",
+              {
+                "unknown": 13
+              }
+            ]
+          }
+        },
+        "vendor_execution_status": "not-runtime-authority",
+        "stop_reason": "end_turn",
+        "stop_sequence": "STOP-中文😀"
+      },
+      "expected_boundary": "candidate",
+      "expected_no_runtime_completion": true,
+      "evidence_class": "constructed pinned-schema fixture, not live or executed replay"
+    },
+    {
+      "case_id": "stop-stop_sequence-sequence-__absent__",
+      "wire": {
+        "id": "meta-3",
+        "type": "message",
+        "role": "assistant",
+        "model": "fixture-native-model",
+        "content": [
+          {
+            "type": "thinking",
+            "thinking": "签名推理中文😀",
+            "signature": "signature-original=="
+          },
+          {
+            "type": "text",
+            "text": "公开前文"
+          },
+          {
+            "type": "redacted_thinking",
+            "data": "opaque-original=="
+          },
+          {
+            "type": "text",
+            "text": "公开后文"
+          }
+        ],
+        "usage": {
+          "input_tokens": 11,
+          "output_tokens": 7,
+          "cache_creation_input_tokens": 2,
+          "cache_read_input_tokens": 3,
+          "cache_creation": {
+            "ephemeral_5m_input_tokens": 2,
+            "ephemeral_1h_input_tokens": 0
+          },
+          "service_tier": "future-standard",
+          "vendor_nested": {
+            "mixed": [
+              null,
+              false,
+              "原文😀",
+              {
+                "unknown": 13
+              }
+            ]
+          }
+        },
+        "vendor_execution_status": "not-runtime-authority",
+        "stop_reason": "stop_sequence"
+      },
+      "expected_boundary": "candidate",
+      "expected_no_runtime_completion": true,
+      "evidence_class": "constructed pinned-schema fixture, not live or executed replay"
+    },
+    {
+      "case_id": "stop-stop_sequence-sequence-None",
+      "wire": {
+        "id": "meta-4",
+        "type": "message",
+        "role": "assistant",
+        "model": "fixture-native-model",
+        "content": [
+          {
+            "type": "thinking",
+            "thinking": "签名推理中文😀",
+            "signature": "signature-original=="
+          },
+          {
+            "type": "text",
+            "text": "公开前文"
+          },
+          {
+            "type": "redacted_thinking",
+            "data": "opaque-original=="
+          },
+          {
+            "type": "text",
+            "text": "公开后文"
+          }
+        ],
+        "usage": {
+          "input_tokens": 11,
+          "output_tokens": 7,
+          "cache_creation_input_tokens": 2,
+          "cache_read_input_tokens": 3,
+          "cache_creation": {
+            "ephemeral_5m_input_tokens": 2,
+            "ephemeral_1h_input_tokens": 0
+          },
+          "service_tier": "future-standard",
+          "vendor_nested": {
+            "mixed": [
+              null,
+              false,
+              "原文😀",
+              {
+                "unknown": 13
+              }
+            ]
+          }
+        },
+        "vendor_execution_status": "not-runtime-authority",
+        "stop_reason": "stop_sequence",
+        "stop_sequence": null
+      },
+      "expected_boundary": "candidate",
+      "expected_no_runtime_completion": true,
+      "evidence_class": "constructed pinned-schema fixture, not live or executed replay"
+    },
+    {
+      "case_id": "stop-stop_sequence-sequence-STOP-中文😀",
+      "wire": {
+        "id": "meta-5",
+        "type": "message",
+        "role": "assistant",
+        "model": "fixture-native-model",
+        "content": [
+          {
+            "type": "thinking",
+            "thinking": "签名推理中文😀",
+            "signature": "signature-original=="
+          },
+          {
+            "type": "text",
+            "text": "公开前文"
+          },
+          {
+            "type": "redacted_thinking",
+            "data": "opaque-original=="
+          },
+          {
+            "type": "text",
+            "text": "公开后文"
+          }
+        ],
+        "usage": {
+          "input_tokens": 11,
+          "output_tokens": 7,
+          "cache_creation_input_tokens": 2,
+          "cache_read_input_tokens": 3,
+          "cache_creation": {
+            "ephemeral_5m_input_tokens": 2,
+            "ephemeral_1h_input_tokens": 0
+          },
+          "service_tier": "future-standard",
+          "vendor_nested": {
+            "mixed": [
+              null,
+              false,
+              "原文😀",
+              {
+                "unknown": 13
+              }
+            ]
+          }
+        },
+        "vendor_execution_status": "not-runtime-authority",
+        "stop_reason": "stop_sequence",
+        "stop_sequence": "STOP-中文😀"
+      },
+      "expected_boundary": "candidate",
+      "expected_no_runtime_completion": true,
+      "evidence_class": "constructed pinned-schema fixture, not live or executed replay"
+    },
+    {
+      "case_id": "stop-refusal-sequence-__absent__",
+      "wire": {
+        "id": "meta-6",
+        "type": "message",
+        "role": "assistant",
+        "model": "fixture-native-model",
+        "content": [
+          {
+            "type": "thinking",
+            "thinking": "签名推理中文😀",
+            "signature": "signature-original=="
+          },
+          {
+            "type": "text",
+            "text": "公开前文"
+          },
+          {
+            "type": "redacted_thinking",
+            "data": "opaque-original=="
+          },
+          {
+            "type": "text",
+            "text": "公开后文"
+          }
+        ],
+        "usage": {
+          "input_tokens": 11,
+          "output_tokens": 7,
+          "cache_creation_input_tokens": 2,
+          "cache_read_input_tokens": 3,
+          "cache_creation": {
+            "ephemeral_5m_input_tokens": 2,
+            "ephemeral_1h_input_tokens": 0
+          },
+          "service_tier": "future-standard",
+          "vendor_nested": {
+            "mixed": [
+              null,
+              false,
+              "原文😀",
+              {
+                "unknown": 13
+              }
+            ]
+          }
+        },
+        "vendor_execution_status": "not-runtime-authority",
+        "stop_reason": "refusal"
+      },
+      "expected_boundary": "candidate",
+      "expected_no_runtime_completion": true,
+      "evidence_class": "constructed pinned-schema fixture, not live or executed replay"
+    },
+    {
+      "case_id": "stop-refusal-sequence-None",
+      "wire": {
+        "id": "meta-7",
+        "type": "message",
+        "role": "assistant",
+        "model": "fixture-native-model",
+        "content": [
+          {
+            "type": "thinking",
+            "thinking": "签名推理中文😀",
+            "signature": "signature-original=="
+          },
+          {
+            "type": "text",
+            "text": "公开前文"
+          },
+          {
+            "type": "redacted_thinking",
+            "data": "opaque-original=="
+          },
+          {
+            "type": "text",
+            "text": "公开后文"
+          }
+        ],
+        "usage": {
+          "input_tokens": 11,
+          "output_tokens": 7,
+          "cache_creation_input_tokens": 2,
+          "cache_read_input_tokens": 3,
+          "cache_creation": {
+            "ephemeral_5m_input_tokens": 2,
+            "ephemeral_1h_input_tokens": 0
+          },
+          "service_tier": "future-standard",
+          "vendor_nested": {
+            "mixed": [
+              null,
+              false,
+              "原文😀",
+              {
+                "unknown": 13
+              }
+            ]
+          }
+        },
+        "vendor_execution_status": "not-runtime-authority",
+        "stop_reason": "refusal",
+        "stop_sequence": null
+      },
+      "expected_boundary": "candidate",
+      "expected_no_runtime_completion": true,
+      "evidence_class": "constructed pinned-schema fixture, not live or executed replay"
+    },
+    {
+      "case_id": "stop-refusal-sequence-STOP-中文😀",
+      "wire": {
+        "id": "meta-8",
+        "type": "message",
+        "role": "assistant",
+        "model": "fixture-native-model",
+        "content": [
+          {
+            "type": "thinking",
+            "thinking": "签名推理中文😀",
+            "signature": "signature-original=="
+          },
+          {
+            "type": "text",
+            "text": "公开前文"
+          },
+          {
+            "type": "redacted_thinking",
+            "data": "opaque-original=="
+          },
+          {
+            "type": "text",
+            "text": "公开后文"
+          }
+        ],
+        "usage": {
+          "input_tokens": 11,
+          "output_tokens": 7,
+          "cache_creation_input_tokens": 2,
+          "cache_read_input_tokens": 3,
+          "cache_creation": {
+            "ephemeral_5m_input_tokens": 2,
+            "ephemeral_1h_input_tokens": 0
+          },
+          "service_tier": "future-standard",
+          "vendor_nested": {
+            "mixed": [
+              null,
+              false,
+              "原文😀",
+              {
+                "unknown": 13
+              }
+            ]
+          }
+        },
+        "vendor_execution_status": "not-runtime-authority",
+        "stop_reason": "refusal",
+        "stop_sequence": "STOP-中文😀"
+      },
+      "expected_boundary": "candidate",
+      "expected_no_runtime_completion": true,
+      "evidence_class": "constructed pinned-schema fixture, not live or executed replay"
+    },
+    {
+      "case_id": "stop-pause_turn-sequence-__absent__",
+      "wire": {
+        "id": "meta-9",
+        "type": "message",
+        "role": "assistant",
+        "model": "fixture-native-model",
+        "content": [
+          {
+            "type": "thinking",
+            "thinking": "签名推理中文😀",
+            "signature": "signature-original=="
+          },
+          {
+            "type": "text",
+            "text": "公开前文"
+          },
+          {
+            "type": "redacted_thinking",
+            "data": "opaque-original=="
+          },
+          {
+            "type": "text",
+            "text": "公开后文"
+          }
+        ],
+        "usage": {
+          "input_tokens": 11,
+          "output_tokens": 7,
+          "cache_creation_input_tokens": 2,
+          "cache_read_input_tokens": 3,
+          "cache_creation": {
+            "ephemeral_5m_input_tokens": 2,
+            "ephemeral_1h_input_tokens": 0
+          },
+          "service_tier": "future-standard",
+          "vendor_nested": {
+            "mixed": [
+              null,
+              false,
+              "原文😀",
+              {
+                "unknown": 13
+              }
+            ]
+          }
+        },
+        "vendor_execution_status": "not-runtime-authority",
+        "stop_reason": "pause_turn"
+      },
+      "expected_boundary": "continue",
+      "expected_no_runtime_completion": true,
+      "evidence_class": "constructed pinned-schema fixture, not live or executed replay"
+    },
+    {
+      "case_id": "stop-pause_turn-sequence-None",
+      "wire": {
+        "id": "meta-10",
+        "type": "message",
+        "role": "assistant",
+        "model": "fixture-native-model",
+        "content": [
+          {
+            "type": "thinking",
+            "thinking": "签名推理中文😀",
+            "signature": "signature-original=="
+          },
+          {
+            "type": "text",
+            "text": "公开前文"
+          },
+          {
+            "type": "redacted_thinking",
+            "data": "opaque-original=="
+          },
+          {
+            "type": "text",
+            "text": "公开后文"
+          }
+        ],
+        "usage": {
+          "input_tokens": 11,
+          "output_tokens": 7,
+          "cache_creation_input_tokens": 2,
+          "cache_read_input_tokens": 3,
+          "cache_creation": {
+            "ephemeral_5m_input_tokens": 2,
+            "ephemeral_1h_input_tokens": 0
+          },
+          "service_tier": "future-standard",
+          "vendor_nested": {
+            "mixed": [
+              null,
+              false,
+              "原文😀",
+              {
+                "unknown": 13
+              }
+            ]
+          }
+        },
+        "vendor_execution_status": "not-runtime-authority",
+        "stop_reason": "pause_turn",
+        "stop_sequence": null
+      },
+      "expected_boundary": "continue",
+      "expected_no_runtime_completion": true,
+      "evidence_class": "constructed pinned-schema fixture, not live or executed replay"
+    },
+    {
+      "case_id": "stop-pause_turn-sequence-STOP-中文😀",
+      "wire": {
+        "id": "meta-11",
+        "type": "message",
+        "role": "assistant",
+        "model": "fixture-native-model",
+        "content": [
+          {
+            "type": "thinking",
+            "thinking": "签名推理中文😀",
+            "signature": "signature-original=="
+          },
+          {
+            "type": "text",
+            "text": "公开前文"
+          },
+          {
+            "type": "redacted_thinking",
+            "data": "opaque-original=="
+          },
+          {
+            "type": "text",
+            "text": "公开后文"
+          }
+        ],
+        "usage": {
+          "input_tokens": 11,
+          "output_tokens": 7,
+          "cache_creation_input_tokens": 2,
+          "cache_read_input_tokens": 3,
+          "cache_creation": {
+            "ephemeral_5m_input_tokens": 2,
+            "ephemeral_1h_input_tokens": 0
+          },
+          "service_tier": "future-standard",
+          "vendor_nested": {
+            "mixed": [
+              null,
+              false,
+              "原文😀",
+              {
+                "unknown": 13
+              }
+            ]
+          }
+        },
+        "vendor_execution_status": "not-runtime-authority",
+        "stop_reason": "pause_turn",
+        "stop_sequence": "STOP-中文😀"
+      },
+      "expected_boundary": "continue",
+      "expected_no_runtime_completion": true,
+      "evidence_class": "constructed pinned-schema fixture, not live or executed replay"
+    },
+    {
+      "case_id": "stop-max_tokens-sequence-__absent__",
+      "wire": {
+        "id": "meta-12",
+        "type": "message",
+        "role": "assistant",
+        "model": "fixture-native-model",
+        "content": [
+          {
+            "type": "thinking",
+            "thinking": "签名推理中文😀",
+            "signature": "signature-original=="
+          },
+          {
+            "type": "text",
+            "text": "公开前文"
+          },
+          {
+            "type": "tool_use",
+            "id": "meta_call",
+            "name": "lookup",
+            "input": {
+              "path": "中文.md"
+            }
+          },
+          {
+            "type": "redacted_thinking",
+            "data": "opaque-original=="
+          },
+          {
+            "type": "text",
+            "text": "公开后文"
+          }
+        ],
+        "usage": {
+          "input_tokens": 11,
+          "output_tokens": 7,
+          "cache_creation_input_tokens": 2,
+          "cache_read_input_tokens": 3,
+          "cache_creation": {
+            "ephemeral_5m_input_tokens": 2,
+            "ephemeral_1h_input_tokens": 0
+          },
+          "service_tier": "future-standard",
+          "vendor_nested": {
+            "mixed": [
+              null,
+              false,
+              "原文😀",
+              {
+                "unknown": 13
+              }
+            ]
+          }
+        },
+        "vendor_execution_status": "not-runtime-authority",
+        "stop_reason": "max_tokens"
+      },
+      "expected_boundary": "incomplete_failure",
+      "expected_no_runtime_completion": true,
+      "evidence_class": "constructed pinned-schema fixture, not live or executed replay"
+    },
+    {
+      "case_id": "stop-max_tokens-sequence-None",
+      "wire": {
+        "id": "meta-13",
+        "type": "message",
+        "role": "assistant",
+        "model": "fixture-native-model",
+        "content": [
+          {
+            "type": "thinking",
+            "thinking": "签名推理中文😀",
+            "signature": "signature-original=="
+          },
+          {
+            "type": "text",
+            "text": "公开前文"
+          },
+          {
+            "type": "tool_use",
+            "id": "meta_call",
+            "name": "lookup",
+            "input": {
+              "path": "中文.md"
+            }
+          },
+          {
+            "type": "redacted_thinking",
+            "data": "opaque-original=="
+          },
+          {
+            "type": "text",
+            "text": "公开后文"
+          }
+        ],
+        "usage": {
+          "input_tokens": 11,
+          "output_tokens": 7,
+          "cache_creation_input_tokens": 2,
+          "cache_read_input_tokens": 3,
+          "cache_creation": {
+            "ephemeral_5m_input_tokens": 2,
+            "ephemeral_1h_input_tokens": 0
+          },
+          "service_tier": "future-standard",
+          "vendor_nested": {
+            "mixed": [
+              null,
+              false,
+              "原文😀",
+              {
+                "unknown": 13
+              }
+            ]
+          }
+        },
+        "vendor_execution_status": "not-runtime-authority",
+        "stop_reason": "max_tokens",
+        "stop_sequence": null
+      },
+      "expected_boundary": "incomplete_failure",
+      "expected_no_runtime_completion": true,
+      "evidence_class": "constructed pinned-schema fixture, not live or executed replay"
+    },
+    {
+      "case_id": "stop-max_tokens-sequence-STOP-中文😀",
+      "wire": {
+        "id": "meta-14",
+        "type": "message",
+        "role": "assistant",
+        "model": "fixture-native-model",
+        "content": [
+          {
+            "type": "thinking",
+            "thinking": "签名推理中文😀",
+            "signature": "signature-original=="
+          },
+          {
+            "type": "text",
+            "text": "公开前文"
+          },
+          {
+            "type": "tool_use",
+            "id": "meta_call",
+            "name": "lookup",
+            "input": {
+              "path": "中文.md"
+            }
+          },
+          {
+            "type": "redacted_thinking",
+            "data": "opaque-original=="
+          },
+          {
+            "type": "text",
+            "text": "公开后文"
+          }
+        ],
+        "usage": {
+          "input_tokens": 11,
+          "output_tokens": 7,
+          "cache_creation_input_tokens": 2,
+          "cache_read_input_tokens": 3,
+          "cache_creation": {
+            "ephemeral_5m_input_tokens": 2,
+            "ephemeral_1h_input_tokens": 0
+          },
+          "service_tier": "future-standard",
+          "vendor_nested": {
+            "mixed": [
+              null,
+              false,
+              "原文😀",
+              {
+                "unknown": 13
+              }
+            ]
+          }
+        },
+        "vendor_execution_status": "not-runtime-authority",
+        "stop_reason": "max_tokens",
+        "stop_sequence": "STOP-中文😀"
+      },
+      "expected_boundary": "incomplete_failure",
+      "expected_no_runtime_completion": true,
+      "evidence_class": "constructed pinned-schema fixture, not live or executed replay"
+    },
+    {
+      "case_id": "stop-model_context_window_exceeded-sequence-__absent__",
+      "wire": {
+        "id": "meta-15",
+        "type": "message",
+        "role": "assistant",
+        "model": "fixture-native-model",
+        "content": [
+          {
+            "type": "thinking",
+            "thinking": "签名推理中文😀",
+            "signature": "signature-original=="
+          },
+          {
+            "type": "text",
+            "text": "公开前文"
+          },
+          {
+            "type": "tool_use",
+            "id": "meta_call",
+            "name": "lookup",
+            "input": {
+              "path": "中文.md"
+            }
+          },
+          {
+            "type": "redacted_thinking",
+            "data": "opaque-original=="
+          },
+          {
+            "type": "text",
+            "text": "公开后文"
+          }
+        ],
+        "usage": {
+          "input_tokens": 11,
+          "output_tokens": 7,
+          "cache_creation_input_tokens": 2,
+          "cache_read_input_tokens": 3,
+          "cache_creation": {
+            "ephemeral_5m_input_tokens": 2,
+            "ephemeral_1h_input_tokens": 0
+          },
+          "service_tier": "future-standard",
+          "vendor_nested": {
+            "mixed": [
+              null,
+              false,
+              "原文😀",
+              {
+                "unknown": 13
+              }
+            ]
+          }
+        },
+        "vendor_execution_status": "not-runtime-authority",
+        "stop_reason": "model_context_window_exceeded"
+      },
+      "expected_boundary": "incomplete_failure",
+      "expected_no_runtime_completion": true,
+      "evidence_class": "constructed pinned-schema fixture, not live or executed replay"
+    },
+    {
+      "case_id": "stop-model_context_window_exceeded-sequence-None",
+      "wire": {
+        "id": "meta-16",
+        "type": "message",
+        "role": "assistant",
+        "model": "fixture-native-model",
+        "content": [
+          {
+            "type": "thinking",
+            "thinking": "签名推理中文😀",
+            "signature": "signature-original=="
+          },
+          {
+            "type": "text",
+            "text": "公开前文"
+          },
+          {
+            "type": "tool_use",
+            "id": "meta_call",
+            "name": "lookup",
+            "input": {
+              "path": "中文.md"
+            }
+          },
+          {
+            "type": "redacted_thinking",
+            "data": "opaque-original=="
+          },
+          {
+            "type": "text",
+            "text": "公开后文"
+          }
+        ],
+        "usage": {
+          "input_tokens": 11,
+          "output_tokens": 7,
+          "cache_creation_input_tokens": 2,
+          "cache_read_input_tokens": 3,
+          "cache_creation": {
+            "ephemeral_5m_input_tokens": 2,
+            "ephemeral_1h_input_tokens": 0
+          },
+          "service_tier": "future-standard",
+          "vendor_nested": {
+            "mixed": [
+              null,
+              false,
+              "原文😀",
+              {
+                "unknown": 13
+              }
+            ]
+          }
+        },
+        "vendor_execution_status": "not-runtime-authority",
+        "stop_reason": "model_context_window_exceeded",
+        "stop_sequence": null
+      },
+      "expected_boundary": "incomplete_failure",
+      "expected_no_runtime_completion": true,
+      "evidence_class": "constructed pinned-schema fixture, not live or executed replay"
+    },
+    {
+      "case_id": "stop-model_context_window_exceeded-sequence-STOP-中文😀",
+      "wire": {
+        "id": "meta-17",
+        "type": "message",
+        "role": "assistant",
+        "model": "fixture-native-model",
+        "content": [
+          {
+            "type": "thinking",
+            "thinking": "签名推理中文😀",
+            "signature": "signature-original=="
+          },
+          {
+            "type": "text",
+            "text": "公开前文"
+          },
+          {
+            "type": "tool_use",
+            "id": "meta_call",
+            "name": "lookup",
+            "input": {
+              "path": "中文.md"
+            }
+          },
+          {
+            "type": "redacted_thinking",
+            "data": "opaque-original=="
+          },
+          {
+            "type": "text",
+            "text": "公开后文"
+          }
+        ],
+        "usage": {
+          "input_tokens": 11,
+          "output_tokens": 7,
+          "cache_creation_input_tokens": 2,
+          "cache_read_input_tokens": 3,
+          "cache_creation": {
+            "ephemeral_5m_input_tokens": 2,
+            "ephemeral_1h_input_tokens": 0
+          },
+          "service_tier": "future-standard",
+          "vendor_nested": {
+            "mixed": [
+              null,
+              false,
+              "原文😀",
+              {
+                "unknown": 13
+              }
+            ]
+          }
+        },
+        "vendor_execution_status": "not-runtime-authority",
+        "stop_reason": "model_context_window_exceeded",
+        "stop_sequence": "STOP-中文😀"
+      },
+      "expected_boundary": "incomplete_failure",
+      "expected_no_runtime_completion": true,
+      "evidence_class": "constructed pinned-schema fixture, not live or executed replay"
+    },
+    {
+      "case_id": "stop-vendor_future_stop-sequence-__absent__",
+      "wire": {
+        "id": "meta-18",
+        "type": "message",
+        "role": "assistant",
+        "model": "fixture-native-model",
+        "content": [
+          {
+            "type": "thinking",
+            "thinking": "签名推理中文😀",
+            "signature": "signature-original=="
+          },
+          {
+            "type": "text",
+            "text": "公开前文"
+          },
+          {
+            "type": "tool_use",
+            "id": "meta_call",
+            "name": "lookup",
+            "input": {
+              "path": "中文.md"
+            }
+          },
+          {
+            "type": "redacted_thinking",
+            "data": "opaque-original=="
+          },
+          {
+            "type": "text",
+            "text": "公开后文"
+          }
+        ],
+        "usage": {
+          "input_tokens": 11,
+          "output_tokens": 7,
+          "cache_creation_input_tokens": 2,
+          "cache_read_input_tokens": 3,
+          "cache_creation": {
+            "ephemeral_5m_input_tokens": 2,
+            "ephemeral_1h_input_tokens": 0
+          },
+          "service_tier": "future-standard",
+          "vendor_nested": {
+            "mixed": [
+              null,
+              false,
+              "原文😀",
+              {
+                "unknown": 13
+              }
+            ]
+          }
+        },
+        "vendor_execution_status": "not-runtime-authority",
+        "stop_reason": "vendor_future_stop"
+      },
+      "expected_boundary": "incomplete_failure",
+      "expected_no_runtime_completion": true,
+      "evidence_class": "constructed pinned-schema fixture, not live or executed replay"
+    },
+    {
+      "case_id": "stop-vendor_future_stop-sequence-None",
+      "wire": {
+        "id": "meta-19",
+        "type": "message",
+        "role": "assistant",
+        "model": "fixture-native-model",
+        "content": [
+          {
+            "type": "thinking",
+            "thinking": "签名推理中文😀",
+            "signature": "signature-original=="
+          },
+          {
+            "type": "text",
+            "text": "公开前文"
+          },
+          {
+            "type": "tool_use",
+            "id": "meta_call",
+            "name": "lookup",
+            "input": {
+              "path": "中文.md"
+            }
+          },
+          {
+            "type": "redacted_thinking",
+            "data": "opaque-original=="
+          },
+          {
+            "type": "text",
+            "text": "公开后文"
+          }
+        ],
+        "usage": {
+          "input_tokens": 11,
+          "output_tokens": 7,
+          "cache_creation_input_tokens": 2,
+          "cache_read_input_tokens": 3,
+          "cache_creation": {
+            "ephemeral_5m_input_tokens": 2,
+            "ephemeral_1h_input_tokens": 0
+          },
+          "service_tier": "future-standard",
+          "vendor_nested": {
+            "mixed": [
+              null,
+              false,
+              "原文😀",
+              {
+                "unknown": 13
+              }
+            ]
+          }
+        },
+        "vendor_execution_status": "not-runtime-authority",
+        "stop_reason": "vendor_future_stop",
+        "stop_sequence": null
+      },
+      "expected_boundary": "incomplete_failure",
+      "expected_no_runtime_completion": true,
+      "evidence_class": "constructed pinned-schema fixture, not live or executed replay"
+    },
+    {
+      "case_id": "stop-vendor_future_stop-sequence-STOP-中文😀",
+      "wire": {
+        "id": "meta-20",
+        "type": "message",
+        "role": "assistant",
+        "model": "fixture-native-model",
+        "content": [
+          {
+            "type": "thinking",
+            "thinking": "签名推理中文😀",
+            "signature": "signature-original=="
+          },
+          {
+            "type": "text",
+            "text": "公开前文"
+          },
+          {
+            "type": "tool_use",
+            "id": "meta_call",
+            "name": "lookup",
+            "input": {
+              "path": "中文.md"
+            }
+          },
+          {
+            "type": "redacted_thinking",
+            "data": "opaque-original=="
+          },
+          {
+            "type": "text",
+            "text": "公开后文"
+          }
+        ],
+        "usage": {
+          "input_tokens": 11,
+          "output_tokens": 7,
+          "cache_creation_input_tokens": 2,
+          "cache_read_input_tokens": 3,
+          "cache_creation": {
+            "ephemeral_5m_input_tokens": 2,
+            "ephemeral_1h_input_tokens": 0
+          },
+          "service_tier": "future-standard",
+          "vendor_nested": {
+            "mixed": [
+              null,
+              false,
+              "原文😀",
+              {
+                "unknown": 13
+              }
+            ]
+          }
+        },
+        "vendor_execution_status": "not-runtime-authority",
+        "stop_reason": "vendor_future_stop",
+        "stop_sequence": "STOP-中文😀"
+      },
+      "expected_boundary": "incomplete_failure",
+      "expected_no_runtime_completion": true,
+      "evidence_class": "constructed pinned-schema fixture, not live or executed replay"
+    },
+    {
+      "case_id": "stop-None-sequence-__absent__",
+      "wire": {
+        "id": "meta-21",
+        "type": "message",
+        "role": "assistant",
+        "model": "fixture-native-model",
+        "content": [
+          {
+            "type": "thinking",
+            "thinking": "签名推理中文😀",
+            "signature": "signature-original=="
+          },
+          {
+            "type": "text",
+            "text": "公开前文"
+          },
+          {
+            "type": "redacted_thinking",
+            "data": "opaque-original=="
+          },
+          {
+            "type": "text",
+            "text": "公开后文"
+          }
+        ],
+        "usage": {
+          "input_tokens": 11,
+          "output_tokens": 7,
+          "cache_creation_input_tokens": 2,
+          "cache_read_input_tokens": 3,
+          "cache_creation": {
+            "ephemeral_5m_input_tokens": 2,
+            "ephemeral_1h_input_tokens": 0
+          },
+          "service_tier": "future-standard",
+          "vendor_nested": {
+            "mixed": [
+              null,
+              false,
+              "原文😀",
+              {
+                "unknown": 13
+              }
+            ]
+          }
+        },
+        "vendor_execution_status": "not-runtime-authority",
+        "stop_reason": null
+      },
+      "expected_boundary": "incomplete_failure",
+      "expected_no_runtime_completion": true,
+      "evidence_class": "constructed pinned-schema fixture, not live or executed replay"
+    },
+    {
+      "case_id": "stop-None-sequence-None",
+      "wire": {
+        "id": "meta-22",
+        "type": "message",
+        "role": "assistant",
+        "model": "fixture-native-model",
+        "content": [
+          {
+            "type": "thinking",
+            "thinking": "签名推理中文😀",
+            "signature": "signature-original=="
+          },
+          {
+            "type": "text",
+            "text": "公开前文"
+          },
+          {
+            "type": "redacted_thinking",
+            "data": "opaque-original=="
+          },
+          {
+            "type": "text",
+            "text": "公开后文"
+          }
+        ],
+        "usage": {
+          "input_tokens": 11,
+          "output_tokens": 7,
+          "cache_creation_input_tokens": 2,
+          "cache_read_input_tokens": 3,
+          "cache_creation": {
+            "ephemeral_5m_input_tokens": 2,
+            "ephemeral_1h_input_tokens": 0
+          },
+          "service_tier": "future-standard",
+          "vendor_nested": {
+            "mixed": [
+              null,
+              false,
+              "原文😀",
+              {
+                "unknown": 13
+              }
+            ]
+          }
+        },
+        "vendor_execution_status": "not-runtime-authority",
+        "stop_reason": null,
+        "stop_sequence": null
+      },
+      "expected_boundary": "incomplete_failure",
+      "expected_no_runtime_completion": true,
+      "evidence_class": "constructed pinned-schema fixture, not live or executed replay"
+    },
+    {
+      "case_id": "stop-None-sequence-STOP-中文😀",
+      "wire": {
+        "id": "meta-23",
+        "type": "message",
+        "role": "assistant",
+        "model": "fixture-native-model",
+        "content": [
+          {
+            "type": "thinking",
+            "thinking": "签名推理中文😀",
+            "signature": "signature-original=="
+          },
+          {
+            "type": "text",
+            "text": "公开前文"
+          },
+          {
+            "type": "redacted_thinking",
+            "data": "opaque-original=="
+          },
+          {
+            "type": "text",
+            "text": "公开后文"
+          }
+        ],
+        "usage": {
+          "input_tokens": 11,
+          "output_tokens": 7,
+          "cache_creation_input_tokens": 2,
+          "cache_read_input_tokens": 3,
+          "cache_creation": {
+            "ephemeral_5m_input_tokens": 2,
+            "ephemeral_1h_input_tokens": 0
+          },
+          "service_tier": "future-standard",
+          "vendor_nested": {
+            "mixed": [
+              null,
+              false,
+              "原文😀",
+              {
+                "unknown": 13
+              }
+            ]
+          }
+        },
+        "vendor_execution_status": "not-runtime-authority",
+        "stop_reason": null,
+        "stop_sequence": "STOP-中文😀"
+      },
+      "expected_boundary": "incomplete_failure",
+      "expected_no_runtime_completion": true,
+      "evidence_class": "constructed pinned-schema fixture, not live or executed replay"
+    },
+    {
+      "case_id": "stop-__absent__-sequence-__absent__",
+      "wire": {
+        "id": "meta-24",
+        "type": "message",
+        "role": "assistant",
+        "model": "fixture-native-model",
+        "content": [
+          {
+            "type": "thinking",
+            "thinking": "签名推理中文😀",
+            "signature": "signature-original=="
+          },
+          {
+            "type": "text",
+            "text": "公开前文"
+          },
+          {
+            "type": "redacted_thinking",
+            "data": "opaque-original=="
+          },
+          {
+            "type": "text",
+            "text": "公开后文"
+          }
+        ],
+        "usage": {
+          "input_tokens": 11,
+          "output_tokens": 7,
+          "cache_creation_input_tokens": 2,
+          "cache_read_input_tokens": 3,
+          "cache_creation": {
+            "ephemeral_5m_input_tokens": 2,
+            "ephemeral_1h_input_tokens": 0
+          },
+          "service_tier": "future-standard",
+          "vendor_nested": {
+            "mixed": [
+              null,
+              false,
+              "原文😀",
+              {
+                "unknown": 13
+              }
+            ]
+          }
+        },
+        "vendor_execution_status": "not-runtime-authority"
+      },
+      "expected_boundary": "incomplete_failure",
+      "expected_no_runtime_completion": true,
+      "evidence_class": "constructed pinned-schema fixture, not live or executed replay"
+    },
+    {
+      "case_id": "stop-__absent__-sequence-None",
+      "wire": {
+        "id": "meta-25",
+        "type": "message",
+        "role": "assistant",
+        "model": "fixture-native-model",
+        "content": [
+          {
+            "type": "thinking",
+            "thinking": "签名推理中文😀",
+            "signature": "signature-original=="
+          },
+          {
+            "type": "text",
+            "text": "公开前文"
+          },
+          {
+            "type": "redacted_thinking",
+            "data": "opaque-original=="
+          },
+          {
+            "type": "text",
+            "text": "公开后文"
+          }
+        ],
+        "usage": {
+          "input_tokens": 11,
+          "output_tokens": 7,
+          "cache_creation_input_tokens": 2,
+          "cache_read_input_tokens": 3,
+          "cache_creation": {
+            "ephemeral_5m_input_tokens": 2,
+            "ephemeral_1h_input_tokens": 0
+          },
+          "service_tier": "future-standard",
+          "vendor_nested": {
+            "mixed": [
+              null,
+              false,
+              "原文😀",
+              {
+                "unknown": 13
+              }
+            ]
+          }
+        },
+        "vendor_execution_status": "not-runtime-authority",
+        "stop_sequence": null
+      },
+      "expected_boundary": "incomplete_failure",
+      "expected_no_runtime_completion": true,
+      "evidence_class": "constructed pinned-schema fixture, not live or executed replay"
+    },
+    {
+      "case_id": "stop-__absent__-sequence-STOP-中文😀",
+      "wire": {
+        "id": "meta-26",
+        "type": "message",
+        "role": "assistant",
+        "model": "fixture-native-model",
+        "content": [
+          {
+            "type": "thinking",
+            "thinking": "签名推理中文😀",
+            "signature": "signature-original=="
+          },
+          {
+            "type": "text",
+            "text": "公开前文"
+          },
+          {
+            "type": "redacted_thinking",
+            "data": "opaque-original=="
+          },
+          {
+            "type": "text",
+            "text": "公开后文"
+          }
+        ],
+        "usage": {
+          "input_tokens": 11,
+          "output_tokens": 7,
+          "cache_creation_input_tokens": 2,
+          "cache_read_input_tokens": 3,
+          "cache_creation": {
+            "ephemeral_5m_input_tokens": 2,
+            "ephemeral_1h_input_tokens": 0
+          },
+          "service_tier": "future-standard",
+          "vendor_nested": {
+            "mixed": [
+              null,
+              false,
+              "原文😀",
+              {
+                "unknown": 13
+              }
+            ]
+          }
+        },
+        "vendor_execution_status": "not-runtime-authority",
+        "stop_sequence": "STOP-中文😀"
+      },
+      "expected_boundary": "incomplete_failure",
+      "expected_no_runtime_completion": true,
+      "evidence_class": "constructed pinned-schema fixture, not live or executed replay"
+    },
+    {
+      "case_id": "model-presence-27",
+      "wire": {
+        "id": "presence-model-27",
+        "content": [
+          {
+            "type": "text",
+            "text": "visible"
+          }
+        ],
+        "stop_reason": "end_turn",
+        "usage": {
+          "input_tokens": 11,
+          "output_tokens": 7,
+          "cache_creation_input_tokens": 2,
+          "cache_read_input_tokens": 3,
+          "cache_creation": {
+            "ephemeral_5m_input_tokens": 2,
+            "ephemeral_1h_input_tokens": 0
+          },
+          "service_tier": "future-standard",
+          "vendor_nested": {
+            "mixed": [
+              null,
+              false,
+              "原文😀",
+              {
+                "unknown": 13
+              }
+            ]
+          }
+        }
+      },
+      "expected_boundary": "candidate",
+      "expected_no_runtime_completion": true,
+      "evidence_class": "constructed fixture"
+    },
+    {
+      "case_id": "model-presence-28",
+      "wire": {
+        "id": "presence-model-28",
+        "content": [
+          {
+            "type": "text",
+            "text": "visible"
+          }
+        ],
+        "stop_reason": "end_turn",
+        "model": null,
+        "usage": {
+          "input_tokens": 11,
+          "output_tokens": 7,
+          "cache_creation_input_tokens": 2,
+          "cache_read_input_tokens": 3,
+          "cache_creation": {
+            "ephemeral_5m_input_tokens": 2,
+            "ephemeral_1h_input_tokens": 0
+          },
+          "service_tier": "future-standard",
+          "vendor_nested": {
+            "mixed": [
+              null,
+              false,
+              "原文😀",
+              {
+                "unknown": 13
+              }
+            ]
+          }
+        }
+      },
+      "expected_boundary": "candidate",
+      "expected_no_runtime_completion": true,
+      "evidence_class": "constructed fixture"
+    },
+    {
+      "case_id": "model-presence-29",
+      "wire": {
+        "id": "presence-model-29",
+        "content": [
+          {
+            "type": "text",
+            "text": "visible"
+          }
+        ],
+        "stop_reason": "end_turn",
+        "model": "future-vendor-model",
+        "usage": {
+          "input_tokens": 11,
+          "output_tokens": 7,
+          "cache_creation_input_tokens": 2,
+          "cache_read_input_tokens": 3,
+          "cache_creation": {
+            "ephemeral_5m_input_tokens": 2,
+            "ephemeral_1h_input_tokens": 0
+          },
+          "service_tier": "future-standard",
+          "vendor_nested": {
+            "mixed": [
+              null,
+              false,
+              "原文😀",
+              {
+                "unknown": 13
+              }
+            ]
+          }
+        }
+      },
+      "expected_boundary": "candidate",
+      "expected_no_runtime_completion": true,
+      "evidence_class": "constructed fixture"
+    },
+    {
+      "case_id": "usage-presence-30",
+      "wire": {
+        "id": "presence-usage-30",
+        "content": [
+          {
+            "type": "text",
+            "text": "visible"
+          }
+        ],
+        "stop_reason": "end_turn",
+        "model": "fixture-native-model"
+      },
+      "expected_boundary": "candidate",
+      "expected_no_runtime_completion": true,
+      "evidence_class": "constructed fixture"
+    },
+    {
+      "case_id": "usage-presence-31",
+      "wire": {
+        "id": "presence-usage-31",
+        "content": [
+          {
+            "type": "text",
+            "text": "visible"
+          }
+        ],
+        "stop_reason": "end_turn",
+        "model": "fixture-native-model",
+        "usage": null
+      },
+      "expected_boundary": "candidate",
+      "expected_no_runtime_completion": true,
+      "evidence_class": "constructed fixture"
+    },
+    {
+      "case_id": "usage-presence-32",
+      "wire": {
+        "id": "presence-usage-32",
+        "content": [
+          {
+            "type": "text",
+            "text": "visible"
+          }
+        ],
+        "stop_reason": "end_turn",
+        "model": "fixture-native-model",
+        "usage": {
+          "input_tokens": 11,
+          "output_tokens": 7,
+          "cache_creation_input_tokens": 2,
+          "cache_read_input_tokens": 3,
+          "cache_creation": {
+            "ephemeral_5m_input_tokens": 2,
+            "ephemeral_1h_input_tokens": 0
+          },
+          "service_tier": "future-standard",
+          "vendor_nested": {
+            "mixed": [
+              null,
+              false,
+              "原文😀",
+              {
+                "unknown": 13
+              }
+            ]
+          }
+        }
+      },
+      "expected_boundary": "candidate",
+      "expected_no_runtime_completion": true,
+      "evidence_class": "constructed fixture"
+    }
+  ]
+}

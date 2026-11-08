@@ -8,7 +8,7 @@ observed_at: 733d352fc719f922b21bab1cd46206139564367f
 boundary_refs: [boundary.observation-persistence-delivery]
 behavior_refs: [behavior.observation-persistence]
 rule_refs: [rule.fact-projection-separation]
-evidence_refs: [evidence.subagent-physical-settlement-repair, evidence.persistence-observation, evidence.checkpoint-journal-binding-repair, evidence.checkpoint-journal-binding-verification, evidence.checkpoint-journal-sdk-inventory, evidence.high-risk-audit-frontier, evidence.eval-trace-correlation-repair, evidence.eval-trace-correlation-verification, evidence.framework-concept-navigation, evidence.transcript-projection-settlement-repair, evidence.transcript-projection-settlement-verification, evidence.diagnostic-persistence-failure-visibility-repair, evidence.diagnostic-persistence-failure-visibility-verification, evidence.framework-only-finding-closure-verification]
+evidence_refs: [evidence.subagent-physical-settlement-repair, evidence.persistence-observation, evidence.checkpoint-journal-binding-repair, evidence.checkpoint-journal-binding-verification, evidence.checkpoint-journal-sdk-inventory, evidence.high-risk-audit-frontier, evidence.eval-trace-correlation-repair, evidence.eval-trace-correlation-verification, evidence.framework-concept-navigation, evidence.transcript-projection-settlement-repair, evidence.transcript-projection-settlement-verification, evidence.diagnostic-persistence-failure-visibility-repair, evidence.diagnostic-persistence-failure-visibility-verification, evidence.framework-only-finding-closure-verification, evidence.framework-conversation-filename-repair]
 finding_refs: [finding.trace-effect-event-producers, finding.eval-trace-identity, finding.trace-audit-secret-boundary, finding.turn-terminal-commit-projection-order, finding.checkpoint-journal-binding, finding.diagnostic-persistence-failure-visibility, finding.hook-event-producer-contract, finding.in-memory-audit-successful-drop]
 audit_refs: [audit.subagent-physical-settlement-focused-review, audit.observation-persistence-delivery.state-authority, audit.observation-persistence-delivery.data-durability, audit.observation-persistence-delivery.contract-evidence, audit.checkpoint-journal-binding-rereview]
 related_map_refs: [map.agent-session-turn, map.context-memory, map.task-subagent-workflow, map.protocol-surfaces, map.eval-evolution]
@@ -93,3 +93,9 @@ trace producer/identity Finding 与完整 event family 分类保持 needs_review
 ## 未展开项
 
 应用 UI/feed retention 与产品 addressing 不进入 framework baseline。
+
+## 当前文件后端物理文件名预算修复（限域）
+
+`evidence.framework-conversation-filename-repair` 绑定本仓 FileConversationStore 的物理文件名预算与 atomic_write 临时名局部修复。它关联现有 `asset.conversation-store`、`behavior.context-memory-lifecycle`、`rule.context-persistence-separation` 和 `rule.fact-projection-separation`，只补充本次三路径的关系与证据入口。
+
+本关系不新造 `asset.atomic-write`，不升级既有 Behavior 状态，不改已有场景、unknown、observed_at 或退役结论；自动 Cron、App/SDK/main CI、native 和完整工程门禁仍按 Evidence 限制分列。

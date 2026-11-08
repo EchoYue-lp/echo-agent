@@ -8,6 +8,7 @@ use super::super::super::types::*;
 use axum::response::IntoResponse;
 use axum::{Router, body::Bytes, extract::State, routing::post};
 use dashmap::DashMap;
+use echo_core::agent::CancellationToken;
 use hmac::{Hmac, Mac};
 use serde_json::json;
 use sha2::Sha256;
@@ -269,7 +270,22 @@ pub(super) async fn run_webhook_server(
     handler: Arc<dyn MessageHandler>,
     verification_token: Option<String>,
     signing_key: Option<String>,
+    transport: TransportStatus,
+    cancellation: CancellationToken,
 ) -> Result<(), echo_core::error::ChannelError> {
+    // Axum 0.7's public route insertion panics on malformed configuration.
+    // Reuse its exact locked parser (including captures/catch-all support),
+    // preceded only by Axum's own leading-slash check. Do not duplicate grammar.
+    if !webhook_path.starts_with('/') {
+        return Err(echo_core::error::ChannelError::InvalidConfig(
+            "webhook path must start with '/'".into(),
+        ));
+    }
+    matchit::Router::new()
+        .insert(webhook_path.clone(), ())
+        .map_err(|error| {
+            echo_core::error::ChannelError::InvalidConfig(format!("invalid webhook path: {error}"))
+        })?;
     let state = Arc::new(WebhookState {
         handler,
         verification_token,
@@ -283,21 +299,30 @@ pub(super) async fn run_webhook_server(
         .layer(axum::extract::DefaultBodyLimit::max(2 * 1024 * 1024))
         .with_state(state);
 
-    info!(
-        "Feishu webhook server listening on {}{}",
-        bind_addr, webhook_path
-    );
-
-    let listener = TcpListener::bind(&bind_addr).await.map_err(|e| {
+    let bound = tokio::select! {
+        biased;
+        () = cancellation.cancelled() => return Ok(()),
+        result = TcpListener::bind(&bind_addr) => result,
+    };
+    let listener = bound.map_err(|e| {
         echo_core::error::ChannelError::ConnectionError(format!(
             "Failed to bind webhook server: {}",
             e
         ))
     })?;
 
-    axum::serve(listener, app).await.map_err(|e| {
-        echo_core::error::ChannelError::ConnectionError(format!("Webhook server error: {}", e))
-    })?;
+    transport.publish(
+        ChannelTransportPhase::Ready,
+        Some(ChannelTransportEvidence::LocalWebhookListener),
+        None,
+    );
+    info!("Feishu webhook local listener bound");
+    axum::serve(listener, app)
+        .with_graceful_shutdown(cancellation.cancelled_owned())
+        .await
+        .map_err(|e| {
+            echo_core::error::ChannelError::ConnectionError(format!("Webhook server error: {}", e))
+        })?;
 
     Ok(())
 }
@@ -327,6 +352,118 @@ mod tests {
         async fn reply(&self, _msg: OutboundMessage) -> echo_core::error::Result<()> {
             Ok(())
         }
+    }
+
+    #[tokio::test]
+    async fn webhook_observes_only_successful_local_bind_and_awaits_original_listener()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let transport = TransportStatus::new(ChannelTransportPhase::Connecting);
+        let mut receiver = transport.subscribe();
+        let cancellation = CancellationToken::new();
+        let server = tokio::spawn(run_webhook_server(
+            "127.0.0.1:0".into(),
+            "/events".into(),
+            Arc::new(CountingHandler {
+                calls: Arc::new(AtomicUsize::new(0)),
+            }),
+            None,
+            None,
+            transport,
+            cancellation.clone(),
+        ));
+        tokio::time::timeout(Duration::from_secs(2), receiver.changed()).await??;
+        assert_eq!(receiver.borrow().phase, ChannelTransportPhase::Ready);
+        assert_eq!(
+            receiver.borrow().evidence,
+            Some(ChannelTransportEvidence::LocalWebhookListener)
+        );
+        cancellation.cancel();
+        tokio::time::timeout(Duration::from_secs(2), server).await???;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn webhook_failed_bind_never_publishes_ready() -> Result<(), Box<dyn std::error::Error>> {
+        let occupied = TcpListener::bind("127.0.0.1:0").await?;
+        let transport = TransportStatus::new(ChannelTransportPhase::Connecting);
+        let receiver = transport.subscribe();
+        let result = run_webhook_server(
+            occupied.local_addr()?.to_string(),
+            "/events".into(),
+            Arc::new(CountingHandler {
+                calls: Arc::new(AtomicUsize::new(0)),
+            }),
+            None,
+            None,
+            transport,
+            CancellationToken::new(),
+        )
+        .await;
+        assert!(result.is_err());
+        assert_eq!(receiver.borrow().phase, ChannelTransportPhase::Connecting);
+        assert_eq!(receiver.borrow().evidence, None);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn webhook_locked_grammar_preserves_captures_and_wildcards_and_rejects_invalid_paths()
+    -> Result<(), Box<dyn std::error::Error>> {
+        for path in ["/events/:tenant", "/events/*tail", "/events"] {
+            let transport = TransportStatus::new(ChannelTransportPhase::Connecting);
+            let mut receiver = transport.subscribe();
+            let cancellation = CancellationToken::new();
+            let server = tokio::spawn(run_webhook_server(
+                "127.0.0.1:0".into(),
+                path.into(),
+                Arc::new(CountingHandler {
+                    calls: Arc::new(AtomicUsize::new(0)),
+                }),
+                None,
+                None,
+                transport,
+                cancellation.clone(),
+            ));
+            tokio::time::timeout(Duration::from_secs(2), receiver.changed()).await??;
+            assert_eq!(
+                receiver.borrow().evidence,
+                Some(ChannelTransportEvidence::LocalWebhookListener)
+            );
+            cancellation.cancel();
+            tokio::time::timeout(Duration::from_secs(2), server).await???;
+        }
+        for path in [
+            "",
+            "events",
+            "/events/:tenant:other",
+            "/events/*tail/more",
+            "/events/*",
+        ] {
+            let transport = TransportStatus::new(ChannelTransportPhase::Connecting);
+            let receiver = transport.subscribe();
+            // Return a typed invalid-configuration error before routing/bind;
+            // malformed configuration must not panic the original task.
+            let result = run_webhook_server(
+                "127.0.0.1:0".into(),
+                path.into(),
+                Arc::new(CountingHandler {
+                    calls: Arc::new(AtomicUsize::new(0)),
+                }),
+                None,
+                None,
+                transport,
+                CancellationToken::new(),
+            )
+            .await;
+            assert!(
+                matches!(
+                    result,
+                    Err(echo_core::error::ChannelError::InvalidConfig(_))
+                ),
+                "unexpected result for {path:?}: {result:?}"
+            );
+            assert_eq!(receiver.borrow().phase, ChannelTransportPhase::Connecting);
+        }
+        Ok(())
     }
 
     #[tokio::test]

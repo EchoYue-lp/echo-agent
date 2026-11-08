@@ -11,7 +11,8 @@
 
 use echo_agent::error::ReactError;
 use echo_agent::human_loop::{
-    HumanLoopEvent, HumanLoopManager, PermissionService, SessionApprovalCache,
+    HumanLoopEvent, HumanLoopManager, PermissionInvocationContext, PermissionService,
+    SessionApprovalCache,
 };
 use echo_agent::prelude::*;
 use echo_agent::tool;
@@ -93,6 +94,36 @@ async fn main() -> Result<()> {
         ))
         .await;
 
+    // 强制交互复用相同 service/provider。即使普通模式会放行，调用方
+    // 明确要求的新审批仍须取得本次回答；不另建队列或清空共享缓存。
+    let explicit_input = serde_json::json!({});
+    let explicit_context = PermissionInvocationContext {
+        scope_id: Some("demo03:explicit".to_string()),
+        request_id: Some("demo03-explicit-review".to_string()),
+        agent_name: Some("approval_demo_agent".to_string()),
+        ..Default::default()
+    };
+    let explicit_check = permission_service
+        .request_approval_with_context(
+            "current_time",
+            &explicit_input,
+            &[echo_agent::tools::permission::ToolPermission::Read],
+            Some(echo_agent::tools::permission::PermissionMode::BypassPermissions),
+            Some(&explicit_context),
+            &["核对本次输入后再批准".to_string()],
+        )
+        .await?;
+    if !explicit_check.decision.is_allowed()
+        || !explicit_check
+            .approval_receipt
+            .as_ref()
+            .is_some_and(|receipt| receipt.matches("current_time", &explicit_input))
+    {
+        return Err(ReactError::Other(
+            "demo03 验收失败：明确审批未返回匹配的批准 receipt".to_string(),
+        ));
+    }
+
     // ── 4. 构建 Agent ──────────────────────────────────────────────────
     let system_prompt = r#"你是一个助手，可以使用工具完成任务。
 
@@ -131,13 +162,14 @@ async fn main() -> Result<()> {
     println!("\n✅ 澄清结果: {}", clarification);
 
     println!("\n--- Part 2: 敏感工具调用 → 人工审批 ---");
+    let approvals_before_tool = approval_count.load(Ordering::Relaxed);
     let approval_answer = agent.chat("请调用工具获取当前时间。").await?;
     if approval_answer.trim().is_empty() {
         return Err(ReactError::Other(
             "demo03 验收失败：审批链路完成后返回空答案".to_string(),
         ));
     }
-    if approval_count.load(Ordering::Relaxed) == 0 {
+    if approval_count.load(Ordering::Relaxed) <= approvals_before_tool {
         return Err(ReactError::Other(
             "demo03 验收失败：未触发工具审批事件".to_string(),
         ));

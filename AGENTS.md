@@ -1,12 +1,44 @@
 # echo-agent AGENTS.md
 
+## 2026-11-09 本次整合交付范围
+
+用户要求全部既有开发成果合入本仓 `main`，交付时仅保留主分支；`echo-agent-learning` 是本 workspace 的学习子项目，随框架一同验证、交付。经功能核对的 Exa 既有分支属于本次范围，覆盖旧迭代排除 Exa、保留 baseline 分支的限定；固定历史 tag 和必要恢复证据保留。
+
+仍在任务分支通过适用本地门禁后 PR squash 合入 main，并核验精确 main CI；核对旧分支功能覆盖与最新远端 tip 后再清理。本次不扩张下文精确依赖风险接受，不以源码或 CI 通过代替消费者 GUI、真实 Provider 或手机验收。
+
+## 当前 GUI 消费者名称：Eclip
+
+用户于 2026-11-06 明确纠正 GUI 产品名为 **Eclip**。本文件中 EKO 为同一应用的历史称呼；新增对外产品说明使用 Eclip，原产品边界与退役裁决不变。框架保持产品无关，产品 HTTP 身份由宿主注入，不在 framework 硬编码 Eclip 品牌。`EKO_*`、`.eko`、`EkoConfig` 等既有技术标识不因品牌修正而自动迁移。
+
 本文件是 AI agent 在本仓库工作时的**最高优先级约束**(优先级高于 agent 默认行为和任何技能),请严格遵守。本仓库可独立检出使用,本文件即完整约束,不依赖外部 superproject。
+
+## 2026-11-05 新锁的用户精确裁决
+
+用户在当前协调会话直接回答：“同意本次 Framework 8fb62e 与 CLI 48eece 新锁的精确绑定，不自动接受后续新风险。”原文回执为主根 `.echo-semantic/local/dependency-exact-binding-20261105-r01/authorization.json`，SHA256 `a2e324628e7ad1c11dc737405a48cb46a36e8333f109e15f66b4836810815a62`。
+
+本仓仅接受锁 `8fb62e249fc8fa3114a51b85277f201a98bb190572a80293a91555d8a519e928`（677包）。原49组107个name/version/source身份完整保留，仅quick-xml组新增 `0.42.0`／`registry+https://github.com/rust-lang/crates.io-index`，现49组108身份；唯一机器权威仍为 `.cargo/cargo-deny-duplicate-baseline.json`。原deny策略、cargo-deny 0.20.2、完整四类命令和严格parser不变，所有其它变化继续阻断，不增加ignore/allow。正式rebound caller和原14控制必须实际通过，保留原scanner0、旧caller1和网络失败的原义。
+
+本节更新下方历史绑定的当前时态，不改旧授权和失败事实，不预授未来锁、版本、来源或新风险，不向CLI/SDK继承。局部媒体、完整工程、App及main CI继续分别验收；不授权GUI、提交、推送、合并或发布。
+
+## 本次 EKO 迭代的开发目录
+
+用户指定唯一开发根 `/Users/ls/MyWork/code/ylp_agent_learn/lp-agent`。本仓在该根的 `echo-agent/` 内开发；源码、工程文档、构建产物、回执与恢复材料均写在主根内，不创建外部 worktree。已有外部工作树只作冻结迁移来源，备份、哈希回读和依赖核对完成后按授权回收。同一主根多会话按文件划分单一写权；验证期间冻结对应源码及依赖。后文 worktree 规则仅用于维护既有工作树，不取消本轮目录限制。
+
+## 文档语言
+
+后续新增或修改的设计、计划、说明、验收清单和交付报告统一使用中文，不再为形式新增英文副本。代码、命令、API/协议标识及原始日志保留原文；历史证据不因翻译而改写。
 
 ## 仓库定位
 
 通用 Rust Agent 框架 Cargo workspace:根 crate `echo_agent` + 子 crate `echo_core` / `echo_macros` / `echo_execution` / `echo_integration` / `echo_tools` / `echo_state` / `echo_orchestration` / `echo-agent-learning`。SDK Host、protocol、合同和三语言 SDK 位于独立的 `echo-agent-sdk` 仓库；crate 名用下划线(`echo_agent`,`cargo check -p echo_agent`)。
 
 **框架服务所有复用方,不是某个应用的私有库。** 任何"能放框架、也能放应用"的功能,动手前必须先回答分层问题(见下)。
+
+### 已批准的 EKO 产品边界与具名能力退役
+
+用户于 2026-10-24 确认:EKO 只保留 GUI 主入口,继续保留 IM 收发和 cron 后台触发,退役独立 TUI、REPL、CLI/JSONL 产品入口,不再扩张待退役入口的能力对等目标。GUI 内置终端、Agent shell、桌面启动所需最小系统参数、构建命令和独立 SDK Host stdio 不属于该退役范围。GUI、IM、cron 继续复用共享 Agent、Task/Subagent、工具、HITL、记忆和恢复权威;共享逻辑先按真实 owner 归位,不得按 `src/cli` 目录名连带删除 IM/调度或终端能力。
+
+EKO 仍是本地个人产品,用户直接操作终端/MCP 与 Agent 自动执行的权限边界不变;应用继续文件持久化、不启用 SQLite。框架的合理存储实现与其它 public API 不因 EKO 的产品取舍而删除。以上是已批准目标,当前入口、feature 和实现仍存在,本批规则/ADR不等于运行退役已经完成。
 
 ## 统一术语:只有 Subagent,没有 Worker(强制)
 
@@ -50,6 +82,10 @@ CI 对 lib/bins 强制 `-D clippy::unwrap_used -D clippy::expect_used -D clippy:
 
 删任何 pub API 前,先 grep **整个仓库**确认无构造点/调用点,再判断它是不是 trait 的多实现之一 / 合理对外选项——**是的话,即使当前无调用也保留**(它是框架的能力菜单,不是死代码)。"echo-agent-cli 没用"不构成删除理由。拿不准时保留。被新实现明确取代且覆盖全部能力的旧机制才可删。
 
+**具名退役例外仅限 A2A 与 LSP。** 用户明确批准从 framework/SDK/EKO 主线退役这两类能力,须按 [ADR 0090](docs/adr/0090-a2a-lsp-retirement-contract.md) 对账 feature、公开 facade、工具、插件/配置、实际消费者、accepted 身份/路由、示例、文档、条件矩阵与官网。ACP、MCP、channels、Subagent、其它合理工具/存储 API 继续保留,不得用此例外扩张删除范围,也不得保留宣告成功的空壳能力。
+
+**撤销 API 必须消费者先去依赖,新增 API 仍由框架先交付。** A2A/LSP API 仍存在时,先让 EKO 与 SDK 主线解除依赖并通过适用验证,再物理删除框架实现;EKO CI 跟踪 framework main,每个中间主线必须保持受支持消费者可构建。SDK Host 的精确 framework pin 与顶层 gitlink 独立,不为指针整齐强迫升级 pin。保留 `chore/Echoyue/full-capabilities-baseline` 分支、`pre-retirement-2026-10-24` tag、必要历史 refs 和现有用户数据;不回写固定 tag。Exa 本机独立提交 `4343f0b736beb5c8606e31146528a2fe8be80510` 不在本轮推送/合并范围。
+
 ## 关键决策:动手前先查"是不是已经有了"(强制)
 
 本仓库代码量大,框架和应用各有任务/存储/调度/工具实现,且历史迭代留过死代码。新增任何字段/函数/类型/模块/工具/表之前:
@@ -85,21 +121,34 @@ cargo clippy --workspace --lib --bins --all-features --locked -- \
   -D clippy::panic \
   -D clippy::unreachable
 cargo test --workspace --all-targets --all-features --locked
+cargo test -p echo-agent-learning --doc --all-features --locked
 cargo check --workspace --lib --no-default-features --locked
 ```
+
+`--all-targets` 不执行 doctest。上面的独立命令会编译 `echo-agent-learning` 的 `no_run` 入门片段，不调用真实模型；CI 的 learning 分组执行默认 feature 的 `--doc --locked`，不替代本地全 feature 的合并门禁。
 
 等价快捷方式:`./scripts/verify.sh`(同一组命令,本地门禁入口)。
 
 
 ### framework 精确依赖诊断基线
 
-用户明确接受本 framework Cargo.lock SHA-256
-`f76fe10e64ec3faf062ff5bc7a66d6cd82f82cf95e989c824f40fe6f244d234c`
-的49组精确 crate/version/source `warning[duplicate]` 合同。唯一当前机器权威为
+framework 既有独立人类裁决接受的是49组、107个精确 crate/version/source
+`warning[duplicate]` 身份；历史校验锁为
+`4cdd98547fe19f58fb8d7fe0fe5c54b6342bf0b2f007f9d2591b47a993ad21d1`。
+历史具名 **Tool＋Domain（679包）** 工作线的校验锁为
+`a6c5630b41c2240dec5a90de65962678b3d3eccfc7e872e237408aac774ddf78`。
+2026-10-28 已批准 A2A/LSP 退役后的本次676包校验锁为
+`1442bf309239cca9354070fee0d6278bb53cb8aeee0cafa436e97c64a93324af`。Root仅授权精确c48→1442机械绑定维护；原官方scanner自然0，
+完整raw逐项对账仍为同49组/107身份，原严格caller1保留；原未改checker复用同一
+raw/receipt已实际自然0，原policy14项控制亦自然0。
+此授权不扩原接受集合，也不预授未来锁、组、版本或来源变化。
+这是协调者在原四类官方扫描与独立精确对账通过后，对同一原接受集作的验证绑定维护，
+并非用户另行接受新 SHA 或新增风险；不扩张原49组/107身份、策略、工具、scope 或忽略集合。
+唯一当前机器权威为
 [精确基线](.cargo/cargo-deny-duplicate-baseline.json)，通过
 `scripts/check-cargo-deny-baseline.py` 执行并比较官方 cargo-deny 四类检查；保留
 `multiple-versions = "warn"`、完整原始输出及自然退出码，所有原命令仍须真实退出0。
-此项接受来自 framework 本次独立人类裁决，不能由 SDK 例外自动继承；duplicate
+原49组/107身份的接受来自 framework 既有独立人类裁决，不能由 SDK 例外自动继承；duplicate
 诊断不是编译 warning。其它工具类别、其它 warning/error、新增或缺失组、版本或来源
 变化、损坏/不完整输出一律阻断，不按49条数量放行，不添加 ignore 或改为 allow。
 锁图、framework revision、manifest/features、检查范围、工具版本或策略变化须 fresh
@@ -112,7 +161,7 @@ advisory、license、source、配置及其它工具的零警告/零失败约束�
 修改 `Cargo.toml`、feature 定义、`#[cfg(...)]` 分支、可选依赖或跨 crate 公共 API 时,额外逐个编译根 crate 的独立 feature:
 
 ```bash
-for feature in acp a2a mcp lsp sqlite telemetry topology subagent web media \
+for feature in acp mcp sqlite telemetry topology subagent web media \
   data statistics channels git database rag chart; do
   cargo check -p echo_agent --no-default-features --features "$feature" --locked || exit 1
 done
@@ -137,7 +186,10 @@ done
 
 ## 磁盘与清理
 
-默认保留 `target/` 增量缓存。仅在:可用磁盘低于约 50 GiB、两个 workspace 的 target 合计超约 60 GiB、缓存损坏或用户要求时 `cargo clean`。
+- 用户于 2026-10-24 明确要求:**每个编译/测试批次实际结束后及时 `cargo clean` 自有准确 target**,替代此前默认保留增量缓存的策略。相邻验证命令可组成同一批次,先保存必要日志、真实退出状态及需保留的 Host/制品到 target 外(原始日志放本仓 ignored `.echo-semantic/local/<task-id>/`),确认该 target 无活动 cargo/rustc/Host 或其它制品读取者后再清理;不得先删再声称证据或制品可恢复。
+- 同机最多五条 focused Rust 构建/测试并发,完整 all-feature/GUI/语言矩阵同一时间只运行一套;每条 Rust 构建 `jobs <= 5`,dev/test debuginfo 关闭。每个 worktree 使用自有独立 target,禁止与其它聊天或 primary 共用 `CARGO_TARGET_DIR`。
+- 构建批次及清理前后记录 `df`/`du`。在准确 workspace/manifest 下执行 `cargo clean`,使用自定义 target 时显式指定准确目录,记录命令与实际出口;清理失败必须处理或明确保留,不能报成已释放空间。可用空间低于 **5 GiB** 时停止新的重构建,先处理已验证且无活动进程使用的自有可重建缓存。
+- 纯文档/只读任务未产生 Cargo 产物时明确报告不适用,不为形式重跑已通过的同源构建或清理无关目录。不清其它聊天或 primary 缓存;工作树、分支、未提交/未跟踪源码、stash、保留 tag 和原件的维护清理按独立授权及协调归属执行,不得借 `cargo clean` 扩大范围。
 
 ## 提交方式
 

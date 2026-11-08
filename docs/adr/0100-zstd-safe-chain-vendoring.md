@@ -67,23 +67,41 @@ SDK 当前保留的 5,352 项 accepted 身份、431 条路由及 18 个 data 操
 
 本次没有新增用户功能或工具 schema；实现阶段仍须检查并同步所属依赖说明、原 data/media 示例与官网来源说明，不能宣称独立 root 自动继承 patch 或 registry 发布已可用。上游正式版本能形成安全闭包后，移除本地覆盖仍须重新验证来源、消费者及标准依赖门禁。
 
-## F517 候选实际边界（2026-11-01）
+## Stage0 主线历史补充与后继锁边界（2026-11-01）
 
-b788 候选复用了本 ADR 的两份 Polars vendor、五项 registry-origin 归因、唯一生成器与 Zstd 数据消费者测试。候选锁由离线精确 resolver 生成，`tempfile 3.27.0` 的 `getrandom 0.4.3 -> 0.3.4` 是其声明范围内的 resolver 选择，未手工改写，也不被宣称为 zstd 必需边或跨平台行为等价。Root 已接受该有界候选继续进行 focused 验证。
+本节逐行保留 main `f5688958960b985da4141212824abe7c74884f7c` 新增的候选/资源观察，
+不将其候选时态或旧 warning 回执改写成本地1376的新执行结果。原 ADR 的单一 vendor
+源码 owner、唯一五来源审计算法及 safe7→safe8 嵌套类型身份边界保持。
 
-当前实际 dependency-policy 事实是：正确官方 RustSec process-only route 下 cargo-deny exact49/107 自然 0，五源 registry-origin cargo-audit 自然 0；原错误环境自然 1 与 raw 保留。baseline 仅机械更新候选 lock SHA，未新增 ignore/allow、风险接受、SDK pin 或其它 policy。fmt、Zstd DataTool/Parquet consumer test、受影响 Clippy、Source/final 与完整 full24 仍按各自真实回执验收。
+本解决候选使用本地1376的676包锁及其有效 baseline 配对，锁 SHA-256 为
+`1442bf309239cca9354070fee0d6278bb53cb8aeee0cafa436e97c64a93324af`；main Stage0 的679包锁
+`511eb9822839e252fcb5286602691e96a6277f586103553d126e3df31ff20053` 作为独立历史输入保留。
+两锁的 Zstd 三节点版本、来源、checksum 与依赖一致；本次不替换锁、不生成新风险接受，
+不把主线或任一测试计数作为本地新资格。
 
-本候选未增删第一方公开 Rust 签名或协议；`zstd_data_compat.rs` 属于现有 workspace test 适用面。safe7→safe8 的嵌套 `DecompressionContext::Zstd` / `zstd_safe::DCtx` crate 类型身份变化保留为明确例外，不宣称旧显式 safe7 类型赋值兼容。Framework 中文说明与 ADR 已同步，独立 SDK/website 不复制 vendor 或审计算法，examples/website 无需新增依赖版本文案。
+以下为 f568 在原 ADR 末尾追加的完整原文，所有“当前”“将执行”等词保留其阶段含义：
 
+> ## F517 候选实际边界（2026-11-01）
+>
+> b788 候选复用了本 ADR 的两份 Polars vendor、五项 registry-origin 归因、唯一生成器与 Zstd 数据消费者测试。候选锁由离线精确 resolver 生成，`tempfile 3.27.0` 的 `getrandom 0.4.3 -> 0.3.4` 是其声明范围内的 resolver 选择，未手工改写，也不被宣称为 zstd 必需边或跨平台行为等价。Root 已接受该有界候选继续进行 focused 验证。
+>
+> 当前实际 dependency-policy 事实是：正确官方 RustSec process-only route 下 cargo-deny exact49/107 自然 0，五源 registry-origin cargo-audit 自然 0；原错误环境自然 1 与 raw 保留。baseline 仅机械更新候选 lock SHA，未新增 ignore/allow、风险接受、SDK pin 或其它 policy。fmt、Zstd DataTool/Parquet consumer test、受影响 Clippy、Source/final 与完整 full24 仍按各自真实回执验收。
+>
+> 本候选未增删第一方公开 Rust 签名或协议；`zstd_data_compat.rs` 属于现有 workspace test 适用面。safe7→safe8 的嵌套 `DecompressionContext::Zstd` / `zstd_safe::DCtx` crate 类型身份变化保留为明确例外，不宣称旧显式 safe7 类型赋值兼容。Framework 中文说明与 ADR 已同步，独立 SDK/website 不复制 vendor 或审计算法，examples/website 无需新增依赖版本文案。
+>
+>
+> ## Focused 验证边界（2026-11-01）
+>
+> 候选 fmt write/check 与 `echo_tools` Zstd DataTool consumer test 已按同一 frozen/warm 环境实际自然 0；consumer test 实际 3 passed。资源窗口已恢复，受影响 `echo_tools` all-targets/all-features Clippy 将按原 guard 单独执行；在取得新回执前不写成通过，也不执行 clean。
+>
+> ## Warning 与资源恢复记录（2026-11-01）
+>
+> 受影响 `echo_tools` Clippy 的命令自然退出 0，但编译 raw 出现 `rust-objcopy` SIGABRT warning；本批不授予 W0。该 warning 来自 frozen LLVM 动态库环境变量未投影，需在自有 target 的窄缓存重建后复核。窄 `cargo clean --dry-run -p echo_tools --profile dev` 因缺失/无效 `CACHEDIR.TAG` 被 Cargo 拒绝，未执行清理。该资源事实与 zstd API/来源决策分开，不能用来扩大或缩小安全修复范围。
+>
+> ## 正确 frozen LLVM 环境复核（2026-11-01）
+>
+> 在仅重建四个 objcopy warning leaf、未改源码/profile/tool 的前提下，补齐 frozen LLVM `DYLD_LIBRARY_PATH` 后，Zstd DataTool consumer test 实际 3 passed 且 raw 无 warning；`echo_tools` all-targets/all-features Clippy `-D warnings` 自然 0 且 raw 无 warning。旧环境的 warning 回执继续保留为历史诊断，不作为当前资格。
 
-## Focused 验证边界（2026-11-01）
-
-候选 fmt write/check 与 `echo_tools` Zstd DataTool consumer test 已按同一 frozen/warm 环境实际自然 0；consumer test 实际 3 passed。资源窗口已恢复，受影响 `echo_tools` all-targets/all-features Clippy 将按原 guard 单独执行；在取得新回执前不写成通过，也不执行 clean。
-
-## Warning 与资源恢复记录（2026-11-01）
-
-受影响 `echo_tools` Clippy 的命令自然退出 0，但编译 raw 出现 `rust-objcopy` SIGABRT warning；本批不授予 W0。该 warning 来自 frozen LLVM 动态库环境变量未投影，需在自有 target 的窄缓存重建后复核。窄 `cargo clean --dry-run -p echo_tools --profile dev` 因缺失/无效 `CACHEDIR.TAG` 被 Cargo 拒绝，未执行清理。该资源事实与 zstd API/来源决策分开，不能用来扩大或缩小安全修复范围。
-
-## 正确 frozen LLVM 环境复核（2026-11-01）
-
-在仅重建四个 objcopy warning leaf、未改源码/profile/tool 的前提下，补齐 frozen LLVM `DYLD_LIBRARY_PATH` 后，Zstd DataTool consumer test 实际 3 passed 且 raw 无 warning；`echo_tools` all-targets/all-features Clippy `-D warnings` 自然 0 且 raw 无 warning。旧环境的 warning 回执继续保留为历史诊断，不作为当前资格。
+本产物未运行 Cargo、官方 scanner 或完整 Source，不产生新的依赖/消费者/主线资格。
+676包图、49组/107身份及五来源审计的实际验收沿各自原始配对收据保留，后续真实合流
+另按正常门禁执行，不自动继承此文件解决结果。

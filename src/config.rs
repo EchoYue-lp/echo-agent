@@ -105,7 +105,7 @@ impl FrameworkConfig {
                 .clamp(1, 20_000)
         } else {
             0
-        }; // Positive windows retain the explicit legacy message cap.
+        }; // Positive windows retain the explicitly selected message count cap.
         match self.agent.compress_strategy.as_str() {
             "summary" => {
                 use crate::compression::compressor::SummaryCompressor;
@@ -199,7 +199,7 @@ impl FrameworkConfig {
 
 /// Direct model settings chosen by an embedding application.
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct ModelConfig {
     pub provider: String,
     pub name: String,
@@ -208,7 +208,10 @@ pub struct ModelConfig {
     pub api_protocol: Option<LlmApiProtocol>,
     pub max_tokens: Option<u32>,
     pub temperature: Option<f32>,
+    /// 当前调用方直接选择的window；仍转为同一个CallerOverride事实，None只清除此直接覆盖。
     pub context_window: Option<u32>,
+    /// 当前序列化来源事实，与直接设置共同进入同一个resolver，不使用旧config/facts侧车。
+    pub facts: ModelFactInputs,
 }
 
 impl ModelConfig {
@@ -224,27 +227,12 @@ impl ModelConfig {
         self.name.clone()
     }
 
-    /// Resolve serialized model facts and legacy explicit fields at `now`.
+    /// Resolve this one typed configuration and all retained source facts at `now`.
     pub fn resolve_model_profile_at(&self, now: SystemTime) -> ModelProfileResolution {
-        self.resolve_model_profile_with_facts_at(&ModelFactInputs::default(), now)
-    }
-
-    /// Attach serialized model facts without changing the existing config shape.
-    pub fn with_model_facts(self, facts: ModelFactInputs) -> SourcedModelConfig {
-        SourcedModelConfig {
-            config: self,
-            facts,
-        }
-    }
-
-    fn resolve_model_profile_with_facts_at(
-        &self,
-        facts: &ModelFactInputs,
-        now: SystemTime,
-    ) -> ModelProfileResolution {
         let protocol = self.api_protocol.unwrap_or(LlmApiProtocol::ChatCompletions);
         let mut resolver =
-            facts.register_with(ModelProfileResolver::new(), &self.provider, &self.name);
+            self.facts
+                .register_with(ModelProfileResolver::new(), &self.provider, &self.name);
         if self.api_protocol.is_some() {
             resolver = resolver.register_protocol_facts(
                 &self.provider,
@@ -277,13 +265,23 @@ impl ModelConfig {
         )
     }
 
+    /// Replace the serialized fact inputs of this current configuration.
+    /// Clearing them does not erase the independent direct context_window selection.
+    pub fn with_model_facts(mut self, facts: ModelFactInputs) -> Self {
+        self.facts = facts;
+        self
+    }
+
     /// Transfer serialized facts into the provider client configuration so
     /// dynamic capability reads and run snapshots preserve application policy.
     pub fn apply_to_llm_config(
         &self,
         config: crate::llm::LlmConfig,
     ) -> crate::llm::SourcedLlmConfig {
-        let mut config = crate::llm::SourcedLlmConfig::new(config);
+        let mut config = crate::llm::SourcedLlmConfig {
+            config,
+            facts: self.facts.clone(),
+        };
         for facts in self.explicit_model_facts_at(SystemTime::now()) {
             config = config.with_model_override(facts);
         }
@@ -310,35 +308,6 @@ impl ModelConfig {
             ));
         }
         explicit
-    }
-}
-
-/// Serializable model-fact sidecar for an existing [`ModelConfig`].
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SourcedModelConfig {
-    pub config: ModelConfig,
-    #[serde(default)]
-    pub facts: ModelFactInputs,
-}
-
-impl SourcedModelConfig {
-    pub fn resolve_model_profile_at(&self, now: SystemTime) -> ModelProfileResolution {
-        self.config
-            .resolve_model_profile_with_facts_at(&self.facts, now)
-    }
-
-    pub fn apply_to_llm_config(
-        &self,
-        config: crate::llm::LlmConfig,
-    ) -> crate::llm::SourcedLlmConfig {
-        let mut sourced = crate::llm::SourcedLlmConfig {
-            config,
-            facts: self.facts.clone(),
-        };
-        for facts in self.config.explicit_model_facts_at(SystemTime::now()) {
-            sourced = sourced.with_model_override(facts);
-        }
-        sourced
     }
 }
 
@@ -404,7 +373,8 @@ mod tests {
     }
 
     #[test]
-    fn legacy_context_window_becomes_a_retained_explicit_fact() -> std::result::Result<(), String> {
+    fn current_context_window_remains_a_retained_explicit_fact() -> std::result::Result<(), String>
+    {
         let model = ModelConfig {
             provider: "custom".to_string(),
             name: "future-model".to_string(),
@@ -471,7 +441,7 @@ mod tests {
     }
 
     #[test]
-    fn model_config_fact_inputs_round_trip_without_legacy_fields() -> std::result::Result<(), String>
+    fn model_config_fact_inputs_round_trip_in_one_current_shape() -> std::result::Result<(), String>
     {
         let now = SystemTime::now();
         let config = ModelConfig {
@@ -499,8 +469,8 @@ mod tests {
             ..Default::default()
         });
         let encoded = serde_json::to_string(&config).map_err(|error| error.to_string())?;
-        let decoded = serde_json::from_str::<SourcedModelConfig>(&encoded)
-            .map_err(|error| error.to_string())?;
+        let decoded =
+            serde_json::from_str::<ModelConfig>(&encoded).map_err(|error| error.to_string())?;
         let resolution = decoded.resolve_model_profile_at(now);
         assert_eq!(resolution.profile.context_window, Some(32_000));
         assert!(
@@ -508,6 +478,166 @@ mod tests {
                 .applied_facts
                 .iter()
                 .any(|metadata| metadata.version == "model-v4")
+        );
+        let agent_config = AgentConfig::from(FrameworkConfig {
+            model: decoded,
+            agent: AgentSettings::default(),
+        });
+        assert!(agent_config.model_profile.as_ref().is_some_and(|receipt| {
+            receipt.applied_facts.iter().any(|fact| {
+                fact.version == "model-v4" && fact.provenance == "provider:/models/future-model"
+            })
+        }));
+        let agent = crate::agent::ReactAgent::new(agent_config);
+        let snapshot = crate::agent::snapshot::AgentRunSnapshot::from_agent(&agent);
+        assert_eq!(snapshot.config.token_limit, 32_000);
+        Ok(())
+    }
+
+    #[test]
+    fn current_model_facts_and_direct_window_have_independent_clear_semantics()
+    -> std::result::Result<(), String> {
+        let now = SystemTime::now();
+        let facts = ModelFactInputs {
+            exact_model_facts: Some(ModelFactSet::new(
+                ModelFactMetadata::new(
+                    ModelFactSource::ExactModel,
+                    "current:model-catalog",
+                    "current-facts-v1",
+                    now,
+                    None,
+                    ModelFactConfidence::VERIFIED,
+                ),
+                None,
+                ModelProfileOverride {
+                    context_window: Some(32_000),
+                    ..Default::default()
+                },
+            )),
+            ..Default::default()
+        };
+        let mut model = ModelConfig {
+            provider: "custom".into(),
+            name: "future-model".into(),
+            api_protocol: Some(LlmApiProtocol::Responses),
+            context_window: Some(8_192),
+            ..Default::default()
+        }
+        .with_model_facts(facts);
+        let explicit = model.resolve_model_profile_at(now);
+        assert_eq!(explicit.profile.context_window, Some(8_192));
+        assert!(
+            explicit
+                .applied_facts
+                .iter()
+                .any(|fact| fact.source == ModelFactSource::CallerOverride
+                    && fact.provenance == "FrameworkConfig::ModelConfig.context_window")
+        );
+        model.context_window = None;
+        let sourced = model.resolve_model_profile_at(now);
+        assert_eq!(sourced.profile.context_window, Some(32_000));
+        assert!(
+            sourced
+                .applied_facts
+                .iter()
+                .any(|fact| fact.provenance == "current:model-catalog"
+                    && fact.version == "current-facts-v1")
+        );
+        model = model.with_model_facts(ModelFactInputs::default());
+        let cleared = model.resolve_model_profile_at(now);
+        assert!(
+            cleared
+                .applied_facts
+                .iter()
+                .all(|fact| fact.provenance != "current:model-catalog")
+        );
+        model.context_window = Some(4_096);
+        let direct = model
+            .with_model_facts(ModelFactInputs::default())
+            .resolve_model_profile_at(now);
+        assert_eq!(direct.profile.context_window, Some(4_096));
+        Ok(())
+    }
+
+    #[test]
+    fn one_model_config_shape_rejects_the_retired_nested_sidecar() -> std::result::Result<(), String>
+    {
+        let model = ModelConfig {
+            provider: "custom".into(),
+            name: "future-model".into(),
+            ..Default::default()
+        }
+        .with_model_facts(ModelFactInputs::default());
+        let encoded = serde_json::to_value(&model).map_err(|error| error.to_string())?;
+        assert!(encoded.get("facts").is_some());
+        assert!(encoded.get("config").is_none());
+        let old = serde_json::json!({"config":encoded,"facts":{}});
+        assert!(serde_json::from_value::<ModelConfig>(old).is_err());
+        Ok(())
+    }
+    #[test]
+    fn current_fact_sources_reach_llm_config_without_a_sidecar() -> std::result::Result<(), String>
+    {
+        let now = SystemTime::now();
+        let facts = ModelFactInputs {
+            exact_model_facts: Some(ModelFactSet::new(
+                ModelFactMetadata::new(
+                    ModelFactSource::ExactModel,
+                    "current:provider-model",
+                    "source-v2",
+                    now,
+                    None,
+                    ModelFactConfidence::VERIFIED,
+                ),
+                None,
+                ModelProfileOverride {
+                    context_window: Some(32_000),
+                    ..Default::default()
+                },
+            )),
+            ..Default::default()
+        };
+        let model = ModelConfig {
+            provider: "custom".into(),
+            name: "future-model".into(),
+            api_protocol: Some(LlmApiProtocol::ChatCompletions),
+            ..Default::default()
+        }
+        .with_model_facts(facts.clone());
+        let llm = crate::llm::LlmConfig::for_provider(
+            "custom",
+            "https://example.invalid/v1",
+            "",
+            "future-model",
+            LlmApiProtocol::ChatCompletions,
+        )
+        .map_err(|error| error.to_string())?;
+        let sourced = model.apply_to_llm_config(llm.clone());
+        assert_eq!(
+            serde_json::to_value(&sourced.facts).map_err(|error| error.to_string())?,
+            serde_json::to_value(&facts).map_err(|error| error.to_string())?
+        );
+        let mut direct = model;
+        direct.context_window = Some(8_192);
+        let sourced = direct.apply_to_llm_config(llm);
+        assert!(
+            sourced
+                .facts
+                .exact_model_facts
+                .as_ref()
+                .is_some_and(|fact| fact.metadata.provenance == "current:provider-model"
+                    && fact.metadata.version == "source-v2")
+        );
+        assert!(
+            sourced
+                .facts
+                .model_overrides
+                .iter()
+                .any(
+                    |fact| fact.metadata.source == ModelFactSource::CallerOverride
+                        && fact.metadata.provenance
+                            == "FrameworkConfig::ModelConfig.context_window"
+                )
         );
         Ok(())
     }

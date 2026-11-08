@@ -12,23 +12,36 @@ use futures::future::BoxFuture;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use tokio::fs;
 use tree_sitter::{Language, Node, Parser};
 
 const MAX_SOURCE_BYTES: u64 = 2 * 1024 * 1024;
 
+#[derive(Clone)]
 pub struct RepoMapTool {
     base_dir: Option<PathBuf>,
+    file_system: std::sync::Arc<dyn echo_core::tools::filesystem::FileSystem>,
 }
 
 impl RepoMapTool {
+    pub fn with_file_system(
+        mut self,
+        file_system: std::sync::Arc<dyn echo_core::tools::filesystem::FileSystem>,
+    ) -> Self {
+        self.file_system = file_system;
+        self
+    }
+
     pub fn new() -> Self {
-        Self { base_dir: None }
+        Self {
+            base_dir: None,
+            file_system: std::sync::Arc::new(super::LocalFileSystem),
+        }
     }
 
     pub fn with_base_dir(base: impl Into<PathBuf>) -> Self {
         Self {
             base_dir: Some(base.into()),
+            file_system: std::sync::Arc::new(super::LocalFileSystem),
         }
     }
 }
@@ -90,9 +103,13 @@ impl Tool for RepoMapTool {
     fn execute_with_context<'a>(
         &'a self,
         parameters: ToolParameters,
-        context: &'a echo_core::tools::ToolContext,
+        ctx: &'a echo_core::tools::ToolContext,
     ) -> BoxFuture<'a, Result<ToolResult>> {
-        Box::pin(async move {
+        let this = self.clone();
+        let ctx = ctx.clone();
+        super::run_file_operation("repo_map", &ctx.clone(), move || {
+            let file_system = this.file_system.as_ref();
+            let cancel = ctx.cancel.as_deref();
             let path_value = parameters
                 .get("path")
                 .and_then(Value::as_str)
@@ -110,21 +127,48 @@ impl Tool for RepoMapTool {
                 Ok(request) => request,
                 Err(error) => return Ok(ToolResult::invalid_arguments(error.to_string())),
             };
-            let effective_base = self
+            let effective_base = this
                 .base_dir
                 .clone()
-                .or_else(|| context.working_dir.as_ref().map(|path| path.to_path_buf()));
-            let root = resolve_root(effective_base.as_deref(), path_value)?;
-            if !root.exists() {
+                .or_else(|| ctx.working_dir.as_ref().map(|path| path.to_path_buf()));
+            super::resolve_path(
+                file_system,
+                "repo_map",
+                path_value,
+                &this.base_dir,
+                ctx.working_dir.as_deref(),
+            )?;
+            let requested = Path::new(path_value);
+            let root = if requested.is_absolute() {
+                requested.to_path_buf()
+            } else {
+                effective_base
+                    .map(|base| base.join(requested))
+                    .unwrap_or_else(|| requested.to_path_buf())
+            };
+            // 一次调用共用一个只读会话，避免为每个目录重建传输。
+            let (built, session_reused) =
+                echo_core::tools::filesystem::with_read_session(file_system, |files| {
+                    if !files.exists(&root)? {
+                        return Ok(None);
+                    }
+                    let output = if format == "symbols" {
+                        build_symbol_map(files, cancel, &root, &this.base_dir, max_depth)?
+                    } else {
+                        build_tree(files, cancel, &root, &this.base_dir, max_depth)?
+                    };
+                    Ok(Some(output))
+                });
+            tracing::debug!(
+                tool = "repo_map",
+                reused = session_reused,
+                "repo map scope settled"
+            );
+            let Some(output) = built? else {
                 return Ok(ToolResult::invalid_arguments(format!(
                     "Path does not exist: {}",
                     root.display()
                 )));
-            }
-            let output = if format == "symbols" {
-                build_symbol_map(&root, max_depth).await?
-            } else {
-                build_tree(&root, max_depth).await?
             };
             let lines = if output.is_empty() {
                 Vec::new()
@@ -152,102 +196,119 @@ impl Tool for RepoMapTool {
     }
 }
 
-fn resolve_root(base: Option<&Path>, path_value: &str) -> Result<PathBuf> {
-    let requested = Path::new(path_value);
-    let Some(base) = base else {
-        return Ok(requested.to_path_buf());
-    };
-    let resolved = if requested.is_absolute() {
-        requested.to_path_buf()
-    } else {
-        base.join(requested)
-    };
-    if !resolved.starts_with(base) {
-        return Err(ToolError::InvalidParameter {
-            name: "path".to_string(),
-            message: format!("Path '{path_value}' is outside the allowed directory scope"),
-        }
-        .into());
-    }
-    Ok(resolved)
-}
-
-async fn build_tree(root: &Path, max_depth: usize) -> Result<String> {
+fn build_tree(
+    file_system: &dyn echo_core::tools::filesystem::FileSystem,
+    cancel: Option<&echo_core::agent::CancellationToken>,
+    root: &Path,
+    base_dir: &Option<PathBuf>,
+    max_depth: usize,
+) -> Result<String> {
+    super::check_file_cancel(cancel, "repo_map")?;
     let mut lines = Vec::new();
     let root_name = root
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or(".");
     lines.push(format!("{root_name}/"));
-    walk_tree(root, "", max_depth, 0, &mut lines).await?;
+    walk_tree(
+        file_system,
+        cancel,
+        root,
+        base_dir,
+        "",
+        (max_depth, 0),
+        &mut lines,
+    )?;
     Ok(lines.join("\n"))
 }
 
-fn walk_tree<'a>(
-    directory: &'a Path,
-    prefix: &'a str,
-    max_depth: usize,
-    depth: usize,
-    lines: &'a mut Vec<String>,
-) -> BoxFuture<'a, Result<()>> {
-    Box::pin(async move {
-        if depth >= max_depth {
-            return Ok(());
+fn walk_tree(
+    file_system: &dyn echo_core::tools::filesystem::FileSystem,
+    cancel: Option<&echo_core::agent::CancellationToken>,
+    directory: &Path,
+    base_dir: &Option<PathBuf>,
+    prefix: &str,
+    depth_range: (usize, usize),
+    lines: &mut Vec<String>,
+) -> Result<()> {
+    super::check_file_cancel(cancel, "repo_map")?;
+    let (max_depth, depth) = depth_range;
+    if depth >= max_depth {
+        return Ok(());
+    }
+    let mut entries = Vec::new();
+    let directory_entries = file_system.read_dir(directory).map_err(|error| {
+        super::file_error(error, |error| {
+            execution_error(format!("Cannot read directory: {error}"))
+        })
+    })?;
+    for entry in directory_entries {
+        let path = entry.path();
+        let name = path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or("")
+            .to_string();
+        if should_skip(&name) {
+            continue;
         }
-        let mut entries = Vec::new();
-        let mut directory_entries = fs::read_dir(directory)
-            .await
-            .map_err(|error| execution_error(format!("Cannot read directory: {error}")))?;
-        while let Ok(Some(entry)) = directory_entries.next_entry().await {
-            let path = entry.path();
-            let name = path
-                .file_name()
-                .and_then(|value| value.to_str())
-                .unwrap_or("")
-                .to_string();
-            if should_skip(&name) {
-                continue;
-            }
-            entries.push((name, path.clone(), path.is_dir()));
+        if base_dir.is_some() {
+            super::resolve_path_buf(file_system, "repo_map", &path, base_dir)?;
         }
-        entries.sort_by(|left, right| left.0.cmp(&right.0));
-        let entry_count = entries.len();
-        for (position, (name, path, is_directory)) in entries.into_iter().enumerate() {
-            let is_last = position.saturating_add(1) == entry_count;
-            let connector = if is_last { "└── " } else { "├── " };
-            let child_prefix = if is_last { "    " } else { "│   " };
-            if is_directory {
-                lines.push(format!("{prefix}{connector}{name}/"));
-                walk_tree(
-                    &path,
-                    &format!("{prefix}{child_prefix}"),
-                    max_depth,
-                    depth.saturating_add(1),
-                    lines,
-                )
-                .await?;
+        entries.push((name, path.clone(), file_system.is_dir(&path)?));
+    }
+    entries.sort_by(|left, right| left.0.cmp(&right.0));
+    let entry_count = entries.len();
+    for (position, (name, path, is_directory)) in entries.into_iter().enumerate() {
+        let is_last = position.saturating_add(1) == entry_count;
+        let connector = if is_last { "└── " } else { "├── " };
+        let child_prefix = if is_last { "    " } else { "│   " };
+        if is_directory {
+            lines.push(format!("{prefix}{connector}{name}/"));
+            walk_tree(
+                file_system,
+                cancel,
+                &path,
+                base_dir,
+                &format!("{prefix}{child_prefix}"),
+                (max_depth, depth.saturating_add(1)),
+                lines,
+            )?;
+        } else {
+            let symbol_count = if is_source_file(&name) {
+                extract_symbols(file_system, cancel, &path)?.len()
             } else {
-                let symbol_count = if is_source_file(&name) {
-                    extract_symbols(&path).await.len()
-                } else {
-                    0
-                };
-                if symbol_count > 0 {
-                    lines.push(format!(
-                        "{prefix}{connector}{name} ({symbol_count} symbols)"
-                    ));
-                } else {
-                    lines.push(format!("{prefix}{connector}{name}"));
-                }
+                0
+            };
+            if symbol_count > 0 {
+                lines.push(format!(
+                    "{prefix}{connector}{name} ({symbol_count} symbols)"
+                ));
+            } else {
+                lines.push(format!("{prefix}{connector}{name}"));
             }
         }
-        Ok(())
-    })
+    }
+    Ok(())
 }
 
-async fn build_symbol_map(root: &Path, max_depth: usize) -> Result<String> {
+fn build_symbol_map(
+    file_system: &dyn echo_core::tools::filesystem::FileSystem,
+    cancel: Option<&echo_core::agent::CancellationToken>,
+    root: &Path,
+    base_dir: &Option<PathBuf>,
+    max_depth: usize,
+) -> Result<String> {
+    super::check_file_cancel(cancel, "repo_map")?;
     let mut symbols = BTreeMap::new();
-    collect_symbols(root, max_depth, 0, &mut symbols).await?;
+    collect_symbols(
+        file_system,
+        cancel,
+        root,
+        base_dir,
+        (max_depth, 0),
+        &mut symbols,
+    )?;
     let mut lines = Vec::new();
     for (file, file_symbols) in symbols {
         if file_symbols.is_empty() {
@@ -260,58 +321,83 @@ async fn build_symbol_map(root: &Path, max_depth: usize) -> Result<String> {
     Ok(lines.join("\n"))
 }
 
-fn collect_symbols<'a>(
-    directory: &'a Path,
-    max_depth: usize,
-    depth: usize,
-    symbols: &'a mut BTreeMap<PathBuf, Vec<String>>,
-) -> BoxFuture<'a, Result<()>> {
-    Box::pin(async move {
-        if depth >= max_depth {
-            return Ok(());
+fn collect_symbols(
+    file_system: &dyn echo_core::tools::filesystem::FileSystem,
+    cancel: Option<&echo_core::agent::CancellationToken>,
+    directory: &Path,
+    base_dir: &Option<PathBuf>,
+    depth_range: (usize, usize),
+    symbols: &mut BTreeMap<PathBuf, Vec<String>>,
+) -> Result<()> {
+    super::check_file_cancel(cancel, "repo_map")?;
+    let (max_depth, depth) = depth_range;
+    if depth >= max_depth {
+        return Ok(());
+    }
+    let entries = file_system.read_dir(directory).map_err(|error| {
+        super::file_error(error, |error| {
+            execution_error(format!("Cannot read directory: {error}"))
+        })
+    })?;
+    for entry in entries {
+        super::check_file_cancel(cancel, "repo_map")?;
+        let path = entry.path();
+        let name = path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or("");
+        if should_skip(name) {
+            continue;
         }
-        let mut entries = fs::read_dir(directory)
-            .await
-            .map_err(|error| execution_error(format!("Cannot read directory: {error}")))?;
-        while let Ok(Some(entry)) = entries.next_entry().await {
-            let path = entry.path();
-            let name = path
-                .file_name()
-                .and_then(|value| value.to_str())
-                .unwrap_or("");
-            if should_skip(name) {
-                continue;
-            }
-            if path.is_dir() {
-                collect_symbols(&path, max_depth, depth.saturating_add(1), symbols).await?;
-            } else if is_source_file(name) {
-                let extracted = extract_symbols(&path).await;
-                if !extracted.is_empty() {
-                    symbols.insert(path, extracted);
-                }
+        if base_dir.is_some() {
+            super::resolve_path_buf(file_system, "repo_map", &path, base_dir)?;
+        }
+        if file_system.is_dir(&path)? {
+            collect_symbols(
+                file_system,
+                cancel,
+                &path,
+                base_dir,
+                (max_depth, depth.saturating_add(1)),
+                symbols,
+            )?;
+        } else if is_source_file(name) {
+            let extracted = extract_symbols(file_system, cancel, &path)?;
+            if !extracted.is_empty() {
+                symbols.insert(path, extracted);
             }
         }
-        Ok(())
-    })
+    }
+    Ok(())
 }
 
-async fn extract_symbols(path: &Path) -> Vec<String> {
-    let metadata = match fs::metadata(path).await {
+fn extract_symbols(
+    file_system: &dyn echo_core::tools::filesystem::FileSystem,
+    cancel: Option<&echo_core::agent::CancellationToken>,
+    path: &Path,
+) -> Result<Vec<String>> {
+    super::check_file_cancel(cancel, "repo_map")?;
+    let metadata = match file_system.metadata(path) {
         Ok(metadata) if metadata.len() <= MAX_SOURCE_BYTES => metadata,
-        _ => return Vec::new(),
+        Ok(_) | Err(echo_core::error::ReactError::Io(_)) => return Ok(Vec::new()),
+        Err(error) => return Err(error),
     };
     if !metadata.is_file() {
-        return Vec::new();
+        return Ok(Vec::new());
     }
-    let source = match fs::read_to_string(path).await {
+    let source = match file_system.read_to_string(path) {
         Ok(source) => source,
-        Err(_) => return Vec::new(),
+        Err(echo_core::error::ReactError::Io(_)) => return Ok(Vec::new()),
+        Err(error) => return Err(error),
     };
     let extension = path
         .extension()
         .and_then(|value| value.to_str())
         .unwrap_or("");
-    extract_ast_symbols(extension, &source).unwrap_or_else(|| extract_fallback_symbols(&source))
+    Ok(
+        extract_ast_symbols(extension, &source)
+            .unwrap_or_else(|| extract_fallback_symbols(&source)),
+    )
 }
 
 fn extract_ast_symbols(extension: &str, source: &str) -> Option<Vec<String>> {
@@ -516,6 +602,7 @@ mod tests {
         let source = r#"
 pub fn hello() {}
 impl Demo { pub async fn run(&self) {} }
+#[derive(Clone)]
 pub struct Demo;
 enum State { Ready }
 trait Service {}

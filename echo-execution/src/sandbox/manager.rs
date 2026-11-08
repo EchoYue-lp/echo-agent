@@ -73,6 +73,11 @@ impl SandboxExecutor for SandboxManager {
         })
     }
 
+    fn supports_physical_resource_ownership(&self) -> bool {
+        // 声明受检查的路由合同；资格取实际 select_executor 返回的同一 Arc。
+        true
+    }
+
     fn execute(&self, command: SandboxCommand) -> BoxFuture<'_, Result<ExecutionResult>> {
         Box::pin(async move { SandboxManager::execute(self, command).await })
     }
@@ -84,6 +89,9 @@ impl SandboxExecutor for SandboxManager {
         Box::pin(async move {
             let required = self.policy.evaluate(&command);
             let executor = self.select_executor(required).await?;
+            command.ensure_physical_resource_ownership(
+                executor.supports_physical_resource_ownership(),
+            )?;
             let actual = executor.isolation_level();
             if actual < required
                 && (!self.allow_fallback
@@ -335,6 +343,8 @@ impl SandboxManager {
     ) -> Result<(ExecutionResult, IsolationLevel)> {
         // 选择满足要求的最佳执行器
         let executor = self.select_executor(required).await?;
+        command
+            .ensure_physical_resource_ownership(executor.supports_physical_resource_ownership())?;
 
         // 当允许 fallback 时，可能会选择低于所需隔离级别的执行器。
         let actual = executor.isolation_level();
@@ -480,6 +490,108 @@ fn stream_failure_from_react_error(error: &ReactError) -> super::SandboxStreamFa
 mod tests {
     use super::*;
     use futures::StreamExt;
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn final_selected_leaf_and_fallback_reject_required_ownership_before_workload_create()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        use super::super::policy::SecurityLevel;
+        for (level, allow_fallback) in [
+            (SecurityLevel::Strict, false),
+            (SecurityLevel::Maximum, true),
+        ] {
+            let root = std::env::temp_dir()
+                .join(format!("native-router-capability-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir_all(&root)?;
+            let program = root.join("docker");
+            std::fs::write(root.join("docker.mode"), "normal\n")?;
+            // 复用原 immutable CLI fixture，避免复制可执行脚本／全局 PATH／ETXTBSY。
+            std::os::unix::fs::symlink(
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("tests/fixtures/fake-docker.sh"),
+                &program,
+            )?;
+            let manager = SandboxManager {
+                local: Arc::new(LocalSandbox::new(LocalConfig {
+                    enable_os_sandbox: false,
+                    ..LocalConfig::default()
+                })),
+                docker: Some(Arc::new(DockerSandbox::with_program(
+                    DockerConfig::default(),
+                    program,
+                ))),
+                k8s: None,
+                policy: SandboxPolicy {
+                    default_level: level,
+                    auto_escalate: false,
+                    ..SandboxPolicy::default()
+                },
+                allow_fallback,
+            };
+            assert!(
+                manager.supports_physical_resource_ownership(),
+                "router must enforce its final leaf contract"
+            );
+            let mut outcomes = Vec::new();
+            for entry in 0..5 {
+                let mut command = SandboxCommand::shell("echo must-not-create");
+                command.require_physical_resource_ownership = true;
+                let result = match entry {
+                    0 => manager.execute(command).await.map(|_| ()),
+                    1 => manager
+                        .execute_with_limits(command, ResourceLimits::unrestricted())
+                        .await
+                        .map(|_| ()),
+                    2 => SandboxExecutor::execute_with_limits_and_cancel(
+                        &manager,
+                        command,
+                        ResourceLimits::unrestricted(),
+                        None,
+                    )
+                    .await
+                    .map(|_| ()),
+                    3 => manager
+                        .execute_with_isolation_receipt(
+                            command,
+                            ResourceLimits::unrestricted(),
+                            None,
+                        )
+                        .await
+                        .map(|_| ()),
+                    _ => manager.execute_stream(command).await.map(|_| ()),
+                };
+                let rejected = matches!(&result, Err(ReactError::Sandbox(error))
+                    if matches!(error.as_ref(), SandboxError::Unavailable(message) if message.contains("physical resource ownership")));
+                outcomes.push((entry, rejected, result.err().map(|error| error.to_string())));
+            }
+            let rejected_operations = std::fs::read_to_string(root.join("docker.log"))?;
+            // 同一实际路由去掉新要求，必须保留原 fake-CLI workload 路径；不授容器 live 资格。
+            let legacy = manager
+                .execute(SandboxCommand::shell("echo legacy-no-requirement"))
+                .await;
+            let all_operations = std::fs::read_to_string(root.join("docker.log"))?;
+            eprintln!(
+                "native resource routing: level={level:?}; fallback={allow_fallback}; outcomes={outcomes:?}; rejected_ops={rejected_operations:?}; all_ops={all_operations:?}"
+            );
+            std::fs::remove_dir_all(root)?;
+            assert!(outcomes.iter().all(|(_, rejected, _)| *rejected));
+            assert!(
+                rejected_operations
+                    .lines()
+                    .all(|operation| operation == "info"),
+                "unsupported selected leaf created a workload"
+            );
+            assert!(legacy?.success());
+            assert!(
+                all_operations
+                    .lines()
+                    .any(|operation| operation == "create")
+            );
+            assert!(all_operations.lines().any(|operation| operation == "start"));
+            assert!(all_operations.lines().any(|operation| operation == "rm"));
+        }
+        Ok(())
+    }
 
     #[test]
     fn test_local_only() {

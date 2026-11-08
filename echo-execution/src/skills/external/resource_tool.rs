@@ -41,6 +41,122 @@ impl ReadSkillResourceTool {
         self.max_resource_bytes = bytes;
         self
     }
+    fn execute_in_context<'a>(
+        &'a self,
+        parameters: ToolParameters,
+        context: Option<&'a echo_core::tools::ToolContext>,
+    ) -> BoxFuture<'a, Result<ToolResult>> {
+        Box::pin(async move {
+            let skill_name = parameters
+                .get("skill_name")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| ToolError::MissingParameter("skill_name".to_string()))?
+                .to_string();
+
+            let rel_path = parameters
+                .get("path")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| ToolError::MissingParameter("path".to_string()))?
+                .to_string();
+
+            // Path safety check using Path::components (robust against encoded traversal)
+            let rel_path_obj = std::path::Path::new(&rel_path);
+            if !is_path_traversal_safe(rel_path_obj) {
+                return Ok(ToolResult::error(
+                    "Path traversal ('..') is not allowed in resource paths",
+                ));
+            }
+
+            let registry = self.registry.read().await;
+
+            if !registry.is_activated(&skill_name) {
+                return Ok(ToolResult::error(format!(
+                    "Skill '{}' has not been activated. Call activate_skill first.",
+                    skill_name
+                )));
+            }
+
+            let descriptor = match registry.get_descriptor(&skill_name) {
+                Some(d) => d.clone(),
+                None => {
+                    return Ok(ToolResult::error(format!(
+                        "Skill '{}' not found in catalog",
+                        skill_name
+                    )));
+                }
+            };
+
+            let source = registry.file_source(&skill_name).for_invocation(context);
+            // An in-flight read keeps its admitted origin even if the registry
+            // later replaces a descriptor or the GUI selects another project.
+            drop(registry);
+
+            if !descriptor.permits_tool(self.name()) {
+                return Ok(ToolResult::error(format!(
+                    "Skill '{}' does not permit tool '{}'; allowed-tools: {}",
+                    skill_name,
+                    self.name(),
+                    descriptor.allowed_tools.join(", ")
+                )));
+            }
+
+            let skill_dir = match descriptor.location.parent() {
+                Some(d) => d,
+                None => {
+                    return Ok(ToolResult::error(format!(
+                        "Cannot determine skill directory for '{}'",
+                        skill_name
+                    )));
+                }
+            };
+
+            // Canonicalize skill dir first (must exist)
+            let canonical_skill = source.canonicalize(skill_dir).await?;
+
+            // Check existence before canonicalizing the resource path
+            let resource_path = skill_dir.join(&rel_path);
+            if !source.is_file(&resource_path).await? {
+                return Ok(ToolResult::error(format!(
+                    "Resource file not found: {} (in skill '{}')",
+                    rel_path, skill_name
+                )));
+            }
+
+            // Verify the resolved path is still under the skill directory
+            let canonical_resource = source.canonicalize(&resource_path).await?;
+            if !canonical_resource.starts_with(&canonical_skill) {
+                return Ok(ToolResult::error(
+                    "Resolved path escapes the skill directory",
+                ));
+            }
+
+            let metadata = source.metadata(&canonical_resource).await?;
+
+            if metadata.len() > self.max_resource_bytes as u64 {
+                return Ok(ToolResult::error(format!(
+                    "Resource file '{}' exceeds maximum size ({} bytes, limit: {} bytes)",
+                    rel_path,
+                    metadata.len(),
+                    self.max_resource_bytes
+                )));
+            }
+
+            match source.read_to_string(&canonical_resource).await {
+                Ok(content) => {
+                    let header = format!(
+                        "<skill_resource skill=\"{}\" path=\"{}\">\n",
+                        skill_name, rel_path
+                    );
+                    let footer = "\n</skill_resource>";
+                    Ok(ToolResult::success(format!(
+                        "{}{}{}",
+                        header, content, footer
+                    )))
+                }
+                Err(error) => Err(error),
+            }
+        })
+    }
 }
 
 impl Tool for ReadSkillResourceTool {
@@ -74,134 +190,15 @@ impl Tool for ReadSkillResourceTool {
     }
 
     fn execute(&self, parameters: ToolParameters) -> BoxFuture<'_, Result<ToolResult>> {
-        Box::pin(async move {
-            let skill_name = parameters
-                .get("skill_name")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| ToolError::MissingParameter("skill_name".to_string()))?
-                .to_string();
+        self.execute_in_context(parameters, None)
+    }
 
-            let rel_path = parameters
-                .get("path")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| ToolError::MissingParameter("path".to_string()))?
-                .to_string();
-
-            // Path safety check using Path::components (robust against encoded traversal)
-            let rel_path_obj = std::path::Path::new(&rel_path);
-            if !is_path_traversal_safe(rel_path_obj) {
-                return Ok(ToolResult::error(
-                    "Path traversal ('..') is not allowed in resource paths",
-                ));
-            }
-
-            let registry = self.registry.read().await;
-
-            if !registry.is_activated(&skill_name) {
-                return Ok(ToolResult::error(format!(
-                    "Skill '{}' has not been activated. Call activate_skill first.",
-                    skill_name
-                )));
-            }
-
-            let descriptor = match registry.get_descriptor(&skill_name) {
-                Some(d) => d,
-                None => {
-                    return Ok(ToolResult::error(format!(
-                        "Skill '{}' not found in catalog",
-                        skill_name
-                    )));
-                }
-            };
-
-            if !descriptor.permits_tool(self.name()) {
-                return Ok(ToolResult::error(format!(
-                    "Skill '{}' does not permit tool '{}'; allowed-tools: {}",
-                    skill_name,
-                    self.name(),
-                    descriptor.allowed_tools.join(", ")
-                )));
-            }
-
-            let skill_dir = match descriptor.location.parent() {
-                Some(d) => d,
-                None => {
-                    return Ok(ToolResult::error(format!(
-                        "Cannot determine skill directory for '{}'",
-                        skill_name
-                    )));
-                }
-            };
-
-            // Canonicalize skill dir first (must exist)
-            let canonical_skill =
-                skill_dir
-                    .canonicalize()
-                    .map_err(|_| ToolError::ExecutionFailed {
-                        tool: self.name().to_string(),
-                        message: format!("Cannot resolve skill directory for '{}'", skill_name),
-                    })?;
-
-            // Check existence before canonicalizing the resource path
-            let resource_path = skill_dir.join(&rel_path);
-            if !resource_path.exists() {
-                return Ok(ToolResult::error(format!(
-                    "Resource file not found: {} (in skill '{}')",
-                    rel_path, skill_name
-                )));
-            }
-
-            // Verify the resolved path is still under the skill directory
-            let canonical_resource =
-                resource_path
-                    .canonicalize()
-                    .map_err(|_| ToolError::ExecutionFailed {
-                        tool: self.name().to_string(),
-                        message: "Cannot resolve resource path".to_string(),
-                    })?;
-            if !canonical_resource.starts_with(&canonical_skill) {
-                return Ok(ToolResult::error(
-                    "Resolved path escapes the skill directory",
-                ));
-            }
-
-            let metadata = match tokio::fs::metadata(&resource_path).await {
-                Ok(m) => m,
-                Err(e) => {
-                    return Ok(ToolResult::error(format!(
-                        "Cannot stat resource '{}': {}",
-                        rel_path, e
-                    )));
-                }
-            };
-
-            if metadata.len() > self.max_resource_bytes as u64 {
-                return Ok(ToolResult::error(format!(
-                    "Resource file '{}' exceeds maximum size ({} bytes, limit: {} bytes)",
-                    rel_path,
-                    metadata.len(),
-                    self.max_resource_bytes
-                )));
-            }
-
-            match tokio::fs::read_to_string(&resource_path).await {
-                Ok(content) => {
-                    let header = format!(
-                        "<skill_resource skill=\"{}\" path=\"{}\">\n",
-                        skill_name, rel_path
-                    );
-                    let footer = "\n</skill_resource>";
-                    Ok(ToolResult::success(format!(
-                        "{}{}{}",
-                        header, content, footer
-                    )))
-                }
-                Err(e) => Ok(ToolResult::error(format!(
-                    "Failed to read '{}' in skill '{}': {}",
-                    rel_path, skill_name, e
-                ))),
-            }
-        })
+    fn execute_with_context<'a>(
+        &'a self,
+        parameters: ToolParameters,
+        context: &'a echo_core::tools::ToolContext,
+    ) -> BoxFuture<'a, Result<ToolResult>> {
+        self.execute_in_context(parameters, Some(context))
     }
 }
 
@@ -211,8 +208,12 @@ impl Tool for ReadSkillResourceTool {
 /// encoded or unusual traversal attempts.
 fn is_path_traversal_safe(path: &std::path::Path) -> bool {
     use std::path::Component;
-    path.components()
-        .all(|c| !matches!(c, Component::ParentDir))
+    path.components().all(|c| {
+        !matches!(
+            c,
+            Component::ParentDir | Component::RootDir | Component::Prefix(_)
+        )
+    })
 }
 
 #[cfg(test)]

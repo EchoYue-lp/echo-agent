@@ -526,7 +526,7 @@ impl AdaptiveCompressor {
             match llm
                 .chat(echo_core::llm::ChatRequest {
                     messages: vec![Message::user(prompt)],
-                    temperature: Some(0.3),
+                    temperature: None,
                     max_tokens: Some(2048),
                     tools: None,
                     tool_choice: None,
@@ -733,6 +733,35 @@ impl super::ContextCompressor for AdaptiveCompressor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn implicit_temperature_is_absent_from_adaptive_l4_summary() {
+        let llm =
+            crate::compression::compressor::summary::tests::TemperatureRecordingSummaryLlm::default(
+            );
+        let compressor = AdaptiveCompressor::new(AdaptiveCompressionConfig {
+            l4_keep_recent: 1,
+            ..Default::default()
+        });
+        let mut messages = vec![
+            Message::user("older context".into()),
+            Message::assistant("older answer".into()),
+            Message::user("current".into()),
+        ];
+        assert!(
+            compressor
+                .apply_l4_compact(&mut messages, &llm, None, None)
+                .await
+                .2
+                .is_some()
+        );
+        assert_eq!(
+            *llm.temperatures
+                .lock()
+                .unwrap_or_else(|error| error.into_inner()),
+            vec![None]
+        );
+    }
 
     fn make_msg(role: Role, text: &str) -> Message {
         Message {

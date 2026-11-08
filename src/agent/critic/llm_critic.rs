@@ -140,7 +140,7 @@ impl LlmCritic {
             .client
             .chat(ChatRequest {
                 messages: messages.to_vec(),
-                temperature: Some(0.3),
+                temperature: None,
                 max_tokens: Some(2048u32),
                 response_format,
                 user_id: self.cache_user_id.clone(),
@@ -308,6 +308,20 @@ mod tests {
     use crate::error::LlmError;
     use crate::testing::MockLlmClient;
     use std::time::Duration;
+
+    #[tokio::test]
+    async fn implicit_temperature_is_absent_from_critic_request() -> Result<()> {
+        let client = Arc::new(MockLlmClient::new().with_response("ok"));
+        let critic = LlmCritic::new(client.clone());
+        assert_eq!(
+            critic
+                .call_llm_once(&[Message::user("check".into())], None)
+                .await?,
+            "ok"
+        );
+        assert_eq!(client.all_temperatures(), vec![None]);
+        Ok(())
+    }
 
     fn critic_for_model(model: &str) -> LlmCritic {
         LlmCritic::new(Arc::new(

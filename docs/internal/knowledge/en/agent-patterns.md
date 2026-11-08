@@ -42,49 +42,31 @@ ReAct (Reasoning + Acting) was proposed by Yao et al. in 2022 [1], interleaving 
 │          ▲                                        │          │
 │          └────────────────────────────────────────┘          │
 │                                                              │
-│   Termination: Generate Final Answer or reach max iterations │
+│   结束观察: 原运行时结算；迭代预算耗尽走失败                 │
 └─────────────────────────────────────────────────────────────┘
 ```
 
-### echo-agent Implementation
+### echo-agent 的实际执行链
 
-```rust
-// src/agents/react/run.rs
-pub async fn run_react_loop(&mut self, task: &str) -> Result<String> {
-    loop {
-        // 1. Think: Call LLM to generate next step
-        let response = self.think().await?;
-        
-        match response.step_type {
-            StepType::FinalAnswer(answer) => {
-                // Termination condition reached
-                return Ok(answer);
-            }
-            StepType::ToolCalls(calls) => {
-                // 2. Act: Execute tools
-                for call in calls {
-                    let result = self.tool_manager.execute(&call).await?;
-                    // 3. Observe: Add result to context
-                    self.context.push_tool_result(call.id, result);
-                }
-            }
-        }
-        
-        // Check max iterations
-        if iterations >= self.config.max_iterations {
-            return Err(ReactError::MaxIterationsExceeded);
-        }
-    }
-}
+```text
+ReactAgentBuilder::build → ReactAgent::new
+  → run_stream_channel 的同一 ReAct 主循环
+  → run_think 保留原生 reasoning/assistant blocks 与工具调用
+  → 有工具时 run_tools 执行通用 pipeline，并回到同一主循环
+  → 无工具的完整最终候选进入 verify_final_text
+  → emit_final_text 经 Guard/Critic、Stop、持久化及原 owner 结算后发布
 ```
 
-### Chain-of-Thought (CoT) Enhancement
+Stop 要求继续时回到原主循环；块完成、assistant 的 final_answer phase 或普通工具结果
+均不单独签发成功。最后 ExecutionStatus 和原流 EOF 是执行观察边界，应用 TaskRun/Goal
+是否完成继续由应用原权威裁决。此处不另给一个根据工具名结束的伪执行器。
 
-echo-agent enables CoT by default, requiring the LLM to describe its reasoning in natural language before making tool calls:
+### 原生推理与工具调用
 
-```rust
-const COT_INSTRUCTION: &str = "Before calling a tool, briefly describe your analysis and execution plan in text.";
-```
+echo-agent 不再注入工具前强制分析提示，也不注册 `ThinkTool`／`FinalAnswerTool` 控制工具。
+模型原生推理通过 `ThinkingConfig`／`ReactAgent::set_thinking()` 配置；签名与 opaque
+内容保留在原生 reasoning 块中。普通 assistant 正文与推理分别传递，最终候选仍须经过
+原 Guard、Critic、Stop Hook、持久化和运行时结算，不能由普通同名工具决定结束。
 
 ### Suitable Scenarios
 

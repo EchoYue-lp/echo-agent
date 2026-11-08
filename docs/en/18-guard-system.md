@@ -13,32 +13,7 @@ pass, warn, block, or transform content where transformation is permitted.
 | `ToolOutput` | Tool result before output budgeting and terminal observation | Allowed |
 | `Output` | Model text final answer before callbacks and delivery | Allowed |
 
-`final_answer` tool results are checked as `ToolOutput` only. They are not
-checked again as `Output` after entering the transcript. Guard backend errors
-fail closed rather than becoming warnings. ToolInput transforms are rejected
-because an approval receipt is bound to the unchanged effective arguments.
-Text-answer `Token` and `FinalAnswer` events carry the same guarded content;
-partial content from a failed provider is also checked before `Token` delivery.
-When a GuardManager is configured, streaming tool chunks and progress are
-suppressed. The caller receives the guarded and budgeted terminal `ToolResult`;
-without a GuardManager, live stdout/stderr streaming is unchanged. For failed tools
-with no output, the guarded diagnostic is used consistently in the returned
-error, trace, audit, callback, and transcript.
-Structured data, non-empty metadata, content-bearing result kind, and MIME type
-are checked separately as canonical text. `Pass` retains a checked structure;
-if any field is blocked or transformed, parallel renderable fields that cannot
-be reconstructed from guarded text are retired. Image URLs/model rich content
-and pre-guard artifact references are suppressed whenever a Guard is configured,
-even on `Pass`, because text checks cannot prove their pixels or unseen bytes
-safe. Typed failure and confirmed effects remain. User-installed PostToolUse
-hooks run before this presentation guard and may see the raw result; they are
-not a sanitized consumer boundary.
-The free-text `ToolFailure.postcondition` and `idempotency_key` are also checked.
-A changed key is removed, never replaced with a fabricated retry identity.
-If a post-use hook blocks with a reason containing raw output, the guarded
-`ToolResult.error` is the reason returned to the caller and skill telemetry.
-Confirmed typed effect paths remain visible to caller and Trace under ADR 0074;
-Guard does not generically redact those recovery facts.
+原生最终候选按 `Output` 检查，工具结果按 `ToolOutput` 检查。新执行不使用控制工具或 Token/Think 边界推断文字类型；整段校验不提前公开候选，协议原件与批准呈现投影分开保留。详见[原生消息合同](../zh/43-native-message-execution.md)。
 
 ---
 

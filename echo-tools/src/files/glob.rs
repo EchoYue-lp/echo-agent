@@ -8,7 +8,6 @@ use echo_core::tools::{Tool, ToolParameters, ToolResult};
 use futures::future::BoxFuture;
 use serde_json::{Value, json};
 use std::path::PathBuf;
-use tokio::fs;
 
 // ── GlobTool ────────────────────────────────────────────────────────────────
 
@@ -16,18 +15,32 @@ use tokio::fs;
 ///
 /// Walks the directory tree from `path` (default: `.`) and returns
 /// file paths matching the `pattern` glob (e.g. `**/*.rs`, `src/**/*.ts`).
+#[derive(Clone)]
 pub struct GlobTool {
     base_dir: Option<PathBuf>,
+    file_system: std::sync::Arc<dyn echo_core::tools::filesystem::FileSystem>,
 }
 
 impl GlobTool {
+    pub fn with_file_system(
+        mut self,
+        file_system: std::sync::Arc<dyn echo_core::tools::filesystem::FileSystem>,
+    ) -> Self {
+        self.file_system = file_system;
+        self
+    }
+
     pub fn new() -> Self {
-        Self { base_dir: None }
+        Self {
+            base_dir: None,
+            file_system: std::sync::Arc::new(super::LocalFileSystem),
+        }
     }
 
     pub fn with_base_dir(base: impl Into<PathBuf>) -> Self {
         Self {
             base_dir: Some(base.into()),
+            file_system: std::sync::Arc::new(super::LocalFileSystem),
         }
     }
 }
@@ -44,7 +57,7 @@ impl Tool for GlobTool {
     }
 
     fn description(&self) -> &str {
-        "Find files by name pattern. Returns file paths matching a glob pattern (e.g. '**/*.rs', 'src/**/*.ts', '*.md'). Supports ** for recursive directory matching."
+        "Find file paths by glob; ** recurses."
     }
 
     fn permissions(&self) -> Vec<echo_core::tools::permission::ToolPermission> {
@@ -60,21 +73,21 @@ impl Tool for GlobTool {
             "properties": {
                 "pattern": {
                     "type": "string",
-                    "description": "Glob pattern to match file names (e.g. '**/*.rs', 'src/**/*.ts', '*.md')"
+                    "description": "Filename glob."
                 },
                 "path": {
                     "type": "string",
-                    "description": "Directory to search in (default: current directory)"
+                    "description": "Search directory; default cwd."
                 },
                 "limit": {
                     "type": "integer",
                     "minimum": 1,
                     "maximum": 200,
-                    "description": "Results per page (default 100)"
+                    "description": "Results/page; default 100."
                 },
                 "cursor": {
                     "type": "string",
-                    "description": "Cursor from the previous page"
+                    "description": "Prior cursor."
                 }
             },
             "required": ["pattern"]
@@ -86,7 +99,11 @@ impl Tool for GlobTool {
         parameters: ToolParameters,
         ctx: &'a echo_core::tools::ToolContext,
     ) -> BoxFuture<'a, Result<ToolResult>> {
-        Box::pin(async move {
+        let this = self.clone();
+        let ctx = ctx.clone();
+        super::run_file_operation("glob", &ctx.clone(), move || {
+            let file_system = this.file_system.as_ref();
+            let cancel = ctx.cancel.as_deref();
             let pattern_str = parameters
                 .get("pattern")
                 .and_then(|v| v.as_str())
@@ -105,44 +122,69 @@ impl Tool for GlobTool {
             // Effective base: construction-time base_dir (with confinement)
             // takes priority; otherwise fall back to runtime working_dir
             // (CWD override, no confinement check).
-            let effective_base: Option<PathBuf> = self
+            let effective_base: Option<PathBuf> = this
                 .base_dir
                 .clone()
                 .or_else(|| ctx.working_dir.as_ref().map(|p| p.to_path_buf()));
 
             let search_path = if let Some(ref base) = effective_base {
-                let resolved = if std::path::Path::new(path_str).is_absolute() {
+                if std::path::Path::new(path_str).is_absolute() {
                     PathBuf::from(path_str)
                 } else {
                     base.join(path_str)
-                };
-                if !resolved.starts_with(base) {
-                    return Ok(ToolResult::invalid_arguments(format!(
-                        "Path '{}' is outside the allowed directory scope",
-                        path_str
-                    )));
                 }
-                resolved
             } else {
                 PathBuf::from(path_str)
             };
 
-            if !search_path.exists() {
-                return Ok(ToolResult::invalid_arguments(format!(
-                    "Path does not exist: {}",
-                    search_path.display()
-                )));
+            // 仅显式构造根启用范围校验；无根时保留 provider 的相对根形状，
+            // 不额外要求 current_dir/canonicalize，matcher 与输出继续使用原路径。
+            if this.base_dir.is_some() {
+                super::resolve_path(
+                    file_system,
+                    "glob",
+                    path_str,
+                    &this.base_dir,
+                    ctx.working_dir.as_deref(),
+                )?;
             }
 
-            if !search_path.is_dir() {
-                return Ok(ToolResult::invalid_arguments(format!(
-                    "Path is not a directory: {}",
-                    search_path.display()
-                )));
-            }
-
+            // 一次调用共用一个只读会话：支持会话的提供者因此不会为每个
+            // 目录重新建立传输；不支持的提供者行为与逐次读取一致。
             let mut results = Vec::new();
-            walk_glob(&search_path, pattern_str, &mut results).await;
+            let (walked, session_reused) =
+                echo_core::tools::filesystem::with_read_session(file_system, |files| {
+                    if !files.exists(&search_path)? {
+                        return Ok(Err(ToolResult::invalid_arguments(format!(
+                            "Path does not exist: {}",
+                            search_path.display()
+                        ))));
+                    }
+                    if !files.is_dir(&search_path)? {
+                        return Ok(Err(ToolResult::invalid_arguments(format!(
+                            "Path is not a directory: {}",
+                            search_path.display()
+                        ))));
+                    }
+                    walk_glob(
+                        files,
+                        cancel,
+                        &search_path,
+                        &search_path,
+                        &this.base_dir,
+                        pattern_str,
+                        &mut results,
+                    )?;
+                    Ok(Ok(()))
+                });
+            tracing::debug!(
+                tool = "glob",
+                reused = session_reused,
+                "glob search scope settled"
+            );
+            if let Err(early_result) = walked? {
+                return Ok(early_result);
+            }
             let query = serde_json::json!({
                 "pattern": pattern_str,
                 "path": search_path,
@@ -168,21 +210,33 @@ impl Tool for GlobTool {
     }
 }
 
-async fn walk_glob(dir: &std::path::Path, pattern: &str, results: &mut Vec<String>) {
-    let mut entries = match fs::read_dir(dir).await {
+fn walk_glob(
+    file_system: &dyn echo_core::tools::filesystem::FileSystem,
+    cancel: Option<&echo_core::agent::CancellationToken>,
+    dir: &std::path::Path,
+    search_root: &std::path::Path,
+    base_dir: &Option<PathBuf>,
+    pattern: &str,
+    results: &mut Vec<String>,
+) -> Result<()> {
+    super::check_file_cancel(cancel, "glob")?;
+    let entries = match file_system.read_dir(dir) {
         Ok(e) => e,
-        Err(_) => return,
+        Err(echo_core::error::ReactError::Io(_)) => return Ok(()),
+        Err(error) => return Err(error),
     };
 
     let mut entry_paths: Vec<PathBuf> = Vec::new();
-    while let Ok(Some(entry)) = entries.next_entry().await {
+    for entry in entries {
+        super::check_file_cancel(cancel, "glob")?;
         entry_paths.push(entry.path());
     }
     entry_paths.sort();
 
     for path in entry_paths {
+        super::check_file_cancel(cancel, "glob")?;
         // Skip hidden and common ignored directories
-        if path.is_dir()
+        if file_system.is_dir(&path)?
             && let Some(name) = path.file_name().and_then(|n| n.to_str())
             && (name.starts_with('.')
                 || name == "target"
@@ -196,15 +250,27 @@ async fn walk_glob(dir: &std::path::Path, pattern: &str, results: &mut Vec<Strin
             continue;
         }
 
-        if path.is_dir() {
-            Box::pin(walk_glob(&path, pattern, results)).await;
-        } else if path.is_file()
+        if base_dir.is_some() {
+            super::resolve_path_buf(file_system, "glob", &path, base_dir)?;
+        }
+        if file_system.is_dir(&path)? {
+            walk_glob(
+                file_system,
+                cancel,
+                &path,
+                search_root,
+                base_dir,
+                pattern,
+                results,
+            )?;
+        } else if file_system.is_file(&path)?
             && let Some(name) = path.file_name().and_then(|n| n.to_str())
-            && glob_pattern_matches(pattern, name, &path)
+            && glob_pattern_matches(pattern, name, &path, search_root)
         {
             results.push(path.display().to_string());
         }
     }
+    Ok(())
 }
 
 /// Match a glob pattern against a file name.
@@ -215,72 +281,93 @@ async fn walk_glob(dir: &std::path::Path, pattern: &str, results: &mut Vec<Strin
 /// - `?` matches any single character
 /// - `{a,b}` matches a or b
 /// - `[abc]` matches any character in the set
-fn glob_pattern_matches(pattern: &str, name: &str, full_path: &std::path::Path) -> bool {
-    // Handle ** patterns (recursive) — they match at any directory level
-    if pattern.contains("**") {
-        return glob_with_doublestar(pattern, full_path);
+fn glob_pattern_matches(
+    pattern: &str,
+    name: &str,
+    full_path: &std::path::Path,
+    search_root: &std::path::Path,
+) -> bool {
+    let pattern_path = std::path::Path::new(pattern);
+    let components: Vec<_> = pattern_path.components().collect();
+    // 原无separator的filename模式继续匹配每层basename；./是明确路径锚，
+    // Windows Prefix/RootDir/反斜杠同样由Path components解释，不另猜字符串。
+    if components.len() == 1
+        && let Some(std::path::Component::Normal(value)) = components.first()
+        && let Some(pattern_name) = value.to_str()
+    {
+        return glob_match_advanced(pattern_name, name);
     }
-
-    // For simple patterns, just match the file name
-    let name_pattern = if pattern.contains('/') {
-        // If pattern contains /, match against relative path components
-        pattern.to_string()
+    let target = if pattern_path.is_absolute() {
+        full_path
     } else {
-        pattern.to_string()
+        full_path.strip_prefix(search_root).unwrap_or(full_path)
     };
-
-    if pattern.contains('/') {
-        // Match against path suffix
-        glob_match_advanced(&name_pattern, &full_path.display().to_string())
-    } else {
-        glob_match_advanced(&name_pattern, name)
-    }
+    glob_with_doublestar(pattern, target)
 }
 
 fn glob_with_doublestar(pattern: &str, full_path: &std::path::Path) -> bool {
-    let path_str = full_path.display().to_string();
-
-    // Split pattern on ** and try matching at each directory level
-    let parts: Vec<&str> = pattern.split("**").collect();
-
-    if parts.len() == 2 {
-        let Some(prefix) = parts.first().copied() else {
-            return false;
-        };
-        let Some(suffix) = parts.get(1).copied() else {
-            return false;
-        };
-
-        // Try matching at each level
-        if prefix.is_empty() && suffix.is_empty() {
-            return true;
-        }
-
-        if prefix.is_empty() {
-            // **/*.rs — match any path ending with suffix
-            return path_str.ends_with(suffix.trim_start_matches('/'))
-                || path_str.ends_with(suffix.trim_start_matches('/').trim_start_matches('\\'));
-        }
-
-        if suffix.is_empty() {
-            return path_str.contains(prefix.trim_end_matches('/'));
-        }
-
-        // src/**/*.rs — match paths starting with prefix and ending with suffix
-        let suffix_clean = suffix.trim_start_matches('/');
-        let prefix_clean = prefix.trim_end_matches('/');
-        if let Some(pos) = path_str.find(prefix_clean)
-            && let Some(rest) = path_str
-                .get(pos..)
-                .and_then(|tail| tail.strip_prefix(prefix_clean))
-        {
-            return rest.ends_with(suffix_clean);
-        }
+    // Match path components with the existing wildcard matcher; ** reaches
+    // zero or more whole components. Do not treat *.rs as a literal suffix.
+    // Pattern与path两边都用Path components：Windows UNC/verbatim的Prefix
+    // 保持整体结构并先精确核对，不把一边prefix拆成server/share两segment。
+    let pattern_path = std::path::Path::new(pattern);
+    if pattern_path.has_root() != full_path.has_root()
+        || pattern_path.is_absolute() != full_path.is_absolute()
+    {
         return false;
     }
-
-    // Fallback: simple match
-    glob_match_advanced(pattern, &path_str)
+    #[cfg(windows)]
+    let pattern_prefix = pattern_path.components().find_map(|part| match part {
+        std::path::Component::Prefix(prefix) => Some(prefix.kind()),
+        _ => None,
+    });
+    #[cfg(windows)]
+    let file_prefix = full_path.components().find_map(|part| match part {
+        std::path::Component::Prefix(prefix) => Some(prefix.kind()),
+        _ => None,
+    });
+    #[cfg(windows)]
+    if pattern_prefix != file_prefix {
+        return false;
+    }
+    let parts = |path: &std::path::Path| -> Vec<String> {
+        path.components()
+            .filter_map(|part| match part {
+                std::path::Component::Normal(value) => Some(value.to_string_lossy().into_owned()),
+                std::path::Component::ParentDir => Some("..".to_string()),
+                _ => None,
+            })
+            .collect()
+    };
+    let path_parts = parts(full_path);
+    let pattern_parts = parts(pattern_path);
+    let mut reachable = vec![false; path_parts.len().saturating_add(1)];
+    if let Some(first) = reachable.first_mut() {
+        *first = true;
+    }
+    for segment in pattern_parts.iter().map(String::as_str) {
+        let mut next = vec![false; reachable.len()];
+        if segment == "**" {
+            let mut prior_reachable = false;
+            for (index, state) in reachable.iter().enumerate() {
+                prior_reachable |= *state;
+                if let Some(slot) = next.get_mut(index) {
+                    *slot = prior_reachable;
+                }
+            }
+        } else {
+            for (index, (part, state)) in path_parts.iter().zip(&reachable).enumerate() {
+                if *state
+                    && glob_match_advanced(segment, part)
+                    && let Some(slot) = next.get_mut(index.saturating_add(1))
+                {
+                    *slot = true;
+                }
+            }
+        }
+        reachable = next;
+    }
+    reachable.last().copied().unwrap_or(false)
 }
 
 /// Advanced glob matching with * ? {a,b} [abc]
@@ -447,5 +534,321 @@ mod tests {
         assert!(!glob_match_advanced("*.rs", "screenshot_北京.png"));
         // Sanity: plain ASCII still works after the fix.
         assert!(glob_match_advanced("*.png", "screenshot_shanghai.png"));
+    }
+    // 候选：并入 echo-tools/src/files/glob.rs 的既有 tests module。
+    // 未编译、未运行；要求实际走 GlobTool，不能只调用 glob_match_advanced。
+    #[tokio::test]
+    async fn recursive_glob_dispatch_matches_zero_and_many_components()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        use echo_core::tools::{Tool, ToolContext, ToolParameters};
+        let root = tempfile::tempdir()?;
+        for relative in [
+            "root.rs",
+            "src/main.rs",
+            "src/deep/另一个.rs",
+            "文档🙂/中文.rs",
+            "not-rust.rs.txt",
+            "other/src/decoy.rs",
+        ] {
+            let path = root.path().join(relative);
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::write(path, b"fixture")?;
+        }
+        let tool = GlobTool::with_base_dir(root.path());
+        for (pattern, expected) in [
+            (
+                "**/*.rs",
+                vec![
+                    "root.rs",
+                    "src/main.rs",
+                    "src/deep/另一个.rs",
+                    "文档🙂/中文.rs",
+                    "other/src/decoy.rs",
+                ],
+            ),
+            ("src/**/*.rs", vec!["src/main.rs", "src/deep/另一个.rs"]),
+            ("src/**/?.{rs,ts}", vec![]),
+        ] {
+            let result = tool
+                .execute_with_context(
+                    ToolParameters::from([("pattern".into(), serde_json::json!(pattern))]),
+                    &ToolContext::default(),
+                )
+                .await?;
+            assert!(result.success, "glob failed: {:?}", result.error);
+            let mut actual = result
+                .output
+                .lines()
+                .filter_map(|line| {
+                    std::path::Path::new(line)
+                        .strip_prefix(root.path())
+                        .ok()
+                        .map(|p| {
+                            p.components()
+                                .map(|c| c.as_os_str().to_string_lossy().into_owned())
+                                .collect::<Vec<_>>()
+                                .join("/")
+                        })
+                })
+                .collect::<Vec<_>>();
+            let mut expected = expected.into_iter().map(str::to_string).collect::<Vec<_>>();
+            actual.sort();
+            expected.sort();
+            assert_eq!(actual, expected, "dispatcher pattern={pattern}");
+        }
+        Ok(())
+    }
+
+    // 新增非回归控制；初次RED的单函数未包含本函数，不追标旧RED。
+    #[tokio::test]
+    async fn source8_glob_dispatch_preserves_absolute_and_shallow_anchors()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        use echo_core::tools::{Tool, ToolContext, ToolParameters};
+        let root = tempfile::tempdir()?;
+        for relative in ["src/main.rs", "src/deep/nested.rs", "src-other/decoy.rs"] {
+            let path = root.path().join(relative);
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::write(path, b"fixture")?;
+        }
+        let tool = GlobTool::with_base_dir(root.path());
+        for (pattern, expected) in [
+            ("src/*.rs".to_string(), vec!["src/main.rs"]),
+            ("./src/*.rs".to_string(), vec!["src/main.rs"]),
+            ("./src/main.rs".to_string(), vec!["src/main.rs"]),
+            (
+                root.path().join("src/*.rs").to_string_lossy().into_owned(),
+                vec!["src/main.rs"],
+            ),
+            (
+                root.path()
+                    .join("src/main.rs")
+                    .to_string_lossy()
+                    .into_owned(),
+                vec!["src/main.rs"],
+            ),
+            (
+                root.path()
+                    .join("src/**/*.rs")
+                    .to_string_lossy()
+                    .into_owned(),
+                vec!["src/main.rs", "src/deep/nested.rs"],
+            ),
+        ] {
+            let result = tool
+                .execute_with_context(
+                    ToolParameters::from([("pattern".into(), serde_json::json!(pattern))]),
+                    &ToolContext::default(),
+                )
+                .await?;
+            assert!(result.success);
+            let mut actual = result
+                .output
+                .lines()
+                .filter_map(|line| {
+                    std::path::Path::new(line)
+                        .strip_prefix(root.path())
+                        .ok()
+                        .map(|relative| {
+                            relative
+                                .components()
+                                .map(|c| c.as_os_str().to_string_lossy().into_owned())
+                                .collect::<Vec<_>>()
+                                .join("/")
+                        })
+                })
+                .collect::<Vec<_>>();
+            let mut expected = expected.into_iter().map(str::to_string).collect::<Vec<_>>();
+            actual.sort();
+            expected.sort();
+            assert_eq!(actual, expected, "pattern={pattern}");
+        }
+        Ok(())
+    }
+
+    // portable原matcher控制：不解析host cwd；相同component但root不同不能互认。
+    #[test]
+    fn source8_glob_rooted_pattern_cannot_match_relative_provider_entry() {
+        assert!(!glob_pattern_matches(
+            "/src/main.rs",
+            "main.rs",
+            std::path::Path::new("./src/main.rs"),
+            std::path::Path::new(".")
+        ));
+        assert!(!glob_pattern_matches(
+            "/src/*.rs",
+            "main.rs",
+            std::path::Path::new("./src/main.rs"),
+            std::path::Path::new(".")
+        ));
+    }
+
+    // 平台token控制，不访问UNC服务器；只有Windows实际运行才授该平台test票。
+    #[cfg(windows)]
+    #[test]
+    fn source8_glob_windows_prefix_tokens_are_compared_consistently() {
+        for (root, file) in [
+            (r"C:\repo", r"C:\repo\main.rs"),
+            (r"\\server\share\repo", r"\\server\share\repo\main.rs"),
+            (
+                r"\\?\UNC\server\share\repo",
+                r"\\?\UNC\server\share\repo\main.rs",
+            ),
+        ] {
+            let root = std::path::Path::new(root);
+            let file = std::path::Path::new(file);
+            let pattern = file.to_string_lossy().into_owned();
+            assert!(glob_pattern_matches(&pattern, "main.rs", file, root));
+            let recursive = format!(r"{}\**\*.rs", root.to_string_lossy());
+            assert!(glob_pattern_matches(&recursive, "main.rs", file, root));
+        }
+        let forward_root = std::path::Path::new("//server/share/repo");
+        let forward_file = std::path::Path::new("//server/share/repo/main.rs");
+        assert!(glob_pattern_matches(
+            "//server/share/repo/main.rs",
+            "main.rs",
+            forward_file,
+            forward_root
+        ));
+        assert!(glob_pattern_matches(
+            "//server/share/repo/**/*.rs",
+            "main.rs",
+            forward_file,
+            forward_root
+        ));
+        let file = std::path::Path::new(r"\\server\share\repo\main.rs");
+        assert!(!glob_pattern_matches(
+            "//different/share/repo/main.rs",
+            "main.rs",
+            file,
+            std::path::Path::new(r"\\server\share\repo")
+        ));
+        assert!(!glob_pattern_matches(
+            "C:/repo/main.rs",
+            "main.rs",
+            file,
+            std::path::Path::new(r"\\server\share\repo")
+        ));
+    }
+
+    // 真实GlobTool、默认path='.'与provider相对目录项；不改全局cwd、不访问host/root目录。
+    #[tokio::test]
+    async fn source8_glob_default_path_provider_entries_preserve_root_shape()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        use echo_core::tools::filesystem::{FileEntry, FileMetadata, FileSystem, FileType};
+        use echo_core::tools::{Tool, ToolContext, ToolParameters};
+        use std::path::{Path, PathBuf};
+        struct RelativeFiles;
+        fn unsupported<T>() -> echo_core::error::Result<T> {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "fixture operation not used",
+            )
+            .into())
+        }
+        impl FileSystem for RelativeFiles {
+            fn current_dir(&self) -> echo_core::error::Result<PathBuf> {
+                unsupported()
+            }
+            fn canonicalize(&self, _: &Path) -> echo_core::error::Result<PathBuf> {
+                unsupported()
+            }
+            fn metadata(&self, p: &Path) -> echo_core::error::Result<FileMetadata> {
+                let kind = if p == Path::new(".") || p == Path::new("./src") {
+                    FileType::Directory
+                } else if p == Path::new("./src/main.rs") {
+                    FileType::File
+                } else {
+                    return Err(std::io::Error::from(std::io::ErrorKind::NotFound).into());
+                };
+                Ok(FileMetadata {
+                    file_type: kind,
+                    len: 0,
+                    mode: None,
+                    // 该 fixture 是纯路径形状替身，没有目标时钟可言；保持 None 而不是编造本机时间。
+                    modified: None,
+                })
+            }
+            fn symlink_metadata(&self, p: &Path) -> echo_core::error::Result<FileMetadata> {
+                self.metadata(p)
+            }
+            fn read(&self, _: &Path) -> echo_core::error::Result<Vec<u8>> {
+                unsupported()
+            }
+            fn read_dir(&self, p: &Path) -> echo_core::error::Result<Vec<FileEntry>> {
+                if p == Path::new(".") {
+                    Ok(vec![FileEntry {
+                        path: "./src".into(),
+                        file_name: "src".into(),
+                        file_type: FileType::Directory,
+                    }])
+                } else if p == Path::new("./src") {
+                    Ok(vec![FileEntry {
+                        path: "./src/main.rs".into(),
+                        file_name: "main.rs".into(),
+                        file_type: FileType::File,
+                    }])
+                } else {
+                    unsupported()
+                }
+            }
+            fn create_dir_all(&self, _: &Path) -> echo_core::error::Result<()> {
+                unsupported()
+            }
+            fn create_file(&self, _: &Path) -> echo_core::error::Result<()> {
+                unsupported()
+            }
+            fn write(&self, _: &Path, _: &[u8]) -> echo_core::error::Result<()> {
+                unsupported()
+            }
+            fn append(&self, _: &Path, _: &[u8]) -> echo_core::error::Result<()> {
+                unsupported()
+            }
+            fn rename(&self, _: &Path, _: &Path) -> echo_core::error::Result<()> {
+                unsupported()
+            }
+            fn remove_file(&self, _: &Path) -> echo_core::error::Result<()> {
+                unsupported()
+            }
+            fn remove_dir(&self, _: &Path) -> echo_core::error::Result<()> {
+                unsupported()
+            }
+            fn remove_dir_all(&self, _: &Path) -> echo_core::error::Result<()> {
+                unsupported()
+            }
+            fn set_mode(&self, _: &Path, _: u32) -> echo_core::error::Result<()> {
+                unsupported()
+            }
+            fn atomic_write(&self, _: &Path, _: &[u8]) -> echo_core::error::Result<()> {
+                unsupported()
+            }
+            fn checkpoint(&self, _: &Path) -> echo_core::error::Result<Option<String>> {
+                unsupported()
+            }
+        }
+        let tool = GlobTool::new().with_file_system(std::sync::Arc::new(RelativeFiles));
+        for (pattern, should_match) in [
+            ("/src/main.rs", false),
+            ("/src/*.rs", false),
+            ("./src/*.rs", true),
+            ("src/**/*.rs", true),
+        ] {
+            let result = tool
+                .execute_with_context(
+                    ToolParameters::from([("pattern".into(), serde_json::json!(pattern))]),
+                    &ToolContext::default(),
+                )
+                .await?;
+            assert!(result.success);
+            assert_eq!(
+                result.output.lines().any(|line| line == "./src/main.rs"),
+                should_match,
+                "pattern={pattern}"
+            );
+        }
+        Ok(())
     }
 }

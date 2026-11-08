@@ -16,6 +16,8 @@ echo-orchestration/target/
 echo-macros/target/
 echo-integration/target/
 echo-tools/target/
+# Hook 截止时间测试的合成 PID/诊断产物，不作为源码或交付输入。
+/echo-execution/.echo-semantic/local/hook-command-deadline-tests/
 # Workspace members share the root lockfile; ignore stale member lockfiles.
 */Cargo.lock
 

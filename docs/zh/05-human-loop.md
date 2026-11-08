@@ -43,6 +43,16 @@ echo-agent 支持三种介入场景：
 
 ---
 
+## Hook 明确要求审批
+
+PreToolUse 或 PermissionRequest 返回 Ask/RequireApproval 时，本次调用必须取得新的真实 handler 回答；后续 hook Allow、普通允许规则、历史审批缓存或 full-auto 都不能替代此次交互。Deny 与受保护路径检查仍先阻止执行。无 service、关闭 human-loop 或只有 NullHandler 时明确失败；普通未要求强制交互的调用保持原有权限行为。
+
+DontAsk 无匹配规则时仍在调用 handler 前拒绝；匹配 Allow 也不能跳过本次明确要求的新交互。
+
+Rust 调用方可用 `PermissionService::request_approval_with_context`，复用既有输入、permissions、mode override、PermissionInvocationContext 与文字建议。用户改参仍复检受保护路径，批准 scope 的缓存写入及最终输入 receipt 仍由同一个 handler 后处理拥有。文字建议只是 Custom 说明，不推断为会话或永久批准；新的明确 Ask 忽略旧批准，后续普通调用仍可使用已批准 scope。
+
+snapshot 继续拥有 request/session/agent 身份与取消等待。Timeout/Deferred 不构成批准；本次不增加默认 deadline、不统一取消错误类型、不新建队列/store，也不自动扩张独立 SDK 的 accepted 合同。见 [ADR 0091](../adr/0091-explicit-hook-approval-intent.md)。
+
 ## 权限模式
 
 | 模式 | 行为 |

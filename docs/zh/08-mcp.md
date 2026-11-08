@@ -544,6 +544,19 @@ if let Some(client) = mcp.get_client("filesystem") {
 
 ---
 
+## 按完整来源读取连接
+
+`ReactAgent::mcp_clients_by_id()` 在 `mcp` feature 下返回以 `McpServerId` 为键的
+当前连接快照。Direct 服务与不同插件可以拥有相同的本地服务名；需要保留来源时，
+直接使用快照中的 owner 与原 `Arc<McpClient>`，不要从本地名称重建连接身份。
+
+该方法复用原 `McpManager::get_clients_by_id()`，不新建连接、注册表或持久状态。
+连接断开后新快照会移除对应身份；已经捕获的快照仍保留原键与客户端引用。
+它描述连接归属，不证明自定义同名工具替换后的注册实例来源，也不授予额外执行能力。
+原 `mcp_client(name)` 继续只查询 Direct 服务。
+
+---
+
 ## 错误处理
 
 MCP 操作可能产生的错误：

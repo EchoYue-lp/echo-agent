@@ -612,7 +612,7 @@ async fn prepare_prompt(
     };
     let turn = match prompt {
         MappedPrompt::Text(text) => TurnRequest::new(identity, text),
-        MappedPrompt::Structured(message) => TurnRequest::from_message(identity, message),
+        MappedPrompt::Structured(message) => TurnRequest::from_message(identity, *message),
     }
     .mode(TurnMode::Chat)
     .cancel(active.turn.cancellation());

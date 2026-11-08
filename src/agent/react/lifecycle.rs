@@ -13,9 +13,24 @@ struct CloseState {
 }
 
 struct UncertainTurnResources {
-    run_id: String,
+    run_id: Option<String>,
     execution_id: Option<String>,
     _resources: Box<dyn Send>,
+}
+
+impl UncertainTurnResources {
+    fn observation_error(&self) -> ReactError {
+        match self.run_id.as_ref() {
+            Some(run_id) => ReactError::ExecutionNotSettled {
+                run_id: run_id.clone(),
+                execution_id: self.execution_id.clone(),
+            },
+            None => ReactError::Other(
+                "Agent close blocked by an admitted recovery whose physical settlement is unknown"
+                    .to_string(),
+            ),
+        }
+    }
 }
 
 impl Default for CloseState {
@@ -62,10 +77,7 @@ impl ReactAgentCloseAuthority {
     ) -> Result<(ReactAgentTurnLease, CancellationToken)> {
         let mut state = self.lock_state();
         if let Some(unknown) = state.uncertain.values().next() {
-            return Err(ReactError::ExecutionNotSettled {
-                run_id: unknown.run_id.clone(),
-                execution_id: unknown.execution_id.clone(),
-            });
+            return Err(unknown.observation_error());
         }
         if state.unsettled_turns > 0 {
             return Err(ReactError::ExecutionNotSettled {
@@ -117,10 +129,7 @@ impl ReactAgentCloseAuthority {
             let unsettled_turns = {
                 let state = self.lock_state();
                 if let Some(unknown) = state.uncertain.values().next() {
-                    return Err(ReactError::ExecutionNotSettled {
-                        run_id: unknown.run_id.clone(),
-                        execution_id: unknown.execution_id.clone(),
-                    });
+                    return Err(unknown.observation_error());
                 }
                 state.turns.is_empty().then_some(state.unsettled_turns)
             };
@@ -157,8 +166,22 @@ impl ReactAgentTurnLease {
     }
 
     pub(crate) fn retain_unknown(
-        mut self,
+        self,
         run_id: String,
+        execution_id: Option<String>,
+        resources: Box<dyn Send>,
+    ) {
+        self.retain_observed(Some(run_id), execution_id, resources);
+    }
+
+    /// 显式Resume可能尚无业务run；保留同一admission及原资源，不能伪造run身份。
+    pub(crate) fn retain_unidentified(self, resources: Box<dyn Send>) {
+        self.retain_observed(None, None, resources);
+    }
+
+    fn retain_observed(
+        mut self,
+        run_id: Option<String>,
         execution_id: Option<String>,
         resources: Box<dyn Send>,
     ) {
@@ -172,8 +195,7 @@ impl ReactAgentTurnLease {
                 _resources: resources,
             },
         );
-        // The original turn/token remains in the same close authority. Remove
-        // only this RAII observer so Drop cannot fabricate a release or debt.
+        // 原turn/token与资源保留在同一close authority；Drop不制造release或替代owner。
         self.active = false;
         self.authority.idle.notify_waiters();
     }

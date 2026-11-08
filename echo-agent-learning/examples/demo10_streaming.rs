@@ -1,7 +1,7 @@
 //! demo10_streaming.rs —— 流式输出综合演示
 //!
 //! 展示 Agent 的流式输出能力：
-//! 1. execute_stream() —— 实时获取 Token、工具调用、最终答案
+//! 1. execute_stream() —— 获取原生消息块、工具调用和运行结算
 //! 2. chat_stream() —— 多轮对话流式输出
 //! 3. AgentEvent 事件类型处理
 //!
@@ -118,6 +118,8 @@ async fn demo_agent_text_stream() -> echo_agent::error::Result<()> {
     let agent = ReactAgentBuilder::new()
         .model("qwen3-max")
         .name("stream_text_agent")
+        // 事件流返回形式与HTTP传输独立；此例显式使用非流式模型调用。
+        .model_streaming(false)
         .system_prompt("你是一个知识渊博的助手，用中文简洁回答问题。")
         .max_iterations(3)
         .build()?;
@@ -146,13 +148,18 @@ async fn demo_agent_text_stream() -> echo_agent::error::Result<()> {
             }
         };
         match event {
-            AgentEvent::Token(token) => {
-                print!("{}", token);
-                std::io::stdout().flush().ok();
+            AgentEvent::AssistantMessage { block } => {
+                println!(
+                    "  原生消息: phase={:?}, complete={}",
+                    block.phase, block.complete
+                );
             }
             AgentEvent::FinalAnswer(answer) => {
+                println!("{answer}");
                 final_answer = answer;
-                println!();
+            }
+            AgentEvent::ExecutionStatus(status) => {
+                println!("  运行状态: {:?}", status.status);
             }
             AgentEvent::ToolResult { name, result, .. }
                 if !result.success && first_error.is_none() =>
@@ -213,23 +220,18 @@ async fn demo_agent_tool_stream() -> echo_agent::error::Result<()> {
             }
         };
         match event {
-            AgentEvent::ThinkStart => {
-                println!("  💭 开始推理...");
+            AgentEvent::AssistantMessage { block } => {
+                if block.phase == echo_agent::agent::AssistantPhase::Reasoning {
+                    println!("  💭 原生推理: {}", truncate(&block.delta, 80));
+                } else {
+                    println!("  消息块: {:?}, complete={}", block.phase, block.complete);
+                }
             }
-            AgentEvent::ThinkEnd {
-                prompt_tokens,
-                completion_tokens,
-            } => {
-                println!(
-                    "  💭 推理结束 (prompt: {prompt_tokens}, completion: {completion_tokens})"
-                );
+            AgentEvent::ExecutionStatus(status) => {
+                println!("  运行状态: {:?}", status.status);
             }
             AgentEvent::MemoryRecalled { count } if count > 0 => {
                 println!("  🧠 召回 {count} 条记忆");
-            }
-            AgentEvent::Token(token) => {
-                print!("{}", token);
-                std::io::stdout().flush().ok();
             }
             AgentEvent::ToolCall { invocation, .. } => {
                 println!(

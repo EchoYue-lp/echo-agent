@@ -1,7 +1,8 @@
 //! ChannelManager — one lifecycle authority per original IM channel plugin.
 
 use super::types::{
-    ChannelCapabilities, ChannelPlugin, InboundMessage, MessageHandler, OutboundMessage,
+    ChannelCapabilities, ChannelPlugin, ChannelTransportSnapshot, InboundMessage, MessageHandler,
+    OutboundMessage,
 };
 use async_trait::async_trait;
 use echo_core::agent::CancellationToken;
@@ -21,6 +22,24 @@ use tracing::{info, warn};
 pub struct ChannelLifecycleResult {
     pub channel_id: String,
     pub result: Result<()>,
+}
+
+/// Read-only facts from the original entry, independent of transport readiness.
+#[derive(Debug, Clone)]
+pub struct ChannelManagementSnapshot {
+    pub mutation_epoch: u64,
+    pub handler_attached: bool,
+    pub active_invocations: usize,
+    pub shutdown_settled: bool,
+    pub transport: ChannelTransportSnapshot,
+}
+
+/// An adapter subscription captured under the original entry lifecycle lock.
+/// Compare mutation_epoch with a fresh management snapshot before projecting an
+/// update after a control operation. Old watches are never retargeted on start.
+pub struct ChannelTransportObservation {
+    pub mutation_epoch: u64,
+    pub receiver: Option<tokio::sync::watch::Receiver<ChannelTransportSnapshot>>,
 }
 
 /// An owned stream and the exact admitted invocation's cancellation signal.
@@ -267,6 +286,126 @@ impl ChannelHandle {
 
     pub fn capabilities(&self) -> &ChannelCapabilities {
         &self.entry.capabilities
+    }
+
+    /// Capture the current adapter source with its original control epoch.
+    pub fn transport_status(&self) -> BoxFuture<'static, ChannelTransportObservation> {
+        let channel = self.clone();
+        Box::pin(async move {
+            let state = channel.entry.state.read().await;
+            ChannelTransportObservation {
+                mutation_epoch: channel.entry.mutation_epoch.load(Ordering::Acquire),
+                receiver: state.plugin.transport_status(),
+            }
+        })
+    }
+
+    /// Read original handler/generation/stop facts without running health checks,
+    /// starting a transport, or creating a second lifecycle state table.
+    pub fn management_snapshot(&self) -> BoxFuture<'static, ChannelManagementSnapshot> {
+        let channel = self.clone();
+        Box::pin(async move {
+            let state = channel.entry.state.read().await;
+            let epoch = channel.entry.mutation_epoch.load(Ordering::Acquire);
+            let active = channel.generation().map_or(0, |generation| {
+                generation
+                    .admission
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .active
+            });
+            let transport = state.plugin.transport_status().map_or_else(
+                ChannelTransportSnapshot::unknown,
+                |receiver| {
+                    let snapshot = receiver.borrow().clone();
+                    // A watch retains its last value after its publisher dies.
+                    // Source closure cannot turn historical Ready into a live
+                    // fact, nor does it settle the original handler/stop owner.
+                    if receiver.has_changed().is_err() {
+                        ChannelTransportSnapshot::unknown()
+                    } else {
+                        snapshot
+                    }
+                },
+            );
+            ChannelManagementSnapshot {
+                mutation_epoch: epoch,
+                handler_attached: state.handler.is_some(),
+                active_invocations: active,
+                shutdown_settled: epoch != u64::MAX
+                    && state.stopped_at_epoch == Some(epoch)
+                    && state.handler.is_none()
+                    && active == 0,
+                transport,
+            }
+        })
+    }
+
+    /// Replace only the adapter in an explicitly stopped original entry.
+    /// On any rejection the old plugin, handler and cleanup responsibility stay
+    /// in place. Configuration and caller control serialization remain outside
+    /// the framework; metadata cannot change this registration's identity.
+    pub fn replace_stopped_plugin(
+        &self,
+        plugin: Box<dyn ChannelPlugin>,
+    ) -> BoxFuture<'static, Result<()>> {
+        let channel = self.clone();
+        Box::pin(async move {
+            let declared = plugin.capabilities();
+            let expected = channel.capabilities();
+            if plugin.id() != channel.id()
+                || plugin.label() != channel.label()
+                || declared.chat_types != expected.chat_types
+                || declared.supports_media != expected.supports_media
+                || declared.supports_threads != expected.supports_threads
+            {
+                return Err(invocation_inactive(
+                    "replacement channel identity/capabilities differ",
+                ));
+            }
+            let mut state = channel.entry.state.write().await;
+            let epoch = channel.entry.mutation_epoch.load(Ordering::Acquire);
+            let inactive = channel.generation().is_none_or(|generation| {
+                let admission = generation
+                    .admission
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner());
+                !admission.ready && admission.active == 0 && generation.cancellation.is_cancelled()
+            });
+            if epoch == u64::MAX
+                || state.stopped_at_epoch != Some(epoch)
+                || state.handler.is_some()
+                || !inactive
+            {
+                return Err(invocation_inactive(
+                    "channel stop has not settled for the current mutation epoch",
+                ));
+            }
+            channel.advance_epoch(epoch)?;
+            // Nothing fallible/awaiting follows the swap. Invalidate prior stop
+            // facts and captured invocations before installing new credentials.
+            state.stopped_at_epoch = None;
+            *channel
+                .entry
+                .generation
+                .lock()
+                .unwrap_or_else(|error| error.into_inner()) = None;
+            state.plugin = plugin;
+            Ok(())
+        })
+    }
+
+    fn advance_epoch(&self, expected: u64) -> Result<()> {
+        let next = expected
+            .checked_add(1)
+            .ok_or_else(|| channel_error("channel mutation epoch exhausted".into()))?;
+        self.entry
+            .mutation_epoch
+            .compare_exchange(expected, next, Ordering::AcqRel, Ordering::Acquire)
+            .map_err(|_| {
+                channel_error("channel mutation epoch changed before control admission".into())
+            })?;
+        Ok(())
     }
 
     fn generation(&self) -> Option<Arc<InvocationGeneration>> {
@@ -538,6 +677,7 @@ impl ChannelHandle {
                 self.id()
             )));
         }
+        self.advance_epoch(self.entry.mutation_epoch.load(Ordering::Acquire))?;
         state.stopped_at_epoch = None;
         let generation = Arc::new(InvocationGeneration::new());
         *self
@@ -653,6 +793,15 @@ impl ChannelPlugin for ChannelHandle {
     }
     async fn send(&self, message: OutboundMessage) -> Result<()> {
         ChannelHandle::send(self, message).await
+    }
+    fn transport_status(&self) -> Option<tokio::sync::watch::Receiver<ChannelTransportSnapshot>> {
+        // Borrowed trait access cannot await the lifecycle lock. Busy means
+        // unknown; owned consumers use the epoch-bearing inherent operation.
+        self.entry
+            .state
+            .try_read()
+            .ok()
+            .and_then(|state| state.plugin.transport_status())
     }
     async fn health_check(&self) -> Result<()> {
         ChannelHandle::health_check(self).await
@@ -1649,6 +1798,248 @@ mod invocation_tests {
                 .ready
         );
         runtime.block_on(channel.stop())?;
+        Ok(())
+    }
+
+    struct ExternalObservedPlugin {
+        receiver: tokio::sync::watch::Receiver<ChannelTransportSnapshot>,
+    }
+
+    #[async_trait]
+    impl ChannelPlugin for ExternalObservedPlugin {
+        fn id(&self) -> &str {
+            "external-observed"
+        }
+        fn capabilities(&self) -> &ChannelCapabilities {
+            static CAPS: ChannelCapabilities = ChannelCapabilities {
+                chat_types: &[ChatType::Direct],
+                supports_media: false,
+                supports_threads: false,
+            };
+            &CAPS
+        }
+        fn transport_status(
+            &self,
+        ) -> Option<tokio::sync::watch::Receiver<ChannelTransportSnapshot>> {
+            Some(self.receiver.clone())
+        }
+        async fn start(&mut self, _handler: Arc<dyn MessageHandler>) -> Result<()> {
+            Ok(())
+        }
+        async fn stop(&mut self) -> Result<()> {
+            Ok(())
+        }
+        async fn send(&self, _message: OutboundMessage) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn management_closed_external_watch_is_unknown_without_settling_shutdown() -> TestResult {
+        use super::super::types::{ChannelTransportEvidence, ChannelTransportPhase};
+        let ready = ChannelTransportSnapshot {
+            phase: ChannelTransportPhase::Ready,
+            evidence: Some(ChannelTransportEvidence::QqSessionReady),
+            last_error: None,
+            observed_at: std::time::SystemTime::now(),
+        };
+        let (sender, receiver) = tokio::sync::watch::channel(ready);
+        let mut manager = ChannelManager::new();
+        manager.register(Box::new(ExternalObservedPlugin { receiver }))?;
+        let channel = manager
+            .get_owned("external-observed")
+            .ok_or("missing external entry")?;
+        let active = channel.management_snapshot().await;
+        assert_eq!(active.transport.phase, ChannelTransportPhase::Ready);
+        assert!(!active.shutdown_settled);
+        drop(sender);
+        let closed = channel.management_snapshot().await;
+        assert_eq!(closed.transport.phase, ChannelTransportPhase::Unknown);
+        assert_eq!(closed.transport.evidence, None);
+        assert!(!closed.shutdown_settled);
+        channel.stop().await?;
+        let physically_stopped = channel.management_snapshot().await;
+        assert!(physically_stopped.shutdown_settled);
+        assert_eq!(
+            physically_stopped.transport.phase,
+            ChannelTransportPhase::Unknown
+        );
+        Ok(())
+    }
+
+    fn replacement() -> Box<dyn ChannelPlugin> {
+        Box::new(ForwardPlugin {
+            fail_start: false,
+            fail_stop: false,
+            start_gate: None,
+        })
+    }
+
+    #[tokio::test]
+    async fn management_health_and_start_do_not_invent_transport_readiness() -> TestResult {
+        let channel = registered(ForwardPlugin {
+            fail_start: false,
+            fail_stop: false,
+            start_gate: None,
+        })?;
+        let initial = channel.management_snapshot().await;
+        assert!(!initial.shutdown_settled);
+        assert_eq!(
+            initial.transport.phase,
+            super::super::types::ChannelTransportPhase::Unknown
+        );
+        assert!(channel.transport_status().await.receiver.is_none());
+        channel
+            .start(Arc::new(ForwardHandler::plain(Arc::new(Facts::default()))))
+            .await?;
+        channel.health_check().await?;
+        let started = channel.management_snapshot().await;
+        assert!(started.mutation_epoch > initial.mutation_epoch);
+        assert!(started.handler_attached);
+        assert!(!started.shutdown_settled);
+        assert_eq!(
+            started.transport.phase,
+            super::super::types::ChannelTransportPhase::Unknown
+        );
+        channel.stop().await?;
+        let stopped = channel.management_snapshot().await;
+        assert!(stopped.shutdown_settled);
+        assert!(!stopped.handler_attached);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn replacement_requires_current_stop_and_preserves_failed_close_owner() -> TestResult {
+        let facts = Arc::new(Facts::default());
+        let channel = registered(ForwardPlugin {
+            fail_start: false,
+            fail_stop: false,
+            start_gate: None,
+        })?;
+        assert!(channel.replace_stopped_plugin(replacement()).await.is_err());
+        let mut handler = ForwardHandler::plain(Arc::clone(&facts));
+        handler.close_error_once = true;
+        channel.start(Arc::new(handler)).await?;
+        assert!(channel.stop().await.is_err());
+        let unsettled = channel.management_snapshot().await;
+        assert!(unsettled.handler_attached);
+        assert!(!unsettled.shutdown_settled);
+        assert!(channel.replace_stopped_plugin(replacement()).await.is_err());
+        assert_eq!(facts.closes.load(Ordering::Acquire), 1);
+        channel.stop().await?;
+        let old_epoch = channel.management_snapshot().await.mutation_epoch;
+        channel.replace_stopped_plugin(replacement()).await?;
+        let replaced = channel.management_snapshot().await;
+        assert!(replaced.mutation_epoch > old_epoch);
+        assert!(!replaced.shutdown_settled);
+        assert!(!replaced.handler_attached);
+        assert_eq!(facts.closes.load(Ordering::Acquire), 2);
+        channel.stop().await?;
+        assert!(channel.management_snapshot().await.shutdown_settled);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn replacement_rejects_stop_debt_and_metadata_mismatch_without_losing_entry() -> TestResult
+    {
+        let channel = registered(ForwardPlugin {
+            fail_start: false,
+            fail_stop: true,
+            start_gate: None,
+        })?;
+        channel
+            .start(Arc::new(ForwardHandler::plain(Arc::new(Facts::default()))))
+            .await?;
+        assert!(channel.stop().await.is_err());
+        assert!(channel.replace_stopped_plugin(replacement()).await.is_err());
+        assert!(channel.management_snapshot().await.handler_attached);
+        channel.stop().await?;
+        let epoch = channel.management_snapshot().await.mutation_epoch;
+        let wrong = super::super::QqChannel::new(super::super::QqConfig::new(
+            "fixture-app",
+            "fixture-secret",
+        ))?;
+        assert!(
+            channel
+                .replace_stopped_plugin(Box::new(wrong))
+                .await
+                .is_err()
+        );
+        assert_eq!(channel.id(), "forward");
+        assert_eq!(channel.management_snapshot().await.mutation_epoch, epoch);
+        assert!(channel.management_snapshot().await.shutdown_settled);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn replacement_keeps_old_invocation_captured_on_the_old_generation() -> TestResult {
+        let channel = started(Arc::new(ForwardHandler::plain(Arc::new(Facts::default())))).await?;
+        let old_epoch = channel.transport_status().await.mutation_epoch;
+        let stale = channel.handle_message(
+            InboundMessage::new(
+                "forward",
+                "sender",
+                "chat",
+                ChatType::Direct,
+                "old",
+                "old-msg",
+            ),
+            CancellationToken::new(),
+        );
+        channel.stop().await?;
+        channel.replace_stopped_plugin(replacement()).await?;
+        channel
+            .start(Arc::new(ForwardHandler::plain(Arc::new(Facts::default()))))
+            .await?;
+        assert!(channel.transport_status().await.mutation_epoch > old_epoch);
+        assert!(
+            matches!(stale.await, Err(ReactError::Channel(error)) if matches!(*error, ChannelError::StaleInvocation { .. }))
+        );
+        channel.stop().await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn replacement_rejects_a_stop_receipt_invalidated_by_existing_mutable_access()
+    -> TestResult {
+        let channel = registered(ForwardPlugin {
+            fail_start: false,
+            fail_stop: false,
+            start_gate: None,
+        })?;
+        channel.stop().await?;
+        channel.invalidate_stopped();
+        assert!(!channel.management_snapshot().await.shutdown_settled);
+        assert!(channel.replace_stopped_plugin(replacement()).await.is_err());
+        channel.stop().await?;
+        channel.replace_stopped_plugin(replacement()).await?;
+        channel.stop().await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn replacement_does_not_wrap_exhausted_control_epoch() -> TestResult {
+        let channel = registered(ForwardPlugin {
+            fail_start: false,
+            fail_stop: false,
+            start_gate: None,
+        })?;
+        channel
+            .entry
+            .mutation_epoch
+            .store(u64::MAX, Ordering::Release);
+        channel.stop().await?;
+        assert!(channel.replace_stopped_plugin(replacement()).await.is_err());
+        assert!(
+            channel
+                .start(Arc::new(ForwardHandler::plain(Arc::new(Facts::default()))))
+                .await
+                .is_err()
+        );
+        let snapshot = channel.management_snapshot().await;
+        assert_eq!(snapshot.mutation_epoch, u64::MAX);
+        assert!(!snapshot.handler_attached);
+        assert!(!snapshot.shutdown_settled);
         Ok(())
     }
 

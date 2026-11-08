@@ -15,18 +15,47 @@
 //! cargo run -p echo-agent-learning --example demo50_subagent_communication --features subagent
 //! ```
 
-use echo_agent::agent::{Agent, AgentEvent, AgentSteerError, AgentSteerReceipt, CancellationToken};
-use echo_agent::error::Result;
+use echo_agent::agent::{
+    Agent, AgentEvent, AgentInvocationContext, AgentPhase, AgentSteerError, AgentSteerReceipt,
+    CancellationToken, EventIdentity, ExecutionStatus, ExecutionStatusKind,
+};
+use echo_agent::error::{ReactError, Result};
 use echo_agent::llm::types::Message;
 use echo_agent::subagent::{
     DispatchRequest, SubagentAttemptIdentity, SubagentDefinition, SubagentEvent, SubagentExecutor,
-    SubagentExecutorConfig, SubagentRegistry, default_uplink_sink,
+    SubagentExecutorConfig, SubagentRegistration, SubagentRegistrationAdmission, SubagentRegistry,
+    default_uplink_sink,
 };
 use echo_agent::tools::{SubagentUplinkKind, SubagentUplinkMessage, SubagentUplinkTarget};
 use futures::future::BoxFuture;
 use futures::stream::BoxStream;
 use std::sync::{Arc, Mutex};
 use tokio::sync::Notify;
+
+/// 宿主校核实际记录与原控制身份；不是 SubagentStart 观察 hook。
+struct CommunicationAdmission;
+
+#[async_trait::async_trait]
+impl SubagentRegistrationAdmission for CommunicationAdmission {
+    async fn admit(
+        &self,
+        registration: &SubagentRegistration,
+        request: &DispatchRequest,
+    ) -> Result<()> {
+        let execution_id = request
+            .runtime_context
+            .as_ref()
+            .and_then(|context| context.execution_id.as_deref());
+        if registration.definition().name != "subagent"
+            || execution_id != Some("run-1:task-b:1:attempt:1:claim-x")
+        {
+            return Err(ReactError::Other(
+                "通信示例的实际角色或attempt身份不一致".to_string(),
+            ));
+        }
+        Ok(())
+    }
+}
 
 /// 可转向的阻塞 Subagent:stream 首个 poll 等待 release,steer 输入被记录。
 struct SteerableSubagent {
@@ -35,13 +64,48 @@ struct SteerableSubagent {
 }
 
 impl SteerableSubagent {
-    fn blocking_stream<'a>(&'a self) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
+    fn blocking_stream<'a>(
+        &'a self,
+        message: Message,
+        cancel: CancellationToken,
+        invocation: AgentInvocationContext,
+    ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
         let release = self.release.clone();
         Box::pin(async move {
-            Ok(Box::pin(futures::stream::once(async move {
+            let identity = EventIdentity::from_invocation(&invocation)?;
+            let execution_id = identity
+                .execution_id
+                .as_ref()
+                .map(|value| value.as_str())
+                .unwrap_or(identity.turn_id.as_str())
+                .to_string();
+            let request_id = identity
+                .message_id
+                .as_ref()
+                .map(|value| value.as_str().to_string())
+                .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+            let status = move |kind, sequence| {
+                AgentEvent::ExecutionStatus(ExecutionStatus {
+                    adapter_generated: false,
+                    execution_id: execution_id.clone(),
+                    request_id: Some(request_id.clone()),
+                    sequence,
+                    phase: AgentPhase::Thinking,
+                    status: kind,
+                    reason: None,
+                })
+            };
+            // 本示例 source 自己拥有释放与终态；完整输入及资源随原流保留到 EOF。
+            let source = async_stream::stream! {
+                let _message = message;
+                let _invocation = invocation;
+                let _cancel = cancel;
+                yield Ok(status(ExecutionStatusKind::Started, 0));
                 release.notified().await;
-                Ok(AgentEvent::FinalAnswer("subagent finished".to_string()))
-            })) as BoxStream<'a, Result<AgentEvent>>)
+                yield Ok(AgentEvent::FinalAnswer("subagent finished".to_string()));
+                yield Ok(status(ExecutionStatusKind::Settled, 1));
+            };
+            Ok(Box::pin(source) as BoxStream<'a, Result<AgentEvent>>)
         })
     }
 
@@ -63,23 +127,13 @@ impl Agent for SteerableSubagent {
         "demo subagent"
     }
 
-    fn execute<'a>(&'a self, _task: &'a str) -> BoxFuture<'a, Result<String>> {
-        Box::pin(async { Ok("done".to_string()) })
-    }
-
-    fn execute_stream<'a>(
+    fn execute_stream_message_with_invocation_context<'a>(
         &'a self,
-        _task: &'a str,
+        message: Message,
+        cancel: CancellationToken,
+        invocation: AgentInvocationContext,
     ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
-        self.blocking_stream()
-    }
-
-    fn execute_stream_message_with_cancel<'a>(
-        &'a self,
-        _message: Message,
-        _cancel: CancellationToken,
-    ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
-        self.blocking_stream()
+        self.blocking_stream(message, cancel, invocation)
     }
 
     fn steer_input_tracked(
@@ -112,6 +166,9 @@ async fn main() {
     println!("=== demo50: 子智能体上行通信(uplink + 共享控制面) ===\n");
 
     let registry = Arc::new(SubagentRegistry::new());
+    registry
+        .set_registration_admission(Some(Arc::new(CommunicationAdmission)))
+        .await;
 
     let release = Arc::new(Notify::new());
     let steered = Arc::new(Mutex::new(Vec::new()));

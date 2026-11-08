@@ -69,3 +69,10 @@ overall 边界的 provider-client 默认值；`ChatRequest::with_timeouts` 使�
 
 embedding application 的 YAML schema、模型目录、渠道、TUI/server 设置和产品提示词位于
 `echo-agent-cli` 仓库文档。
+
+
+## 宿主 HTTP 客户端与产品身份
+
+`LlmConfig::build_client_with_http_client(Arc<reqwest::Client>)` 与 `SourcedLlmConfig` 的同名方法允许宿主沿既有工厂注入 HTTP 客户端。代理、TLS 与 `User-Agent` 等传输策略由宿主设置，模型协议、模态和 sourced facts 的优先级仍由同一工厂解析。`build_client()` 保持原默认行为。
+
+应用可用 `reqwest::Client::builder().user_agent("my-app/1.0.0").build()` 创建客户端，再传给工厂；不要在通用框架中硬编码某个应用品牌。注入对 Chat Completions、Responses 和 Anthropic 的普通、流式请求都生效。完整无网络构造示例见 `echo-agent-learning/examples/demo26_provider_factory.rs`；设计取舍见 [HTTP 客户端注入 ADR](../adr/0106-provider-http-client-injection.md)。

@@ -11,7 +11,7 @@
 | [Agent 模式](agent-patterns.md) | ReAct、Plan-and-Execute、Self-Reflection、LangGraph 工作流等 AI Agent 核心模式 |
 | [MCP 协议](mcp-protocol.md) | Model Context Protocol 规范与 echo-agent 集成实现 |
 | [Skill 系统](skill-system.md) | agentskills.io 规范、渐进式披露、代码型/文件型技能 |
-| [A2A 协议](a2a-protocol.md) | Agent-to-Agent 协议、Agent Card、任务状态机 |
+| [A2A退役与历史恢复](a2a-protocol.md) | 历史协议资料与固定源码恢复；当前Framework不再提供该能力 |
 
 ---
 
@@ -31,7 +31,7 @@
 | 协议 | 解决问题 | 层级 |
 |------|----------|------|
 | **MCP** | 工具/资源访问 | Tool 层 |
-| **A2A** | Agent 间通信 | Agent 层 |
+| **A2A（历史）** | 通用协议背景，当前Framework已具名退役 | 历史资料 |
 | **OpenAI Functions** | LLM 工具调用格式 | API 层 |
 
 ### 抽象层级
@@ -40,7 +40,7 @@
 ┌─────────────────────────────────────────┐
 │              Application                 │
 ├─────────────────────────────────────────┤
-│  A2A Protocol (Agent-to-Agent)          │  ← Agent 互操作
+│  A2A（历史；当前实现已退役）              │  ← 历史协议背景
 ├─────────────────────────────────────────┤
 │  Graph Workflow / Multi-Agent           │  ← 编排层
 ├─────────────────────────────────────────┤
@@ -70,7 +70,7 @@
 - [LangGraph Documentation](https://langchain-ai.github.io/langgraph/)
 - [MCP Specification](https://modelcontextprotocol.io/)
 - [agentskills.io Specification](https://agentskills.io/specification)
-- [A2A Protocol](https://github.com/google/A2A)
+- [A2A Protocol（外部历史背景，非当前Framework能力）](https://github.com/google/A2A)
 
 ### 相关框架
 
@@ -78,3 +78,5 @@
 - [CrewAI](https://www.crewai.com/) - 多 Agent 协作框架
 - [AutoGen](https://microsoft.github.io/autogen/) - 微软多 Agent 框架
 - [LangGraph](https://langchain-ai.github.io/langgraph/) - 图工作流框架
+
+当前源码的A2A/LSP具名退役与保留ACP/MCP边界见[ADR0090](../../../adr/0090-a2a-lsp-retirement-contract.md)。

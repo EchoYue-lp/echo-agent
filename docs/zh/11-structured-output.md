@@ -114,7 +114,6 @@ let agent = ReactAgentBuilder::new()
     .llm_config(llm_config)
     .name("extractor")
     .system_prompt("你是一个信息提取助手")
-    .disable_cot()
     .build()?;
 
 let schema = ResponseFormat::json_schema(
@@ -180,7 +179,7 @@ println!("置信: {:.0}%", result.confidence * 100.0); // "95%"
 
 ### 方式三：`ReactAgentBuilder::response_format()` — 全局配置
 
-格式随运行快照进入每次主 ReAct JSON 请求。模型事实必须明确支持结构化输出；未知或不支持的模型在调用前拒绝。严格 JSON Schema 还会在文本或 `final_answer` 工具结果成为成功终态前由框架本地校验；JSON 或 Schema 错误可在独立预算内有界修正，耗尽则失败。`execute_typed()` 再将合格值反序列化为请求的 Rust 类型：
+格式随运行快照进入每次主 ReAct JSON 请求。模型事实必须明确支持结构化输出；未知或不支持的模型在调用前拒绝。严格 JSON Schema 还会在原生文本最终候选成为成功终态前由框架本地校验；JSON 或 Schema 错误可在独立预算内有界修正，耗尽则失败。`execute_typed()` 再将合格值反序列化为请求的 Rust 类型：
 
 ```rust
 let llm_config = LlmConfig::for_provider(
@@ -212,7 +211,6 @@ let mut agent = ReactAgentBuilder::new()
             "additionalProperties": false
         }),
     ))
-    .disable_cot()
     .build()?;
 
 let v: serde_json::Value = agent.execute_typed("人工智能正在改变世界。").await?;
@@ -306,8 +304,8 @@ let report: SalesReport = extractor_agent.extract(&raw_answer, schema).await?;
 
 1. **模型兼容性**：JSON 格式需要新鲜且明确的结构化输出能力事实。Provider 支持有助于生成合格输出；即使 Provider 忽略提示，本地严格校验也会拒绝不匹配值。显式 `Text` 会按未约束的默认请求发送。
 2. **`additionalProperties: false`**：JSON Schema 中建议始终设置此项，防止模型输出多余字段
-3. **与 CoT 的关系**：结构化提取场景通常不需要推理链，建议 `.enable_cot(false)` 以减少干扰
-4. **temperature**：`extract_json()` 内部固定使用 `temperature=0.0`，保证输出稳定；`AgentConfig::response_format()` 方式仍使用 Agent 默认温度
+3. **原生模型推理**：旧 CoT 提示开关已退役。推理深度使用 `ReactAgent::set_thinking()` 配置，并由模型能力决定支持方式；结构化输出仍走原本地 Schema 校验。
+4. **temperature**：`extract_json()` 不主动设置温度，沿用 provider/model 的原生缺省；`AgentConfig::response_format()` 的 ReAct 请求仍保留调用方显式配置的温度。通用 `chat_simple()`、Critic、摘要/增量压缩、压缩前记忆提取和后台 review 也不注入固定温度；`SimpleChatOptions::with_temperature()` 等显式 API 继续保留，并由原 provider 规则支持或明确拒绝。
 5. **Schema 引用**：严格校验支持 `$defs` 等本地引用；外部 HTTP/文件 `$ref` 会在模型调用前拒绝。请将外部定义打包进传入的 Schema。
 
 ---

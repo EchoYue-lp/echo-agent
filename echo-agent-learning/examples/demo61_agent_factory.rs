@@ -9,11 +9,12 @@
 //! cargo run -p echo-agent-learning --example demo61_agent_factory --features testing
 //! ```
 
-use echo_agent::agent::Agent;
 use echo_agent::agent::factory::{AgentFactory, AgentFactoryConfig, DefaultAgentFactory};
+use echo_agent::agent::{Agent, AgentEvent, AgentInvocationContext, CancellationToken};
 use echo_agent::error::Result;
 use echo_agent::prelude::ReactAgentBuilder;
 use echo_agent::testing::MockLlmClient;
+use futures::StreamExt;
 use std::sync::Arc;
 
 #[tokio::main]
@@ -71,11 +72,8 @@ async fn main() -> Result<()> {
     let mock_client = Arc::new(
         MockLlmClient::new()
             .with_model_name("mock-factory")
-            .then_tool_call(
-                "call_1",
-                "final_answer",
-                r#"{"answer":"Factory-created agent is working!"}"#,
-            ),
+            .with_response(r###"Factory-created agent is working!"###)
+            .with_response(r###"Invocation uses its original hard tool scope."###),
     );
 
     let manual_agent = ReactAgentBuilder::new()
@@ -89,6 +87,26 @@ async fn main() -> Result<()> {
     let result = manual_agent.execute("Hello, factory agent!").await?;
     println!("  ✓ 手动构建 + Mock 执行：");
     println!("    result: {}", result.trim());
+
+    // Carry the positive scope until the Agent acquires its execution lock.
+    // Later registrations cannot widen it; initial visibility is independent.
+    let mut scoped = manual_agent
+        .execute_stream_with_invocation_context(
+            "Only report the scoped result.",
+            CancellationToken::new(),
+            AgentInvocationContext {
+                // 同一调用同时声明只读与工具集合上界，不修改共享 Agent 的配置。
+                tool_access: Some(echo_agent::tools::ToolAccess::ReadOnly),
+                allowed_tools: Some(std::collections::HashSet::from(["task_list".to_string()])),
+                ..Default::default()
+            },
+        )
+        .await?;
+    while let Some(event) = scoped.next().await {
+        if let AgentEvent::FinalAnswer(answer) = event? {
+            println!("  ✓ Invocation 范围：{}", answer.trim());
+        }
+    }
 
     println!("\n═══════════════════════════════════════════════════════");
     println!("    demo61 完成");

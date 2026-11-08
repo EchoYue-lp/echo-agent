@@ -1,6 +1,6 @@
 //! ProgressBridge — connects Agent callbacks to TaskEventBus.
 //!
-//! Translates `AgentCallback` events (on_iteration, on_tool_start, etc.)
+//! Translates `AgentCallback` events (on_iteration, on_tool_start_with_id, etc.)
 //! into `TaskEvent::Progress` emissions, allowing background task tracking
 //! to observe agent execution in real time.
 
@@ -164,9 +164,10 @@ impl AgentCallback for ProgressBridge {
         Box::pin(async {})
     }
 
-    fn on_tool_start<'a>(
+    fn on_tool_start_with_id<'a>(
         &'a self,
         _agent: &'a str,
+        _call_id: &'a str,
         tool: &'a str,
         _args: &'a Value,
     ) -> futures::future::BoxFuture<'a, ()> {
@@ -182,18 +183,20 @@ impl AgentCallback for ProgressBridge {
         Box::pin(async {})
     }
 
-    fn on_tool_end<'a>(
+    fn on_tool_end_with_id<'a>(
         &'a self,
         _agent: &'a str,
+        _call_id: &'a str,
         _tool: &'a str,
         _result: &'a str,
     ) -> futures::future::BoxFuture<'a, ()> {
         Box::pin(async {})
     }
 
-    fn on_tool_error<'a>(
+    fn on_tool_error_with_id<'a>(
         &'a self,
         _agent: &'a str,
+        _call_id: &'a str,
         tool: &'a str,
         _err: &'a ReactError,
     ) -> futures::future::BoxFuture<'a, ()> {
@@ -216,5 +219,49 @@ impl AgentCallback for ProgressBridge {
     ) -> futures::future::BoxFuture<'a, ()> {
         self.emit_progress(100.0, "completed", Some("Task completed".to_string()));
         Box::pin(async {})
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn current_id_callbacks_keep_tool_error_and_final_progress() -> crate::error::Result<()> {
+        let bus = Arc::new(TaskEventBus::new());
+        let mut events = bus.subscribe();
+        let bridge = ProgressBridge::new("task".to_string(), bus, 4);
+        let args = serde_json::json!({});
+        bridge
+            .on_tool_start_with_id("agent", "original-call", "shell", &args)
+            .await;
+        bridge
+            .on_tool_end_with_id("agent", "original-call", "shell", "done")
+            .await;
+        bridge
+            .on_tool_interrupted_with_id(
+                "agent",
+                "interrupted-call",
+                "shell",
+                &args,
+                &ReactError::Other("interrupted".to_string()),
+            )
+            .await;
+        bridge.on_final_answer("agent", "answer").await;
+        let mut phases = Vec::new();
+        while let Ok(event) = events.try_recv() {
+            let TaskEvent::Progress { task_id, progress } = event.as_ref();
+            assert_eq!(task_id, "task");
+            phases.push((progress.current_phase.clone(), progress.message.clone()));
+        }
+        assert_eq!(
+            phases,
+            vec![
+                ("shell".to_string(), Some("Using: shell".to_string())),
+                ("error".to_string(), Some("Tool error: shell".to_string())),
+                ("completed".to_string(), Some("Task completed".to_string())),
+            ]
+        );
+        Ok(())
     }
 }

@@ -49,8 +49,7 @@ but a write error explicitly propagated by the Agent producer contract can make
 a driven Turn fail. A best-effort transcript diagnostic does not do so by itself.
 Adapter projection and awaited close are separate facts. ACP, Headless, and
 Channels now fence adapter admission, cancel accepted work, wait for its
-owner, and await `Agent::close` where the owner survives. A2A remains outside
-this repair and keeps its existing open lifecycle Findings. Channel delivery
+owner, and await `Agent::close` where the owner survives. 已退役A2A的历史Findings与原失败记录不因源码删除自动关闭，也不代表当前仍有A2A生命周期owner。 Channel delivery
 still has its own protocol boundary. See
 [ADR 0066](../adr/0066-agent-adapter-close-ownership.md),
 and [IM Channels](./15-im-channels.md).
@@ -239,7 +238,7 @@ withdraw request -> component-specific close / cleanup observation
 | --- | --- |
 | Trigger | Project, user, Plugin, SDK, or application configuration |
 | Admission | Parse and validate identity, scope, capabilities, and required resources before publication |
-| Authority | MCP, Hook, Skill, Plugin, and LSP retain their own registries and resource owners; no universal active generation owns all of them |
+| Authority | MCP、Hook、Skill 与 Plugin 保留原registry和资源owner; no universal active generation owns all of them |
 | Events and effects | Tool/resource registration, child process, network connection, resource transfer, Hook action, or Skill activation |
 | Cancellation and failure | Partial publication, rollback, and cleanup debt are component-specific and must remain observable; current components do not share one settlement protocol |
 | Terminal | A close is terminal only when the specific owner reports its resources settled; not every management API awaits every child resource |
@@ -254,7 +253,7 @@ and owned tasks or child processes before successful return. Manager close
 continues across all clients before aggregating failures.
 Current behavior must be read from [MCP](./08-mcp.md),
 [Hooks](./23-hooks.md), [Skills](./07-skills.md), [Plugins](./32-plugin-system.md),
-and [LSP](./31-lsp-integration.md); this overview does not promise atomic hot reload.
+以及[LSP退役说明](./31-lsp-integration.md); this overview does not promise atomic hot reload.
 
 ## SDK Consumer
 
@@ -306,3 +305,11 @@ parent or siblings. Connection close refuses new calls and cancels fallback
 children; `cancel_all` also cancels custom-run children without cancelling their
 parents. Invocation settlement and bounded drain remain separate from Agent or
 Task terminal authority. See [ADR 0060](../adr/0060-task-execution-store-cas-and-local-interruption.md).
+
+## 退役后生命周期边界
+
+旧LSP文件保留为用户原件；当前prepare不probe、读取、冻结、hash或缓存它，不产生专属诊断，
+其内容不参与generation身份，也不恢复语言服务；见[ADR0105](../adr/0105-current-config-and-plugin-inputs.md)。
+通用当前subagent文档冻结继续保留，Skill/Hook/MCP/Subagent的publication、rollback和cleanup receipt
+不因删除组件而丢失。原生reasoning签名、普通assistant phase、最终校验、Stop继续、持久化
+与物理结算仍沿原运行owner；运行时结束不等于EKO TaskRun／Goal完成。

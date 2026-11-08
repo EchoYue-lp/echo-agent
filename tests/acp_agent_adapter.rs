@@ -7,7 +7,10 @@ use agent_client_protocol::{
 use echo_agent::acp::{
     AcpAdapterConfig, AcpAgentAdapter, AcpConnectionProfile, AcpSessionContext, AcpSessionFactory,
 };
-use echo_agent::agent::{Agent, AgentEvent, CancellationToken, ToolInvocation};
+use echo_agent::agent::{
+    Agent, AgentEvent, AgentInvocationContext, AgentPhase, AssistantMessageBlock, AssistantPhase,
+    CancellationToken, ExecutionStatus, ExecutionStatusKind, ToolInvocation,
+};
 use echo_agent::error::AgentFailure;
 use echo_agent::error::{ReactError, Result};
 use echo_agent::llm::types::{ContentPart, Message, MessageContent};
@@ -90,19 +93,245 @@ impl Drop for RecordingAgent {
     }
 }
 
+// 当前 fixture 是 typed producer，自持原 invocation 和资源，不再把旧 text 流包装成原生成功。
+fn fixture_execution_id(invocation: &AgentInvocationContext) -> Result<String> {
+    invocation
+        .runtime
+        .as_ref()
+        .and_then(|runtime| {
+            runtime
+                .execution_id
+                .clone()
+                .or_else(|| runtime.turn_id.clone())
+        })
+        .filter(|id| !id.trim().is_empty())
+        .ok_or_else(|| {
+            ReactError::Other("fixture requires its admitted invocation identity".to_string())
+        })
+}
+
+fn fixture_status(
+    execution: &str,
+    request: &str,
+    sequence: u64,
+    status: ExecutionStatusKind,
+) -> AgentEvent {
+    let phase = if matches!(
+        status,
+        ExecutionStatusKind::Settled | ExecutionStatusKind::Failed | ExecutionStatusKind::Cancelled
+    ) {
+        AgentPhase::Terminal
+    } else {
+        AgentPhase::Thinking
+    };
+    AgentEvent::ExecutionStatus(ExecutionStatus {
+        adapter_generated: false,
+        execution_id: execution.to_string(),
+        request_id: Some(request.to_string()),
+        sequence,
+        phase,
+        status,
+        reason: None,
+    })
+}
+
+fn fixture_block(
+    request: &str,
+    id: &str,
+    sequence: u64,
+    phase: AssistantPhase,
+    text: &str,
+) -> AgentEvent {
+    AgentEvent::AssistantMessage {
+        block: AssistantMessageBlock {
+            provider_source: None,
+            block_id: id.to_string(),
+            request_id: request.to_string(),
+            sequence,
+            phase,
+            delta: text.to_string(),
+            complete: true,
+            provider: None,
+            reasoning: None,
+        },
+    }
+}
+
+impl RecordingAgent {
+    fn source<'a>(
+        &'a self,
+        message: Message,
+        cancel: CancellationToken,
+        invocation: AgentInvocationContext,
+    ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
+        let id = self.id;
+        let turn = self.turns.fetch_add(1, Ordering::AcqRel).saturating_add(1);
+        Box::pin(async move {
+            let plain = match &message {
+                Message {
+                    role: echo_agent::llm::types::Role::User,
+                    content: MessageContent::Text(text),
+                    tool_calls: None,
+                    name: None,
+                    tool_call_id: None,
+                    reasoning_content: None,
+                    reasoning_blocks: None,
+                    assistant_blocks: None,
+                    execution_status: None,
+                    approved_assistant_blocks: None,
+                    tool_result_is_error: None,
+                    provider_response: None,
+                } => Some(text.clone()),
+                _ => None,
+            };
+            let task = plain.clone().unwrap_or_default();
+            if task == "not-settled-setup" {
+                return Err(ReactError::ExecutionNotSettled {
+                    run_id: "original-foreign-run".to_string(),
+                    execution_id: Some("original-foreign-execution".to_string()),
+                });
+            }
+            if task == "ordinary-setup-error" {
+                return Err(ReactError::Other("ordinary setup failure".to_string()));
+            }
+            let execution = fixture_execution_id(&invocation)?;
+            let request = format!("{execution}:request");
+            let events = async_stream::stream! {
+                // 保原输入、能力边界及 guards 至这一条原 source 的真实 EOF。
+                let _original_message = message.clone();
+                let _original_invocation = invocation;
+                yield Ok(fixture_status(&execution, &request, 0, ExecutionStatusKind::Started));
+                if task == "held-receipt-after-actor-error" {
+                    let (sender, mut receiver) = tokio::sync::mpsc::channel(1);
+                    let gate = self.gate.clone();
+                    let producer_execution = execution.clone();
+                    let producer_request = request.clone();
+                    let producer = tokio::spawn(async move {
+                        cancel.cancelled().await;
+                        gate.cancelled.fetch_add(1, Ordering::AcqRel);
+                        gate.cancelled_notify.notify_waiters();
+                        gate.release.notified().await;
+                        let _ = sender.send(Ok(fixture_status(&producer_execution, &producer_request, 1, ExecutionStatusKind::Cancelled))).await;
+                    });
+                    // 两个观察者仍等待同一个原 JoinHandle；连接关闭不能替换或重启它。
+                    let producer_join = async move { producer.await.map_err(|error| error.to_string()) }.boxed().shared();
+                    *self.gate.producer_join.lock().unwrap_or_else(|error| error.into_inner()) = Some(producer_join.clone());
+                    self.gate.started.fetch_add(1, Ordering::AcqRel);
+                    self.gate.started_notify.notify_waiters();
+                    let terminal = receiver.recv().await;
+                    match producer_join.await {
+                        Ok(()) => { if let Some(terminal) = terminal { yield terminal; } }
+                        Err(error) => yield Err(ReactError::Other(error)),
+                    }
+                    return;
+                }
+                if task == "not-settled-after-cancel" {
+                    self.gate.started.fetch_add(1, Ordering::AcqRel);
+                    self.gate.started_notify.notify_waiters();
+                    cancel.cancelled().await;
+                    yield Err(ReactError::ExecutionNotSettled {
+                        run_id: "original-foreign-run".to_string(), execution_id: Some("original-foreign-execution".to_string()),
+                    });
+                    self.gate.started.fetch_add(1, Ordering::AcqRel);
+                    self.gate.started_notify.notify_waiters();
+                    self.gate.release.notified().await;
+                    self.gate.cancelled.fetch_add(1, Ordering::AcqRel);
+                    return;
+                }
+                if task == "wait-for-cancel" {
+                    cancel.cancelled().await;
+                    yield Ok(fixture_status(&execution, &request, 1, ExecutionStatusKind::Cancelled));
+                    return;
+                }
+                if task == "wait-for-release" {
+                    self.gate.started.fetch_add(1, Ordering::AcqRel);
+                    self.gate.started_notify.notify_waiters();
+                    let released = tokio::select! {
+                        () = self.gate.release.notified() => true,
+                        () = cancel.cancelled() => false,
+                    };
+                    if released {
+                        yield Ok(AgentEvent::FinalAnswer(format!("agent-{id}-released")));
+                        yield Ok(fixture_status(&execution, &request, 1, ExecutionStatusKind::Settled));
+                    } else {
+                        self.gate.cancelled.fetch_add(1, Ordering::AcqRel);
+                        yield Ok(fixture_status(&execution, &request, 1, ExecutionStatusKind::Cancelled));
+                    }
+                    return;
+                }
+                if task == "fail" {
+                    let failure = AgentFailure::message("acp-test", "scripted framework failure");
+                    yield Ok(AgentEvent::Error { source: "acp-test".to_string(), message: failure.message.clone(), failure });
+                    yield Ok(fixture_status(&execution, &request, 1, ExecutionStatusKind::Failed));
+                    return;
+                }
+                if task == "tool" || task == "tool-failure" {
+                    let failed = task == "tool-failure";
+                    let call_id = if failed { "call-failed" } else { "call-1" };
+                    let args = if failed { serde_json::json!({}) } else { serde_json::json!({"path":"README.md"}) };
+                    yield Ok(AgentEvent::ToolCall { call_id: call_id.to_string(), invocation: ToolInvocation {
+                        requested_name: "inspect".to_string(), requested_args: args.clone(),
+                        name: "inspect".to_string(), args, rewrites: Vec::new(),
+                    } });
+                    if !failed {
+                        yield Ok(AgentEvent::ToolStream { call_id: call_id.to_string(), name: "inspect".to_string(),
+                            event: ToolStreamEvent::Progress { message: "reading".to_string(), percent: Some(50) } });
+                    }
+                    let mut result = ToolResult::success(if failed { "structured failure without error text" } else { "done" });
+                    if failed {
+                        result.success = false;
+                        result.error = None;
+                        result.failure = Some(ToolFailure::new(ToolFailureCategory::Permanent));
+                    }
+                    yield Ok(AgentEvent::ToolResult { call_id: call_id.to_string(), name: "inspect".to_string(), result });
+                    yield Ok(AgentEvent::FinalAnswer(if failed { "tool-failed" } else { "tool-done" }.to_string()));
+                    yield Ok(fixture_status(&execution, &request, 1, ExecutionStatusKind::Settled));
+                    return;
+                }
+                if task == "many-small-updates" {
+                    for (sequence, text) in [(0, "a"), (1, "b"), (2, "c")] {
+                        let mut event = fixture_block(&request, "answer", sequence, AssistantPhase::Unknown, text);
+                        if let AgentEvent::AssistantMessage { block } = &mut event { block.complete = sequence == 2; }
+                        yield Ok(event);
+                    }
+                    yield Ok(AgentEvent::FinalAnswer("abc".to_string()));
+                    yield Ok(fixture_status(&execution, &request, 1, ExecutionStatusKind::Settled));
+                    return;
+                }
+                let answer = if let Some(text) = plain {
+                    yield Ok(fixture_block(&request, "reasoning", 0, AssistantPhase::Reasoning, "reasoning"));
+                    format!("agent-{id}-turn-{turn}:{text}")
+                } else {
+                    let rendered = match &message.content {
+                        MessageContent::Parts(parts) => parts.iter().map(|part| match part {
+                            ContentPart::Text { text } => format!("text:{text}"),
+                            ContentPart::ResourceLink { resource } => format!("resource:{}", serde_json::to_string(resource).unwrap_or_default()),
+                            ContentPart::ImageUrl { .. } => "image".to_string(),
+                            ContentPart::File { name, .. } => format!("file:{name}"),
+                        }).collect::<Vec<_>>().join("|"),
+                        content => content.as_text().unwrap_or_default(),
+                    };
+                    format!("agent-{id}-turn-{turn}-structured:{rendered}")
+                };
+                yield Ok(fixture_block(&request, "answer", 1, AssistantPhase::FinalAnswer, &answer));
+                yield Ok(AgentEvent::FinalAnswer(answer));
+                yield Ok(fixture_status(&execution, &request, 1, ExecutionStatusKind::Settled));
+            };
+            Ok(Box::pin(events) as BoxStream<'a, Result<AgentEvent>>)
+        })
+    }
+}
+
 impl Agent for RecordingAgent {
     fn name(&self) -> &str {
         "recording-acp-agent"
     }
-
     fn model_name(&self) -> &str {
         "deterministic"
     }
-
     fn system_prompt(&self) -> &str {
         "ACP adapter test"
     }
-
     fn close<'a>(&'a self) -> BoxFuture<'a, Result<()>> {
         Box::pin(async move {
             self.gate.close_calls.fetch_add(1, Ordering::AcqRel);
@@ -110,251 +339,136 @@ impl Agent for RecordingAgent {
             Ok(())
         })
     }
-
-    fn execute<'a>(&'a self, task: &'a str) -> BoxFuture<'a, Result<String>> {
-        Box::pin(async move { Ok(task.to_string()) })
-    }
-
-    fn execute_stream<'a>(
-        &'a self,
-        task: &'a str,
-    ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
-        let answer = task.to_string();
-        Box::pin(async move { Ok(stream::iter(vec![Ok(AgentEvent::FinalAnswer(answer))]).boxed()) })
-    }
-
-    fn chat_stream_with_cancel<'a>(
-        &'a self,
-        message: &'a str,
-        cancel: CancellationToken,
-    ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
-        let message = message.to_string();
-        let id = self.id;
-        let turn = self.turns.fetch_add(1, Ordering::AcqRel).saturating_add(1);
-        Box::pin(async move {
-            if message == "not-settled-setup" {
-                return Err(ReactError::ExecutionNotSettled {
-                    run_id: "original-foreign-run".to_string(),
-                    execution_id: Some("original-foreign-execution".to_string()),
-                });
-            }
-            if message == "ordinary-setup-error" {
-                return Err(ReactError::Other("ordinary setup failure".to_string()));
-            }
-            if message == "held-receipt-after-actor-error" {
-                let (sender, mut receiver) = tokio::sync::mpsc::channel(1);
-                let gate = self.gate.clone();
-                let producer = tokio::spawn(async move {
-                    cancel.cancelled().await;
-                    gate.cancelled.fetch_add(1, Ordering::AcqRel);
-                    gate.cancelled_notify.notify_waiters();
-                    gate.release.notified().await;
-                    let _ = sender.send(Ok(AgentEvent::Cancelled)).await;
-                });
-                // Both observers await this same original JoinHandle. Dropping
-                // the raw stream cannot replace or restart its held producer.
-                let producer_join =
-                    async move { producer.await.map_err(|error| error.to_string()) }
-                        .boxed()
-                        .shared();
-                *self
-                    .gate
-                    .producer_join
-                    .lock()
-                    .unwrap_or_else(|error| error.into_inner()) = Some(producer_join.clone());
-                let events = async_stream::stream! {
-                    self.gate.started.fetch_add(1, Ordering::AcqRel);
-                    self.gate.started_notify.notify_waiters();
-                    let terminal = receiver.recv().await;
-                    match producer_join.await {
-                        Ok(()) => {
-                            if let Some(terminal) = terminal {
-                                yield terminal;
-                            }
-                        }
-                        Err(error) => yield Err(ReactError::Other(error)),
-                    }
-                };
-                return Ok(Box::pin(events) as BoxStream<'a, Result<AgentEvent>>);
-            }
-            if message == "not-settled-after-cancel" {
-                let events = async_stream::stream! {
-                    self.gate.started.fetch_add(1, Ordering::AcqRel);
-                    self.gate.started_notify.notify_waiters();
-                    cancel.cancelled().await;
-                    yield Err(ReactError::ExecutionNotSettled {
-                        run_id: "original-foreign-run".to_string(),
-                        execution_id: Some("original-foreign-execution".to_string()),
-                    });
-                    self.gate.started.fetch_add(1, Ordering::AcqRel);
-                    self.gate.started_notify.notify_waiters();
-                    self.gate.release.notified().await;
-                    self.gate.cancelled.fetch_add(1, Ordering::AcqRel);
-                };
-                return Ok(Box::pin(events) as BoxStream<'a, Result<AgentEvent>>);
-            }
-            if message == "wait-for-cancel" {
-                let events = async_stream::stream! {
-                    cancel.cancelled().await;
-                    yield Ok(AgentEvent::Cancelled);
-                };
-                return Ok(Box::pin(events) as BoxStream<'a, Result<AgentEvent>>);
-            }
-            if message == "wait-for-release" {
-                self.gate.started.fetch_add(1, Ordering::AcqRel);
-                self.gate.started_notify.notify_waiters();
-                let event = tokio::select! {
-                    () = self.gate.release.notified() => {
-                        AgentEvent::FinalAnswer(format!("agent-{id}-released"))
-                    }
-                    () = cancel.cancelled() => {
-                        self.gate.cancelled.fetch_add(1, Ordering::AcqRel);
-                        AgentEvent::Cancelled
-                    }
-                };
-                return Ok(stream::iter(vec![Ok(event)]).boxed());
-            }
-            if message == "fail" {
-                let failure = AgentFailure::message("acp-test", "scripted framework failure");
-                return Ok(stream::iter(vec![Ok(AgentEvent::Error {
-                    source: "acp-test".to_string(),
-                    message: failure.message.clone(),
-                    failure,
-                })])
-                .boxed());
-            }
-            if message == "tool" {
-                return Ok(stream::iter(vec![
-                    Ok(AgentEvent::ToolCall {
-                        call_id: "call-1".to_string(),
-                        invocation: ToolInvocation {
-                            requested_name: "inspect".to_string(),
-                            requested_args: serde_json::json!({"path": "README.md"}),
-                            name: "inspect".to_string(),
-                            args: serde_json::json!({"path": "README.md"}),
-                            rewrites: Vec::new(),
-                        },
-                    }),
-                    Ok(AgentEvent::ToolStream {
-                        call_id: "call-1".to_string(),
-                        name: "inspect".to_string(),
-                        event: ToolStreamEvent::Progress {
-                            message: "reading".to_string(),
-                            percent: Some(50),
-                        },
-                    }),
-                    Ok(AgentEvent::ToolResult {
-                        call_id: "call-1".to_string(),
-                        name: "inspect".to_string(),
-                        result: ToolResult::success("done"),
-                    }),
-                    Ok(AgentEvent::FinalAnswer("tool-done".to_string())),
-                ])
-                .boxed());
-            }
-            if message == "tool-failure" {
-                let mut failed = ToolResult::success("structured failure without error text");
-                failed.success = false;
-                failed.error = None;
-                failed.failure = Some(ToolFailure::new(ToolFailureCategory::Permanent));
-                return Ok(stream::iter(vec![
-                    Ok(AgentEvent::ToolCall {
-                        call_id: "call-failed".to_string(),
-                        invocation: ToolInvocation {
-                            requested_name: "inspect".to_string(),
-                            requested_args: serde_json::json!({}),
-                            name: "inspect".to_string(),
-                            args: serde_json::json!({}),
-                            rewrites: Vec::new(),
-                        },
-                    }),
-                    Ok(AgentEvent::ToolResult {
-                        call_id: "call-failed".to_string(),
-                        name: "inspect".to_string(),
-                        result: failed,
-                    }),
-                    Ok(AgentEvent::FinalAnswer("tool-failed".to_string())),
-                ])
-                .boxed());
-            }
-            if message == "many-small-updates" {
-                return Ok(stream::iter(vec![
-                    Ok(AgentEvent::Token("a".to_string())),
-                    Ok(AgentEvent::Token("b".to_string())),
-                    Ok(AgentEvent::Token("c".to_string())),
-                    Ok(AgentEvent::FinalAnswer("abc".to_string())),
-                ])
-                .boxed());
-            }
-            let answer = format!("agent-{id}-turn-{turn}:{message}");
-            Ok(stream::iter(vec![
-                Ok(AgentEvent::ThinkStart),
-                Ok(AgentEvent::Token("reasoning".to_string())),
-                Ok(AgentEvent::ThinkEnd {
-                    prompt_tokens: 1,
-                    completion_tokens: 1,
-                }),
-                Ok(AgentEvent::Token(answer.clone())),
-                Ok(AgentEvent::FinalAnswer(answer)),
-            ])
-            .boxed())
-        })
-    }
-
-    fn chat_stream_message_with_cancel<'a>(
+    fn chat_stream_message_with_invocation_context<'a>(
         &'a self,
         message: Message,
         cancel: CancellationToken,
+        invocation: AgentInvocationContext,
     ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
-        // A structured override must preserve its own ordinary text behavior:
-        // cancellation, gate barriers, tools and scripted failures are shared.
-        // Real Parts/ResourceLink rendering stays on the branch below.
-        let message = match message {
-            Message {
-                role: echo_agent::llm::types::Role::User,
-                content: MessageContent::Text(text),
-                tool_calls: None,
-                name: None,
-                tool_call_id: None,
-                reasoning_content: None,
-                reasoning_blocks: None,
-            } => {
-                return Box::pin(async move {
-                    let events = async_stream::stream! {
-                        match self.chat_stream_with_cancel(&text, cancel).await {
-                            Ok(mut legacy) => {
-                                // An observation is an item, not permission for
-                                // this fixture adapter to drop the original source.
-                                while let Some(event) = legacy.next().await { yield event; }
-                            }
-                            Err(error) => yield Err(error),
-                        }
-                    };
-                    Ok(Box::pin(events) as BoxStream<'a, Result<AgentEvent>>)
-                });
+        self.source(message, cancel, invocation)
+    }
+    fn execute_stream_message_with_invocation_context<'a>(
+        &'a self,
+        message: Message,
+        cancel: CancellationToken,
+        invocation: AgentInvocationContext,
+    ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
+        self.source(message, cancel, invocation)
+    }
+}
+
+struct InvocationGuardDrop(Arc<AtomicUsize>);
+
+impl Drop for InvocationGuardDrop {
+    fn drop(&mut self) {
+        self.0.fetch_add(1, Ordering::AcqRel);
+    }
+}
+
+#[tokio::test]
+async fn typed_recording_fixture_retains_original_identity_and_guards_until_eof() -> Result<()> {
+    let drops = Arc::new(AtomicUsize::new(0));
+    let agent = RecordingAgent::new(
+        7,
+        Arc::new(AtomicBool::new(false)),
+        Arc::new(TurnGate::default()),
+    );
+    let invocation = AgentInvocationContext {
+        runtime: Some(echo_agent::tools::ExternalRunContext {
+            execution_id: Some("original-invocation".to_string()),
+            turn_id: Some("reserved-turn".to_string()),
+            resource_guards: vec![echo_core::tools::InvocationResourceGuard::new(
+                InvocationGuardDrop(drops.clone()),
+            )],
+            ..Default::default()
+        }),
+        resource_guards: vec![echo_core::tools::InvocationResourceGuard::new(
+            InvocationGuardDrop(drops.clone()),
+        )],
+        ..Default::default()
+    };
+    let mut source = agent
+        .chat_stream_message_with_invocation_context(
+            Message::user("original 中文".to_string()),
+            CancellationToken::new(),
+            invocation,
+        )
+        .await?;
+    let mut terminal_seen = false;
+    while let Some(event) = source.next().await {
+        if let AgentEvent::ExecutionStatus(status) = event? {
+            assert_eq!(status.execution_id, "original-invocation");
+            assert!(!status.adapter_generated);
+            if status.status == ExecutionStatusKind::Settled {
+                terminal_seen = true;
+                break;
             }
-            message => message,
+        }
+    }
+    assert!(terminal_seen);
+    assert_eq!(
+        drops.load(Ordering::Acquire),
+        0,
+        "显示terminal不能提前释放原invocation资源"
+    );
+    assert!(source.next().await.is_none());
+    assert_eq!(
+        drops.load(Ordering::Acquire),
+        2,
+        "同一原source的EOF释放完整invocation"
+    );
+    Ok(())
+}
+
+// 用于投影/receipt/close边界测试的当前 typed producer；不提供旧 text fallback。
+struct NativeEchoAgent;
+
+fn native_echo_source<'a>(
+    message: Message,
+    invocation: AgentInvocationContext,
+) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
+    Box::pin(async move {
+        let execution = fixture_execution_id(&invocation)?;
+        let request = format!("{execution}:request");
+        let answer = message.content.as_text().ok_or_else(|| {
+            ReactError::Other("native echo fixture requires text input".to_string())
+        })?;
+        let source = async_stream::stream! {
+            let _original_message = message;
+            let _original_invocation = invocation;
+            yield Ok(fixture_status(&execution, &request, 0, ExecutionStatusKind::Started));
+            yield Ok(AgentEvent::FinalAnswer(answer));
+            yield Ok(fixture_status(&execution, &request, 1, ExecutionStatusKind::Settled));
         };
-        let id = self.id;
-        let turn = self.turns.fetch_add(1, Ordering::AcqRel).saturating_add(1);
-        let rendered = match message.content {
-            MessageContent::Parts(parts) => parts
-                .into_iter()
-                .map(|part| match part {
-                    ContentPart::Text { text } => format!("text:{text}"),
-                    ContentPart::ResourceLink { resource } => format!(
-                        "resource:{}",
-                        serde_json::to_string(&resource).unwrap_or_default()
-                    ),
-                    ContentPart::ImageUrl { .. } => "image".to_string(),
-                    ContentPart::File { name, .. } => format!("file:{name}"),
-                })
-                .collect::<Vec<_>>()
-                .join("|"),
-            content => content.as_text().unwrap_or_default(),
-        };
-        let answer = format!("agent-{id}-turn-{turn}-structured:{rendered}");
-        Box::pin(async move { Ok(stream::iter(vec![Ok(AgentEvent::FinalAnswer(answer))]).boxed()) })
+        Ok(Box::pin(source) as BoxStream<'a, Result<AgentEvent>>)
+    })
+}
+
+impl Agent for NativeEchoAgent {
+    fn name(&self) -> &str {
+        "native-echo"
+    }
+    fn model_name(&self) -> &str {
+        "test"
+    }
+    fn system_prompt(&self) -> &str {
+        "test"
+    }
+    fn chat_stream_message_with_invocation_context<'a>(
+        &'a self,
+        message: Message,
+        _cancel: CancellationToken,
+        invocation: AgentInvocationContext,
+    ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
+        native_echo_source(message, invocation)
+    }
+    fn execute_stream_message_with_invocation_context<'a>(
+        &'a self,
+        message: Message,
+        _cancel: CancellationToken,
+        invocation: AgentInvocationContext,
+    ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
+        native_echo_source(message, invocation)
     }
 }
 
@@ -438,22 +552,13 @@ impl Agent for CountingCloseAgent {
     fn system_prompt(&self) -> &str {
         "test"
     }
-    fn execute<'a>(&'a self, _task: &'a str) -> BoxFuture<'a, Result<String>> {
-        Box::pin(async { Ok("done".to_string()) })
-    }
-    fn execute_stream<'a>(
+    fn chat_stream_message_with_invocation_context<'a>(
         &'a self,
-        _task: &'a str,
-    ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
-        Box::pin(async { Ok(stream::empty().boxed()) })
-    }
-    fn chat_stream_with_cancel<'a>(
-        &'a self,
-        message: &'a str,
+        message: Message,
         _cancel: CancellationToken,
+        invocation: AgentInvocationContext,
     ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
-        let answer = message.to_string();
-        Box::pin(async move { Ok(stream::iter(vec![Ok(AgentEvent::FinalAnswer(answer))]).boxed()) })
+        native_echo_source(message, invocation)
     }
     fn close(&self) -> BoxFuture<'_, Result<()>> {
         Box::pin(async move {
@@ -1086,7 +1191,7 @@ async fn oversized_projected_update_fails_the_prompt_without_closing_the_connect
 #[tokio::test]
 async fn terminal_projection_failure_never_returns_end_turn() -> agent_client_protocol::Result<()> {
     let adapter = AcpAgentAdapter::with_config(
-        |_context: AcpSessionContext| async { Ok(Box::new(TextOnlyAgent) as Box<dyn Agent>) },
+        |_context: AcpSessionContext| async { Ok(Box::new(NativeEchoAgent) as Box<dyn Agent>) },
         AcpAdapterConfig {
             max_update_chars: 4,
             ..AcpAdapterConfig::default()
@@ -1128,7 +1233,7 @@ async fn terminal_projection_failure_never_returns_end_turn() -> agent_client_pr
 #[tokio::test]
 async fn receipt_persistence_failure_never_returns_end_turn() -> agent_client_protocol::Result<()> {
     let adapter = AcpAgentAdapter::new(|_context: AcpSessionContext| async {
-        Ok(Box::new(TextOnlyAgent) as Box<dyn Agent>)
+        Ok(Box::new(NativeEchoAgent) as Box<dyn Agent>)
     })
     .with_profile(FailingSettlementProfile);
     let _close_owner = adapter.close_owner();
@@ -2319,7 +2424,13 @@ async fn ledger_bounds_retain_a_floor_and_clamp_memory() -> Result<()> {
             &identity,
             sequence,
             None,
-            AgentEvent::Token(format!("event-{sequence}")),
+            fixture_block(
+                "ledger-request",
+                "ledger-block",
+                sequence,
+                AssistantPhase::Commentary,
+                &format!("event-{sequence}"),
+            ),
         )?;
         ledger.commit(envelope)?;
     }
@@ -2327,12 +2438,12 @@ async fn ledger_bounds_retain_a_floor_and_clamp_memory() -> Result<()> {
     assert_eq!(ledger.retained_floor(), 3, "oldest retained sequence");
     let after = ledger.events_after(0);
     assert_eq!(after.len(), 2);
-    assert_eq!(after[0].sequence, 3);
+    assert_eq!(after.first().map(|event| event.sequence), Some(3));
     Ok(())
 }
 
 #[tokio::test]
-async fn text_only_agent_keeps_standard_plain_user_prompts_with_canonical_turn_context()
+async fn text_only_agent_cannot_use_retired_plain_text_fallback()
 -> agent_client_protocol::Result<()> {
     let updates = Arc::new(Mutex::new(Vec::<v1::SessionNotification>::new()));
     let captured = updates.clone();
@@ -2360,7 +2471,7 @@ async fn text_only_agent_keeps_standard_plain_user_prompts_with_canonical_turn_c
                 .await?;
             let session = connection
                 .send_request(v1::NewSessionRequest::new(
-                    absolute_test_path("acp-legacy-text-identity")
+                    absolute_test_path("acp-rejected-text-only")
                         .map_err(Error::into_internal_error)?,
                 ))
                 .block_task()
@@ -2373,8 +2484,11 @@ async fn text_only_agent_keeps_standard_plain_user_prompts_with_canonical_turn_c
                         vec![v1::ContentBlock::Text(v1::TextContent::new(text))],
                     ))
                     .block_task()
-                    .await?;
-                assert_eq!(response.stop_reason, v1::StopReason::EndTurn);
+                    .await;
+                assert_eq!(
+                    response.err().map(|error| error.code),
+                    Some(ErrorCode::InternalError)
+                );
             }
             Ok(())
         })
@@ -2391,14 +2505,17 @@ async fn text_only_agent_keeps_standard_plain_user_prompts_with_canonical_turn_c
             _ => None,
         })
         .collect();
-    assert_eq!(observed, vec!["first original 中文", "second original 🌊"]);
+    assert!(
+        observed.is_empty(),
+        "退役的text-only fallback不得产生成功正文"
+    );
     Ok(())
 }
 
-struct LegacySetupFailureAgent;
-impl Agent for LegacySetupFailureAgent {
+struct TypedSetupFailureAgent;
+impl Agent for TypedSetupFailureAgent {
     fn name(&self) -> &str {
-        "legacy-setup-failure"
+        "typed-setup-failure"
     }
     fn model_name(&self) -> &str {
         "none"
@@ -2406,20 +2523,15 @@ impl Agent for LegacySetupFailureAgent {
     fn system_prompt(&self) -> &str {
         ""
     }
-    fn execute<'a>(&'a self, _text: &'a str) -> BoxFuture<'a, Result<String>> {
-        Box::pin(async {
-            Err(ReactError::Other(
-                "original legacy setup failure".to_string(),
-            ))
-        })
-    }
-    fn execute_stream<'a>(
+    fn chat_stream_message_with_invocation_context<'a>(
         &'a self,
-        _text: &'a str,
+        _message: Message,
+        _cancel: CancellationToken,
+        _invocation: AgentInvocationContext,
     ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
         Box::pin(async {
             Err(ReactError::Other(
-                "original legacy setup failure".to_string(),
+                "original typed setup failure".to_string(),
             ))
         })
     }
@@ -2442,9 +2554,9 @@ impl echo_agent::runtime::EventSink for CanonicalFailureSink {
 }
 
 #[tokio::test]
-async fn text_only_agent_fallback_setup_error_keeps_original_canonical_failed_receipt() -> Result<()>
-{
-    let turn_id = "original-canonical-legacy-turn";
+async fn typed_setup_error_keeps_original_failed_receipt_without_inventing_source_status()
+-> Result<()> {
+    let turn_id = "original-canonical-typed-turn";
     let identity = echo_agent::agent::EventIdentity::for_chat(
         None,
         turn_id.to_string(),
@@ -2462,22 +2574,37 @@ async fn text_only_agent_fallback_setup_error_keeps_original_canonical_failed_re
     );
     let sink = CanonicalFailureSink::default();
     let receipt = echo_agent::runtime::AgentTurnDriver
-        .drive(&LegacySetupFailureAgent, request, &sink)
+        .drive(&TypedSetupFailureAgent, request, &sink)
         .await?;
     assert_eq!(receipt.turn_id.as_str(), turn_id);
     assert!(
-        matches!(receipt.outcome, echo_agent::runtime::TurnOutcome::Failed(ref failure) if failure.message == "original legacy setup failure")
+        matches!(receipt.outcome, echo_agent::runtime::TurnOutcome::Failed(ref failure) if failure.message == "original typed setup failure")
     );
     assert!(receipt.final_answer.is_none());
     let events = sink.0.lock().unwrap_or_else(|e| e.into_inner());
+    // 源未 admission，不得伪造 Started/Failed；setup failure仍由原driver记录投递事实。
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(&event.payload, AgentEvent::ExecutionStatus(_)))
+    );
     assert_eq!(
         events
             .iter()
-            .filter(|event| event.payload.is_terminal())
+            .filter(|event| event.payload.is_execution_terminal())
+            .count(),
+        0
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(&event.payload,
+        AgentEvent::Error { failure, .. }
+            if failure.message == "original typed setup failure"))
             .count(),
         1
     );
     assert!(events.iter().all(|event| event.turn_id.as_str() == turn_id));
-    assert!(events.iter().any(|event| matches!(&event.payload, AgentEvent::Error { failure, .. } if failure.message == "original legacy setup failure")));
+    assert!(events.iter().any(|event| matches!(&event.payload, AgentEvent::Error { failure, .. } if failure.message == "original typed setup failure")));
     Ok(())
 }

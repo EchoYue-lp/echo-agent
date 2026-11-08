@@ -20,6 +20,7 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 const TOOL_RESULT_CACHE_TTL: Duration = Duration::from_secs(60);
 const TOOL_RESULT_CACHE_CAPACITY: usize = 256;
+const MAX_TOOL_RETRY_DELAY_MS: u64 = 30_000;
 
 fn cancelled_error(tool_name: &str) -> ReactError {
     ReactError::Agent(Box::new(AgentError::Cancelled(format!(
@@ -98,13 +99,13 @@ async fn cancel_aware<T>(
 // Only canonical started/draining calls use this helper. Their configured
 // deadline requests cooperative cancellation; it never drops the original
 // execution or its permit. Ordinary bounded ToolManager calls stay unchanged.
-async fn await_started_execution<T>(
-    execution: impl std::future::Future<Output = Result<T>>,
+async fn await_started_execution(
+    execution: impl std::future::Future<Output = Result<ToolResult>>,
     ctx: &ToolContext,
     timeout: Option<Duration>,
     tool_name: &str,
     completed: Option<&std::sync::atomic::AtomicBool>,
-) -> Result<T> {
+) -> Result<ToolResult> {
     let Some(timeout) = timeout else {
         return execution.await;
     };
@@ -127,6 +128,14 @@ async fn await_started_execution<T>(
             match execution.await {
                 Err(error @ ReactError::ExecutionNotSettled { .. }) => Err(error),
                 result if completed_first => result,
+                // A successful result that arrived *after* the caller's budget
+                // expired is still observed knowledge: for a background launch
+                // it is the accepted cell receipt. Downgrading it to Timeout
+                // would report "not created" about a cell the supervisor owns.
+                Ok(result) if tool_name == "shell" && result.success && result.data.as_ref().is_some_and(|data| {
+                    serde_json::from_value::<echo_core::tools::cell::CommandCellLaunchReceipt>(data.clone())
+                        .is_ok_and(|receipt| !receipt.cell_id.is_empty() && receipt.deadline > receipt.accepted_at)
+                }) => Ok(result),
                 _ => Err(ToolError::Timeout(tool_name.to_string()).into()),
             }
         }
@@ -215,7 +224,7 @@ fn retry_delay_ms(configured_ms: u64, retry_after_ms: Option<u64>, attempt: u32)
     let base = configured_ms
         .saturating_mul(1_u64 << exponent)
         .max(retry_after_ms.unwrap_or(0))
-        .min(30_000);
+        .min(MAX_TOOL_RETRY_DELAY_MS);
     if base == 0 {
         return 0;
     }
@@ -227,7 +236,7 @@ fn retry_delay_ms(configured_ms: u64, retry_after_ms: Option<u64>, attempt: u32)
     }
     let jitter_cap = base.saturating_div(4).max(1);
     base.saturating_add(hasher.finish() % jitter_cap)
-        .min(30_000)
+        .min(MAX_TOOL_RETRY_DELAY_MS)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -347,7 +356,11 @@ pub struct ToolManager {
     started_resources: Arc<echo_core::agent::admission::KeyedExecutionAdmission>,
     tools: DashMap<String, Arc<dyn Tool>>,
     registration_lock: parking_lot::Mutex<()>,
+    #[cfg(test)]
+    registration_observer: Option<Arc<dyn Fn(RegistrationObservation) + Send + Sync>>,
     config: ToolExecutionConfig,
+    native_execution_admission:
+        RwLock<Option<Arc<dyn echo_core::tools::NativeExecutionResourceAdmission>>>,
     /// Write/execute semaphore (limits concurrent write/execute tools).
     semaphore: Option<Arc<Semaphore>>,
     /// Read semaphore (higher limit for concurrent read-only tools).
@@ -365,6 +378,13 @@ pub struct ToolManager {
     /// its result only if this epoch is unchanged since its cache lookup.
     result_cache_epoch: AtomicU64,
     budget_metrics: ToolBudgetMetrics,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug)]
+enum RegistrationObservation {
+    Published,
+    Selection { contended: bool },
 }
 
 struct ResultCacheInvalidationGuard<'a> {
@@ -513,6 +533,17 @@ impl Tool for ToolSearchTool {
                         .is_none_or(|visibility| visibility.is_eligible(&definition.function.name))
                 })
                 .filter_map(|definition| {
+                    let definition = if ctx.tool_access == Some(ToolAccess::ReadOnly) {
+                        // 名称上界不代表同名新实现仍只读。能力与描述取同一实际工具，
+                        // 避免本地热替换后把写工具误报为可激活。
+                        let tool = manager.get_tool(&definition.function.name)?;
+                        if !tool.capabilities().is_read_only() {
+                            return None;
+                        }
+                        ToolDefinition::from_tool(tool.as_ref())
+                    } else {
+                        definition
+                    };
                     let name_lower = definition.function.name.to_lowercase();
                     let description_lower = definition.function.description.to_lowercase();
                     let score = if name_lower == query_lower {
@@ -814,9 +845,12 @@ impl ToolManager {
             ),
             tools: DashMap::new(),
             registration_lock: parking_lot::Mutex::new(()),
+            #[cfg(test)]
+            registration_observer: None,
             semaphore: None,
             read_semaphore: None,
             config: ToolExecutionConfig::default(),
+            native_execution_admission: RwLock::new(None),
             cached_definitions: RwLock::new(None),
             definitions_version: AtomicU64::new(0),
             result_cache: RwLock::new(HashMap::new()),
@@ -838,15 +872,38 @@ impl ToolManager {
             ),
             tools: DashMap::new(),
             registration_lock: parking_lot::Mutex::new(()),
+            #[cfg(test)]
+            registration_observer: None,
             semaphore,
             read_semaphore,
             config,
+            native_execution_admission: RwLock::new(None),
             cached_definitions: RwLock::new(None),
             definitions_version: AtomicU64::new(0),
             result_cache: RwLock::new(HashMap::new()),
             result_cache_epoch: AtomicU64::new(0),
             budget_metrics: ToolBudgetMetrics::default(),
         }
+    }
+
+    /// 安装宿主原生资源能力；共享 manager 重复安装只替换引用，不包装工具。
+    ///
+    /// 在运行前配置；已有 attempt 保留自己的引用。执行器还须兑现独立的物理保有合同，
+    /// 未支持后端会在 workload 创建前明确失败。
+    ///
+    /// ```rust
+    /// # use std::sync::Arc;
+    /// # use echo_core::tools::NativeExecutionResourceAdmission;
+    /// # fn configure(provider: Arc<dyn NativeExecutionResourceAdmission>) {
+    /// let manager = echo_execution::tools::ToolManager::new();
+    /// manager.set_native_execution_admission(Some(provider));
+    /// # }
+    /// ```
+    pub fn set_native_execution_admission(
+        &self,
+        provider: Option<Arc<dyn echo_core::tools::NativeExecutionResourceAdmission>>,
+    ) {
+        *self.native_execution_admission.write() = provider;
     }
 
     pub fn max_concurrency(&self) -> Option<usize> {
@@ -918,6 +975,8 @@ impl ToolManager {
     pub fn replace(&self, tool: Box<dyn Tool>) -> Option<Arc<dyn Tool>> {
         let _registration = self.registration_lock.lock();
         let old = self.tools.insert(tool.name().to_string(), Arc::from(tool));
+        #[cfg(test)]
+        self.observe_registration(RegistrationObservation::Published);
         self.invalidate_cache();
         old
     }
@@ -971,6 +1030,28 @@ impl ToolManager {
         self.tools
             .get(tool_name)
             .map(|entry| Arc::clone(entry.value()))
+    }
+
+    #[cfg(test)]
+    fn observe_registration(&self, observation: RegistrationObservation) {
+        if let Some(observer) = &self.registration_observer {
+            observer(observation);
+        }
+    }
+
+    // 与所有registry mutation共用原锁，避免工具已发布但cache epoch尚未更新。
+    // owned Arc和epoch只在此同步配对；返回前释放锁，任何validator/permit/执行均在锁外。
+    fn get_tool_with_cache_epoch(&self, tool_name: &str) -> Result<(Arc<dyn Tool>, u64)> {
+        #[cfg(test)]
+        if self.registration_lock.is_locked() {
+            self.observe_registration(RegistrationObservation::Selection { contended: true });
+        }
+        let _registration = self.registration_lock.lock();
+        let epoch = self.result_cache_epoch.load(Ordering::Acquire);
+        let tool = self
+            .get_tool(tool_name)
+            .ok_or_else(|| ToolError::NotFound(tool_name.to_string()))?;
+        Ok((tool, epoch))
     }
 
     pub fn get_tool_definitions(&self) -> Vec<ToolDefinition> {
@@ -1068,10 +1149,17 @@ impl ToolManager {
         tool_name: &str,
         parameters: ToolParameters,
         ctx: &ToolContext,
+        expected_tool: &Arc<dyn Tool>,
         admission: &ToolAdmissionFn<'_>,
     ) -> Result<ToolResult> {
-        self.execute_tool_inner(tool_name, parameters, ctx, true, Some(admission))
-            .await
+        self.execute_tool_inner(
+            tool_name,
+            parameters,
+            ctx,
+            true,
+            Some((admission, expected_tool)),
+        )
+        .await
     }
 
     /// Shared body of [`Self::execute_tool`] / [`Self::execute_tool_with_context`]:
@@ -1083,14 +1171,22 @@ impl ToolManager {
         parameters: ToolParameters,
         ctx: &ToolContext,
         drain_started: bool,
-        admission: Option<&ToolAdmissionFn<'_>>,
+        checked: Option<(&ToolAdmissionFn<'_>, &Arc<dyn Tool>)>,
     ) -> Result<ToolResult> {
-        // Observe before obtaining the tool guard so a future registry storage
-        // change cannot let an old implementation publish into a new generation.
-        let observed_result_cache_epoch = self.result_cache_epoch.load(Ordering::Acquire);
-        let tool = self
-            .get_tool(tool_name)
-            .ok_or_else(|| ToolError::NotFound(tool_name.to_string()))?;
+        let admission = checked.map(|(admission, _)| admission);
+        let expected_tool = checked.map(|(_, tool)| tool);
+        let (tool, observed_result_cache_epoch) = self.get_tool_with_cache_epoch(tool_name)?;
+        #[cfg(test)]
+        self.observe_registration(RegistrationObservation::Selection { contended: false });
+        // 本地热替换也不能把A的许可用于B；在validator/cache/效果前绑定原owned实例。
+        if expected_tool.is_some_and(|expected| !Arc::ptr_eq(expected, &tool)) {
+            return Err(ToolError::AccessDenied {
+                path: tool_name.to_string(),
+                reason: "Tool implementation changed after permission; submit a new invocation"
+                    .into(),
+            }
+            .into());
+        }
         validate_tool_input(tool.as_ref(), &parameters).await?;
         reject_cancelled(ctx, tool_name)?;
 
@@ -1109,7 +1205,7 @@ impl ToolManager {
             (None, None, Some(self.begin_result_cache_invalidation()))
         };
         if let Some(cache_key) = cache_key.as_ref()
-            && let Some(result) = self.cached_result(cache_key)
+            && let Some(result) = self.cached_result(cache_key, observed_result_cache_epoch)
         {
             tracing::debug!("Tool result cache hit: {tool_name}");
             return Ok(result);
@@ -1152,8 +1248,12 @@ impl ToolManager {
                 wait_retry_delay(Duration::from_millis(delay_ms), ctx, tool_name).await?;
             }
 
-            let owned_context = started_execution_context(ctx, drain_started);
-            let attempt_context = owned_context.as_ref().unwrap_or(ctx);
+            let mut attempt_context =
+                started_execution_context(ctx, drain_started).unwrap_or_else(|| ctx.clone());
+            if let Some(provider) = self.native_execution_admission.read().clone() {
+                attempt_context.native_execution_admission = Some(provider);
+            }
+            let attempt_context = &attempt_context;
             let execution = async {
                 if let Some(check) = admission {
                     check(tool.as_ref())?;
@@ -1174,7 +1274,7 @@ impl ToolManager {
                 if self.config.timeout_ms > 0 && !tool.manages_own_timeout() {
                     match tokio::time::timeout(
                         Duration::from_millis(self.config.timeout_ms),
-                        tool.execute_with_context(parameters.clone(), ctx),
+                        tool.execute_with_context(parameters.clone(), attempt_context),
                     )
                     .await
                     {
@@ -1182,7 +1282,8 @@ impl ToolManager {
                         Err(_) => Err(ToolError::Timeout(tool_name.to_string()).into()),
                     }
                 } else {
-                    tool.execute_with_context(parameters.clone(), ctx).await
+                    tool.execute_with_context(parameters.clone(), attempt_context)
+                        .await
                 }
             };
             let result = cancel_aware(execution, ctx, tool_name, drain_started).await;
@@ -1200,10 +1301,12 @@ impl ToolManager {
                 }
                 Ok(result)
                     if attempt < max_retries
-                        && result
-                            .failure
-                            .as_ref()
-                            .is_some_and(ToolFailure::allows_automatic_retry) =>
+                        && result.failure.as_ref().is_some_and(|failure| {
+                            failure.allows_automatic_retry()
+                                && failure
+                                    .retry_after_ms
+                                    .is_none_or(|delay| delay <= MAX_TOOL_RETRY_DELAY_MS)
+                        }) =>
                 {
                     next_retry_after_ms = result
                         .failure
@@ -1214,7 +1317,12 @@ impl ToolManager {
                 Err(error @ ReactError::ExecutionNotSettled { .. }) => return Err(error),
                 Err(error) if attempt < max_retries => {
                     let failure = ToolFailure::from_error(&error, !is_read);
-                    if failure.allows_automatic_retry() {
+                    if failure.allows_automatic_retry()
+                        && failure
+                            .retry_after_ms
+                            .is_none_or(|delay| delay <= MAX_TOOL_RETRY_DELAY_MS)
+                    {
+                        next_retry_after_ms = failure.retry_after_ms;
                         last_err = Some(error);
                     } else {
                         return Err(error);
@@ -1291,6 +1399,7 @@ impl ToolManager {
         parameters: ToolParameters,
         ctx: &ToolContext,
         event_tx: Option<tokio::sync::mpsc::Sender<ToolStreamEvent>>,
+        expected_tool: &Arc<dyn Tool>,
         admission: &ToolAdmissionFn<'_>,
     ) -> Result<ToolResult> {
         self.execute_tool_stream_with_context_inner(
@@ -1299,7 +1408,7 @@ impl ToolManager {
             ctx,
             event_tx,
             true,
-            Some(admission),
+            Some((admission, expected_tool)),
         )
         .await
     }
@@ -1311,14 +1420,22 @@ impl ToolManager {
         ctx: &ToolContext,
         event_tx: Option<tokio::sync::mpsc::Sender<ToolStreamEvent>>,
         drain_started: bool,
-        admission: Option<&ToolAdmissionFn<'_>>,
+        checked: Option<(&ToolAdmissionFn<'_>, &Arc<dyn Tool>)>,
     ) -> Result<ToolResult> {
-        // Keep the registry generation and result-cache generation ordered:
-        // an old tool implementation must never publish into a replacement's cache.
-        let observed_result_cache_epoch = self.result_cache_epoch.load(Ordering::Acquire);
-        let tool = self
-            .get_tool(tool_name)
-            .ok_or_else(|| ToolError::NotFound(tool_name.to_string()))?;
+        let admission = checked.map(|(admission, _)| admission);
+        let expected_tool = checked.map(|(_, tool)| tool);
+        let (tool, observed_result_cache_epoch) = self.get_tool_with_cache_epoch(tool_name)?;
+        #[cfg(test)]
+        self.observe_registration(RegistrationObservation::Selection { contended: false });
+        // 本地热替换也不能把A的许可用于B；在validator/cache/效果前绑定原owned实例。
+        if expected_tool.is_some_and(|expected| !Arc::ptr_eq(expected, &tool)) {
+            return Err(ToolError::AccessDenied {
+                path: tool_name.to_string(),
+                reason: "Tool implementation changed after permission; submit a new invocation"
+                    .into(),
+            }
+            .into());
+        }
         validate_tool_input(tool.as_ref(), &parameters).await?;
         reject_cancelled(ctx, tool_name)?;
 
@@ -1334,7 +1451,7 @@ impl ToolManager {
             (None, None, Some(self.begin_result_cache_invalidation()))
         };
         if let Some(cache_key) = cache_key.as_ref()
-            && let Some(result) = self.cached_result(cache_key)
+            && let Some(result) = self.cached_result(cache_key, observed_result_cache_epoch)
         {
             tracing::debug!("Tool result cache hit: {tool_name}");
             return Ok(result);
@@ -1378,8 +1495,12 @@ impl ToolManager {
 
             let mut output_forwarded = false;
             let completed = std::sync::atomic::AtomicBool::new(false);
-            let owned_context = started_execution_context(ctx, drain_started);
-            let attempt_context = owned_context.as_ref().unwrap_or(ctx);
+            let mut attempt_context =
+                started_execution_context(ctx, drain_started).unwrap_or_else(|| ctx.clone());
+            if let Some(provider) = self.native_execution_admission.read().clone() {
+                attempt_context.native_execution_admission = Some(provider);
+            }
+            let attempt_context = &attempt_context;
             let consume_stream = async {
                 use futures::StreamExt;
 
@@ -1503,10 +1624,12 @@ impl ToolManager {
                 Ok(result)
                     if attempt < max_retries
                         && !output_forwarded
-                        && result
-                            .failure
-                            .as_ref()
-                            .is_some_and(ToolFailure::allows_automatic_retry) =>
+                        && result.failure.as_ref().is_some_and(|failure| {
+                            failure.allows_automatic_retry()
+                                && failure
+                                    .retry_after_ms
+                                    .is_none_or(|delay| delay <= MAX_TOOL_RETRY_DELAY_MS)
+                        }) =>
                 {
                     next_retry_after_ms = result
                         .failure
@@ -1517,7 +1640,12 @@ impl ToolManager {
                 Err(error @ ReactError::ExecutionNotSettled { .. }) => return Err(error),
                 Err(error) if attempt < max_retries && !output_forwarded => {
                     let failure = ToolFailure::from_error(&error, !is_read);
-                    if failure.allows_automatic_retry() {
+                    if failure.allows_automatic_retry()
+                        && failure
+                            .retry_after_ms
+                            .is_none_or(|delay| delay <= MAX_TOOL_RETRY_DELAY_MS)
+                    {
+                        next_retry_after_ms = failure.retry_after_ms;
                         last_err = Some(error);
                     } else {
                         return Err(error);
@@ -1547,8 +1675,12 @@ impl ToolManager {
         cache.clear();
     }
 
-    fn cached_result(&self, key: &ToolResultCacheKey) -> Option<ToolResult> {
+    fn cached_result(&self, key: &ToolResultCacheKey, expected_epoch: u64) -> Option<ToolResult> {
         let mut cache = self.result_cache.write();
+        // 与invalidate/store共用原临界区；已选中A不能读到后来B代的完整effects。
+        if self.result_cache_epoch.load(Ordering::Acquire) != expected_epoch {
+            return None;
+        }
         cache.retain(|_, (_, created)| created.elapsed() < TOOL_RESULT_CACHE_TTL);
         cache.get(key).map(|(result, _)| result.clone())
     }
@@ -1593,6 +1725,129 @@ mod execute_with_context_tests {
     use std::pin::Pin;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering as AtomicOrdering};
     use std::sync::{Arc, Mutex};
+
+    #[tokio::test]
+    async fn native_provider_uses_the_final_manager_and_original_attempt_timer() -> Result<()> {
+        struct NativeWaitTool(Arc<AtomicBool>);
+        impl Tool for NativeWaitTool {
+            fn name(&self) -> &str {
+                "native_wait"
+            }
+            fn description(&self) -> &str {
+                "controlled native admission wait"
+            }
+            fn parameters(&self) -> serde_json::Value {
+                serde_json::json!({"type":"object","properties":{}})
+            }
+            fn execute(
+                &self,
+                _parameters: ToolParameters,
+            ) -> futures::future::BoxFuture<'_, Result<ToolResult>> {
+                Box::pin(async {
+                    Err(ReactError::Other(
+                        "native context entry was bypassed".to_string(),
+                    ))
+                })
+            }
+            fn execute_with_context<'a>(
+                &'a self,
+                _parameters: ToolParameters,
+                context: &'a ToolContext,
+            ) -> futures::future::BoxFuture<'a, Result<ToolResult>> {
+                Box::pin(async move {
+                    self.0.store(
+                        context.native_execution_admission.is_some() && context.cancel.is_some(),
+                        AtomicOrdering::SeqCst,
+                    );
+                    let mut command = echo_core::sandbox::SandboxCommand::program("echo", vec![])
+                        .with_timeout(Duration::from_secs(5));
+                    echo_core::tools::native_execution::admit_native_execution(
+                        context,
+                        &mut command,
+                        self.name(),
+                    )
+                    .await?;
+                    Ok(ToolResult::success("unexpected native admission"))
+                })
+            }
+        }
+        struct Provider(Arc<Semaphore>);
+        impl echo_core::tools::NativeExecutionResourceAdmission for Provider {
+            fn admit<'a>(
+                &'a self,
+                _cancel: &'a tokio_util::sync::CancellationToken,
+                _deadline: std::time::Instant,
+            ) -> futures::future::BoxFuture<
+                'a,
+                std::result::Result<
+                    InvocationResourceGuard,
+                    echo_core::tools::NativeExecutionAdmissionError,
+                >,
+            > {
+                Box::pin(async move {
+                    let _permit = self
+                        .0
+                        .clone()
+                        .acquire_owned()
+                        .await
+                        .map_err(|_| echo_core::tools::NativeExecutionAdmissionError::Closed)?;
+                    // 故意在交回 guard 前停住；原 manager 取消必须撤回这一等待并释放原 permit。
+                    std::future::pending().await
+                })
+            }
+        }
+        for streaming in [false, true] {
+            let capacity = Arc::new(Semaphore::new(1));
+            let seen = Arc::new(AtomicBool::new(false));
+            let manager = ToolManager::new_with_config(ToolExecutionConfig {
+                timeout_ms: 20,
+                retry_on_fail: false,
+                max_retries: 0,
+                retry_delay_ms: 0,
+                max_concurrency: Some(1),
+                max_read_concurrency: None,
+            });
+            manager.try_register(Box::new(NativeWaitTool(seen.clone())))?;
+            let provider: Arc<dyn echo_core::tools::NativeExecutionResourceAdmission> =
+                Arc::new(Provider(capacity.clone()));
+            manager.set_native_execution_admission(Some(provider.clone()));
+            manager.set_native_execution_admission(Some(provider));
+            let input = ToolContext::default();
+            let result = if streaming {
+                manager
+                    .execute_tool_stream_with_context_draining_started(
+                        "native_wait",
+                        ToolParameters::new(),
+                        &input,
+                        None,
+                    )
+                    .await
+            } else {
+                manager
+                    .execute_tool_with_context_draining_started(
+                        "native_wait",
+                        ToolParameters::new(),
+                        &input,
+                    )
+                    .await
+            };
+            assert!(
+                matches!(result, Err(ReactError::Tool(error)) if matches!(*error, ToolError::Timeout(_)))
+            );
+            assert!(seen.load(AtomicOrdering::SeqCst));
+            assert!(input.native_execution_admission.is_none());
+            assert!(input.cancel.is_none());
+            assert_eq!(capacity.available_permits(), 1);
+            assert_eq!(
+                manager
+                    .semaphore
+                    .as_ref()
+                    .map(|semaphore| semaphore.available_permits()),
+                Some(1)
+            );
+        }
+        Ok(())
+    }
 
     /// Records the `ToolContext` it was called with, so we can verify
     /// `execute_tool_with_context` actually forwards the caller-supplied ctx.
@@ -1853,6 +2108,39 @@ mod execute_with_context_tests {
             },
         };
         joined.map_err(|error| ReactError::Other(error.to_string()))
+    }
+
+    #[tokio::test]
+    async fn accepted_background_receipt_survives_observer_timeout() -> Result<()> {
+        let ctx = ToolContext {
+            cancel: Some(Arc::new(tokio_util::sync::CancellationToken::new())),
+            ..Default::default()
+        };
+        let receipt: echo_core::tools::cell::CommandCellLaunchReceipt = serde_json::from_value(json!({
+            "cell_id": "accepted-original-cell", "accepted_at": "2026-11-07T00:00:00Z", "deadline": "2026-11-07T00:00:10Z"
+        })).map_err(|e| ReactError::Other(e.to_string()))?;
+        let result = await_started_execution(
+            async {
+                tokio::time::sleep(Duration::from_millis(30)).await;
+                Ok(ToolResult::success_json(
+                    serde_json::to_value(&receipt).map_err(|e| ReactError::Other(e.to_string()))?,
+                ))
+            },
+            &ctx,
+            Some(Duration::from_millis(1)),
+            "shell",
+            None,
+        )
+        .await?;
+        assert!(result.success);
+        assert_eq!(
+            result.data.and_then(|data| serde_json::from_value::<
+                echo_core::tools::cell::CommandCellLaunchReceipt,
+            >(data)
+            .ok()),
+            Some(receipt)
+        );
+        Ok(())
     }
 
     #[tokio::test]
@@ -3932,6 +4220,9 @@ mod execute_with_context_tests {
 
         let admission_manager = Arc::clone(&manager);
         let admission_finished = Arc::clone(&holder_finished);
+        let admission_tool = admission_manager
+            .get_tool("admission_target")
+            .ok_or_else(|| ToolError::NotFound("admission_target".into()))?;
         let target = tokio::spawn(async move {
             let admission = move |_tool: &dyn Tool| -> Result<()> {
                 if !admission_finished.load(AtomicOrdering::SeqCst) {
@@ -3952,6 +4243,7 @@ mod execute_with_context_tests {
                     "admission_target",
                     ToolParameters::new(),
                     &ToolContext::default(),
+                    &admission_tool,
                     &admission,
                 )
                 .await
@@ -4318,5 +4610,400 @@ mod execute_with_context_tests {
             Some(Path::new("/wt/a")),
             "session A must still see /wt/a after session B used the same ToolManager"
         );
+    }
+    // 插入echo_execution原execute_with_context_tests；只观察当前Manager，无全局hook。
+    struct PublicationReadTool {
+        path: PathBuf,
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl Tool for PublicationReadTool {
+        fn name(&self) -> &str {
+            "publication_read"
+        }
+        fn description(&self) -> &str {
+            "read bytes from the selected source"
+        }
+        fn parameters(&self) -> serde_json::Value {
+            serde_json::json!({"type":"object"})
+        }
+        fn risk_level(&self) -> ToolRiskLevel {
+            ToolRiskLevel::ReadOnly
+        }
+        fn execute<'a>(
+            &'a self,
+            _: ToolParameters,
+        ) -> futures::future::BoxFuture<'a, Result<ToolResult>> {
+            Box::pin(async move {
+                self.calls.fetch_add(1, AtomicOrdering::SeqCst);
+                let bytes = std::fs::read_to_string(&self.path)?;
+                Ok(
+                    ToolResult::success(bytes).with_effect(
+                        echo_core::tools::ToolEffect::FileRead {
+                            path: "same-source-path/x".into(),
+                        },
+                    ),
+                )
+            })
+        }
+    }
+
+    struct PublicationTestFiles(PathBuf);
+    impl Drop for PublicationTestFiles {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn publication_test_error(error: impl std::fmt::Display) -> ReactError {
+        ToolError::ExecutionFailed {
+            tool: "publication_read".into(),
+            message: error.to_string(),
+        }
+        .into()
+    }
+
+    async fn cache_publication_keeps_result_source(streaming: bool) -> Result<()> {
+        let fixture_root = std::env::var_os("EKO_CONSUMER_TEST_ROOT")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(".echo-semantic/local/fixtures")
+            });
+        let files = PublicationTestFiles(fixture_root.join(uuid::Uuid::new_v4().to_string()));
+        std::fs::create_dir_all(&files.0)?;
+        let a_path = files.0.join("A");
+        let b_path = files.0.join("B");
+        std::fs::write(&a_path, b"actual-A")?;
+        std::fs::write(&b_path, b"actual-B")?;
+        let a_calls = Arc::new(AtomicUsize::new(0));
+        let b_calls = Arc::new(AtomicUsize::new(0));
+        let mut manager = ToolManager::new();
+        manager.try_register(Box::new(PublicationReadTool {
+            path: a_path.clone(),
+            calls: a_calls.clone(),
+        }))?;
+        let seeded = manager
+            .execute_tool_with_context(
+                "publication_read",
+                ToolParameters::new(),
+                &ToolContext::default(),
+            )
+            .await?;
+        assert_eq!(seeded.output, "actual-A");
+        assert_eq!(a_calls.load(AtomicOrdering::SeqCst), 1);
+
+        let (event_tx, event_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let release_rx = Mutex::new(release_rx);
+        let observer_timed_out = Arc::new(AtomicBool::new(false));
+        let timeout_observed = observer_timed_out.clone();
+        manager.registration_observer = Some(Arc::new(move |event| {
+            let _ = event_tx.send(event);
+            if matches!(event, RegistrationObservation::Published) {
+                // 即使fixture失败也释放mutation；不把超时当正常调度，不遗留producer。
+                if release_rx
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .recv_timeout(std::time::Duration::from_secs(2))
+                    .is_err()
+                {
+                    timeout_observed.store(true, AtomicOrdering::SeqCst);
+                }
+            }
+        }));
+        let manager = Arc::new(manager);
+        let replacing = manager.clone();
+        let replacement_calls = b_calls.clone();
+        let replacement = std::thread::spawn(move || {
+            replacing.replace(Box::new(PublicationReadTool {
+                path: b_path,
+                calls: replacement_calls,
+            }))
+        });
+        let published = event_rx.recv_timeout(std::time::Duration::from_secs(2));
+        // 公共owned lookup可在publication窗口看到B；checked调用必须自行获得一致代次。
+        let expected = manager
+            .get_tool("publication_read")
+            .ok_or_else(|| ToolError::NotFound("publication_read".into()))?;
+        let reading = manager.clone();
+        let checked_tool = expected.clone();
+        let (result_tx, result_rx) = std::sync::mpsc::channel();
+        let reader = std::thread::spawn(move || {
+            let result = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(ReactError::from)
+                .and_then(|runtime| {
+                    runtime.block_on(async {
+                        let admission = |_: &dyn Tool| Ok(());
+                        if streaming {
+                            reading
+                                .execute_tool_stream_with_context_draining_started_checked(
+                                    "publication_read",
+                                    ToolParameters::new(),
+                                    &ToolContext::default(),
+                                    None,
+                                    &checked_tool,
+                                    &admission,
+                                )
+                                .await
+                        } else {
+                            reading
+                                .execute_tool_with_context_draining_started_checked(
+                                    "publication_read",
+                                    ToolParameters::new(),
+                                    &ToolContext::default(),
+                                    &checked_tool,
+                                    &admission,
+                                )
+                                .await
+                        }
+                    })
+                });
+            let _ = result_tx.send(result);
+        });
+        let selection = event_rx.recv_timeout(std::time::Duration::from_secs(2));
+        // before在旧epoch选中B后可立即取得旧A缓存；after在原注册锁处观察争用。
+        // 两者仅决定何时释放barrier；最终断言始终核真实内容、effects和物理读取。
+        let result_before_release = if matches!(
+            selection,
+            Ok(RegistrationObservation::Selection { contended: false })
+        ) {
+            Some(result_rx.recv_timeout(std::time::Duration::from_secs(2)))
+        } else {
+            None
+        };
+        let release_sent = release_tx.send(());
+        let result = match result_before_release {
+            Some(result) => result,
+            None => result_rx.recv_timeout(std::time::Duration::from_secs(2)),
+        };
+        let reader_join = reader.join();
+        let replacement_join = replacement.join();
+        assert!(matches!(published, Ok(RegistrationObservation::Published)));
+        assert!(matches!(
+            selection,
+            Ok(RegistrationObservation::Selection { .. })
+        ));
+        assert!(release_sent.is_ok() && reader_join.is_ok() && replacement_join.is_ok());
+        assert!(
+            !observer_timed_out.load(AtomicOrdering::SeqCst),
+            "fixture publication barrier timed out"
+        );
+        let result = result.map_err(publication_test_error)??;
+        assert_eq!(
+            result.output, "actual-B",
+            "published B returned old A cache under its own source"
+        );
+        assert_eq!(
+            b_calls.load(AtomicOrdering::SeqCst),
+            1,
+            "B must physically read its source"
+        );
+        assert_eq!(a_calls.load(AtomicOrdering::SeqCst), 1);
+        assert_eq!(
+            result.effects,
+            vec![echo_core::tools::ToolEffect::FileRead {
+                path: "same-source-path/x".into()
+            }]
+        );
+        let cached_b = manager
+            .execute_tool_with_context(
+                "publication_read",
+                ToolParameters::new(),
+                &ToolContext::default(),
+            )
+            .await?;
+        assert_eq!(cached_b.output, "actual-B");
+        assert_eq!(cached_b.effects, result.effects);
+        assert_eq!(
+            b_calls.load(AtomicOrdering::SeqCst),
+            1,
+            "new B generation must retain its own valid cache"
+        );
+        assert_eq!(std::fs::read(a_path)?, b"actual-A");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn cache_publication_source_is_bound_nonstream() -> Result<()> {
+        cache_publication_keeps_result_source(false).await
+    }
+
+    #[tokio::test]
+    async fn cache_publication_source_is_bound_stream() -> Result<()> {
+        cache_publication_keeps_result_source(true).await
+    }
+}
+
+#[cfg(test)]
+mod remote_failure_retry_tests {
+    use super::*;
+    use std::sync::atomic::AtomicUsize;
+    use std::time::Instant;
+
+    struct RemoteRetryTool {
+        as_result: bool,
+        hint: u64,
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl Tool for RemoteRetryTool {
+        fn name(&self) -> &str {
+            "remote_retry_fixture"
+        }
+        fn description(&self) -> &str {
+            "one typed remote failure then success"
+        }
+        fn parameters(&self) -> Value {
+            json!({"type":"object"})
+        }
+        fn risk_level(&self) -> ToolRiskLevel {
+            ToolRiskLevel::ReadOnly
+        }
+        fn capabilities(&self) -> ToolCapabilities {
+            ToolCapabilities::read_only(Vec::new())
+        }
+        fn execute(
+            &self,
+            _parameters: ToolParameters,
+        ) -> futures::future::BoxFuture<'_, Result<ToolResult>> {
+            Box::pin(async move {
+                if self.calls.fetch_add(1, Ordering::SeqCst) > 0 {
+                    return Ok(ToolResult::success("done"));
+                }
+                let failure = ToolFailure::new(echo_core::tools::ToolFailureCategory::Transient)
+                    .with_retry_after(self.hint);
+                if self.as_result {
+                    Ok(ToolResult::error("remote failure").with_failure(failure))
+                } else {
+                    Err(ToolError::RemoteFailure {
+                        tool: self.name().to_string(),
+                        message: "remote failure".to_string(),
+                        http_status: Some(429),
+                        failure: Box::new(failure),
+                    }
+                    .into())
+                }
+            })
+        }
+    }
+
+    fn manager(as_result: bool, hint: u64) -> (ToolManager, Arc<AtomicUsize>) {
+        let manager = ToolManager::new_with_config(ToolExecutionConfig {
+            timeout_ms: 0,
+            retry_on_fail: true,
+            max_retries: 1,
+            retry_delay_ms: 0,
+            max_concurrency: None,
+            max_read_concurrency: None,
+        });
+        let calls = Arc::new(AtomicUsize::new(0));
+        manager.register(Box::new(RemoteRetryTool {
+            as_result,
+            hint,
+            calls: Arc::clone(&calls),
+        }));
+        (manager, calls)
+    }
+
+    #[tokio::test]
+    async fn typed_results_and_errors_both_retain_retry_lower_bound() -> Result<()> {
+        for as_result in [false, true] {
+            for streaming in [false, true] {
+                let (manager, calls) = manager(as_result, 30);
+                let start = Instant::now();
+                let result = if streaming {
+                    manager
+                        .execute_tool_stream_with_context(
+                            "remote_retry_fixture",
+                            ToolParameters::new(),
+                            &ToolContext::default(),
+                            None,
+                        )
+                        .await?
+                } else {
+                    manager
+                        .execute_tool("remote_retry_fixture", ToolParameters::new())
+                        .await?
+                };
+                assert!(result.success);
+                assert_eq!(calls.load(Ordering::SeqCst), 2);
+                assert!(start.elapsed() >= Duration::from_millis(30));
+            }
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn retry_hint_above_existing_cap_returns_without_early_replay() -> Result<()> {
+        for as_result in [false, true] {
+            for streaming in [false, true] {
+                let (manager, calls) = manager(as_result, 30_001);
+                let execution = async {
+                    if streaming {
+                        manager
+                            .execute_tool_stream_with_context(
+                                "remote_retry_fixture",
+                                ToolParameters::new(),
+                                &ToolContext::default(),
+                                None,
+                            )
+                            .await
+                    } else {
+                        manager
+                            .execute_tool("remote_retry_fixture", ToolParameters::new())
+                            .await
+                    }
+                };
+                let outcome = tokio::time::timeout(Duration::from_millis(100), execution)
+                    .await
+                    .map_err(|_| {
+                        ReactError::Other(
+                            "manager attempted an unfulfillable bounded retry".to_string(),
+                        )
+                    })?;
+                let failure = match outcome {
+                    Ok(result) => result
+                        .failure
+                        .ok_or_else(|| ReactError::Other("failure lost".to_string()))?,
+                    Err(error) => ToolFailure::from_error(&error, false),
+                };
+                assert_eq!(failure.retry_after_ms, Some(30_001));
+                assert_eq!(calls.load(Ordering::SeqCst), 1);
+            }
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn remote_retry_wait_can_be_cancelled_without_another_attempt() -> Result<()> {
+        let (manager, calls) = manager(false, 1_000);
+        let cancellation = Arc::new(echo_core::agent::CancellationToken::new());
+        let context = ToolContext {
+            cancel: Some(Arc::clone(&cancellation)),
+            ..ToolContext::default()
+        };
+        let execution = tokio::spawn(async move {
+            manager
+                .execute_tool_with_context("remote_retry_fixture", ToolParameters::new(), &context)
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while calls.load(Ordering::SeqCst) == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .map_err(|_| ReactError::Other("first remote attempt did not start".to_string()))?;
+        cancellation.cancel();
+        let outcome = execution
+            .await
+            .map_err(|error| ReactError::Other(error.to_string()))?;
+        assert!(
+            matches!(outcome, Err(ReactError::Agent(ref error)) if matches!(error.as_ref(), AgentError::Cancelled(_)))
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        Ok(())
     }
 }

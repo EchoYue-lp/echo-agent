@@ -35,7 +35,14 @@ async fn finish_pre_spawn_terminal(
     reason: String,
     business_terminal: AgentEvent,
 ) -> (crate::agent::AgentSteerTurnOutcome, Vec<Result<AgentEvent>>) {
-    let mut events = Vec::new();
+    let mut events = vec![Ok(phases::finalize::execution_status_event(
+        snapshot,
+        echo_core::agent::ExecutionStatusKind::Started,
+        echo_core::agent::AgentPhase::Thinking,
+        None,
+        0,
+        None,
+    ))];
     match snapshot
         .save_transcript_projection(context, Some(reason.clone()))
         .await
@@ -73,32 +80,59 @@ async fn finish_pre_spawn_terminal(
                 let settlement = snapshot.observe_persistence_failure(&error).await;
                 events.push(Ok(AgentEvent::TranscriptProjectionSettlement(settlement)));
             }
-            snapshot
-                .finalize_run(
-                    crate::trace::RunStatus::Failed,
-                    None,
-                    Some(&error.to_string()),
-                )
-                .await;
+            if !matches!(error, crate::error::ReactError::ExecutionNotSettled { .. }) {
+                snapshot
+                    .finalize_run(
+                        crate::trace::RunStatus::Failed,
+                        None,
+                        Some(&error.to_string()),
+                    )
+                    .await;
+            }
             events.push(AgentEvent::from_error("react_loop", &error));
         }
+    }
+    if !events.iter().any(|event| {
+        matches!(
+            event,
+            Err(crate::error::ReactError::ExecutionNotSettled { .. })
+        )
+    }) {
+        events.push(Ok(phases::finalize::execution_status_event(
+            snapshot,
+            echo_core::agent::ExecutionStatusKind::Failed,
+            echo_core::agent::AgentPhase::Terminal,
+            None,
+            1,
+            Some(reason),
+        )));
     }
     (crate::agent::AgentSteerTurnOutcome::Failed, events)
 }
 
-struct ReactStreamTurnOwner {
+pub(in crate::agent::react) struct ReactStreamTurnOwner {
     lease: Option<crate::agent::react::lifecycle::ReactAgentTurnLease>,
     steering: Option<crate::agent::steer::ActiveTurnLease>,
     execution: Option<tokio::sync::OwnedMutexGuard<()>>,
     // Snapshot merges invocation and runtime guards; retain that original
     // bundle with the same physical owner if settlement remains unknown.
     resource_guards: Vec<echo_core::tools::InvocationResourceGuard>,
-    run_id: String,
+    run_id: Option<String>,
     execution_id: Option<String>,
 }
 
 impl ReactStreamTurnOwner {
-    fn settle(&mut self, outcome: crate::agent::AgentSteerTurnOutcome) {
+    fn unknown_identity(events: &[Result<AgentEvent>]) -> Option<(String, Option<String>)> {
+        events.iter().find_map(|event| match event {
+            Err(crate::error::ReactError::ExecutionNotSettled {
+                run_id,
+                execution_id,
+            }) => Some((run_id.clone(), execution_id.clone())),
+            _ => None,
+        })
+    }
+
+    pub(in crate::agent::react) fn settle(&mut self, outcome: crate::agent::AgentSteerTurnOutcome) {
         if let Some(steering) = self.steering.take() {
             steering.settle(outcome);
         }
@@ -109,29 +143,51 @@ impl ReactStreamTurnOwner {
         self.resource_guards.clear();
     }
 
+    pub(in crate::agent::react) fn preparation(
+        snapshot: &crate::agent::snapshot::AgentRunSnapshot,
+        lease: crate::agent::react::lifecycle::ReactAgentTurnLease,
+        execution: tokio::sync::OwnedMutexGuard<()>,
+    ) -> Self {
+        Self {
+            lease: Some(lease),
+            steering: None,
+            execution: Some(execution),
+            resource_guards: snapshot.resource_guards.clone(),
+            run_id: snapshot.current_run_id.clone(),
+            execution_id: snapshot.current_execution_id.clone(),
+        }
+    }
+
+    pub(in crate::agent::react) fn observe_preparation_result<T>(&mut self, result: &Result<T>) {
+        if let Err(crate::error::ReactError::ExecutionNotSettled {
+            run_id,
+            execution_id,
+        }) = result
+        {
+            self.run_id = Some(run_id.clone());
+            self.execution_id = execution_id.clone();
+            self.retain_unknown();
+        } else {
+            self.settle(crate::agent::AgentSteerTurnOutcome::Failed);
+        }
+    }
+
     fn retain_unknown(&mut self) {
-        if let Some(mut steering) = self.steering.take() {
-            steering.retain_unknown();
-            if let Some(lease) = self.lease.take() {
-                lease.retain_unknown(
-                    self.run_id.clone(),
-                    self.execution_id.clone(),
-                    Box::new((
-                        steering,
-                        self.execution.take(),
-                        std::mem::take(&mut self.resource_guards),
-                    )),
-                );
+        let mut steering = self.steering.take();
+        if let Some(active) = steering.as_mut() {
+            active.retain_unknown();
+        }
+        if let Some(lease) = self.lease.take() {
+            let resources = Box::new((
+                steering,
+                self.execution.take(),
+                std::mem::take(&mut self.resource_guards),
+            ));
+            if let Some(run_id) = self.run_id.as_ref() {
+                lease.retain_unknown(run_id.clone(), self.execution_id.clone(), resources);
+            } else {
+                lease.retain_unidentified(resources);
             }
-        } else if let Some(lease) = self.lease.take() {
-            lease.retain_unknown(
-                self.run_id.clone(),
-                self.execution_id.clone(),
-                Box::new((
-                    self.execution.take(),
-                    std::mem::take(&mut self.resource_guards),
-                )),
-            );
         }
     }
 }
@@ -148,6 +204,11 @@ struct ManagedAgentEventStream {
     task: Option<tokio::task::JoinHandle<()>>,
     runtime: tokio::runtime::Handle,
     pending_terminal: Option<Result<AgentEvent>>,
+    // 同一producer的成功发布包在物理结算前不可逃逸；尾部失败丢弃该包。
+    pending_publication: std::collections::VecDeque<Result<AgentEvent>>,
+    status_sequence: u64,
+    terminal_status: Option<echo_core::agent::ExecutionStatus>,
+    publication_ready: bool,
     receiver_closed: bool,
     observation_run_id: String,
     observation_execution_id: Option<String>,
@@ -176,42 +237,144 @@ impl ManagedAgentEventStream {
     }
 }
 
+impl ManagedAgentEventStream {
+    fn sequenced(&mut self, mut item: Result<AgentEvent>) -> Result<AgentEvent> {
+        if let Ok(AgentEvent::ExecutionStatus(status)) = &mut item {
+            status.sequence = status.sequence.max(self.status_sequence);
+            self.status_sequence = status.sequence.saturating_add(1);
+        }
+        item
+    }
+
+    fn prepare_publication(&mut self) {
+        self.publication_ready = true;
+        let Some(terminal) = self.pending_terminal.take() else {
+            self.pending_publication.clear();
+            return;
+        };
+        if matches!(
+            &terminal,
+            Err(crate::error::ReactError::ExecutionNotSettled { .. })
+        ) {
+            self.pending_publication.clear();
+            self.terminal_status.take();
+            self.pending_publication.push_back(terminal);
+            return;
+        }
+        let (status, reason) = match &terminal {
+            Ok(AgentEvent::FinalAnswer(_)) => {
+                (echo_core::agent::ExecutionStatusKind::Settled, None)
+            }
+            Ok(AgentEvent::Cancelled) => (
+                echo_core::agent::ExecutionStatusKind::Cancelled,
+                Some("execution cancelled".to_string()),
+            ),
+            Ok(AgentEvent::Error {
+                message, failure, ..
+            }) => (
+                if failure.terminal_kind == crate::error::AgentTerminalKind::Cancelled {
+                    echo_core::agent::ExecutionStatusKind::Cancelled
+                } else {
+                    echo_core::agent::ExecutionStatusKind::Failed
+                },
+                Some(message.clone()),
+            ),
+            Err(error) => (
+                echo_core::agent::ExecutionStatusKind::Failed,
+                Some(error.to_string()),
+            ),
+            _ => return,
+        };
+        if status != echo_core::agent::ExecutionStatusKind::Settled {
+            self.pending_publication.clear();
+        }
+        let mut observation =
+            self.terminal_status
+                .take()
+                .unwrap_or_else(|| echo_core::agent::ExecutionStatus {
+                    adapter_generated: false,
+                    execution_id: self
+                        .observation_execution_id
+                        .clone()
+                        .unwrap_or_else(|| self.observation_run_id.clone()),
+                    request_id: None,
+                    sequence: self.status_sequence,
+                    phase: echo_core::agent::AgentPhase::Terminal,
+                    status: status.clone(),
+                    reason: reason.clone(),
+                });
+        observation.status = status;
+        observation.reason = reason;
+        // terminal status是最后一个公开事件；SDK可在此停止读取而不会丢正文/尾部原因。
+        let needs_cancel_event = observation.status
+            == echo_core::agent::ExecutionStatusKind::Cancelled
+            && !matches!(&terminal, Ok(AgentEvent::Cancelled));
+        self.pending_publication.push_back(terminal);
+        if needs_cancel_event {
+            self.pending_publication
+                .push_back(Ok(AgentEvent::Cancelled));
+        }
+        self.pending_publication
+            .push_back(Ok(AgentEvent::ExecutionStatus(observation)));
+    }
+}
+
 impl Stream for ManagedAgentEventStream {
     type Item = Result<AgentEvent>;
-
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let stream = self.get_mut();
         loop {
-            if stream.pending_terminal.is_some() {
-                return match stream.poll_producer(cx) {
-                    Poll::Pending => Poll::Pending,
-                    Poll::Ready(Ok(())) => Poll::Ready(stream.pending_terminal.take()),
-                    Poll::Ready(Err(error)) => {
-                        stream.pending_terminal.take();
-                        Poll::Ready(Some(Err(error)))
-                    }
-                };
-            }
             if stream.receiver_closed {
-                return match stream.poll_producer(cx) {
-                    Poll::Pending => Poll::Pending,
-                    Poll::Ready(Ok(())) => Poll::Ready(None),
-                    Poll::Ready(Err(error)) => Poll::Ready(Some(Err(error))),
-                };
+                if !stream.publication_ready {
+                    match stream.poll_producer(cx) {
+                        Poll::Pending => return Poll::Pending,
+                        Poll::Ready(Err(error)) => {
+                            stream.pending_publication.clear();
+                            stream.pending_terminal = Some(Err(error));
+                        }
+                        Poll::Ready(Ok(())) => {}
+                    }
+                    stream.prepare_publication();
+                }
+                let item = stream.pending_publication.pop_front();
+                return Poll::Ready(item.map(|item| stream.sequenced(item)));
             }
             match Pin::new(&mut stream.receiver).poll_next(cx) {
                 Poll::Pending => return Poll::Pending,
+                Poll::Ready(Some(Ok(AgentEvent::ExecutionStatus(status))))
+                    if matches!(
+                        status.status,
+                        echo_core::agent::ExecutionStatusKind::Settled
+                            | echo_core::agent::ExecutionStatusKind::Failed
+                            | echo_core::agent::ExecutionStatusKind::Cancelled
+                    ) =>
+                {
+                    // producer内部先交发布包标记；公开事实仍由原物理owner完成后才释放。
+                    stream.terminal_status = Some(status);
+                }
                 Poll::Ready(Some(item)) => {
-                    let terminal = match &item {
-                        Ok(event) => event.is_terminal(),
-                        Err(_) => true,
-                    };
-                    if terminal {
-                        stream.pending_terminal = Some(item);
-                        stream.receiver_closed = true;
-                    } else {
-                        return Poll::Ready(Some(item));
+                    let success = matches!(&item, Ok(AgentEvent::FinalAnswer(_)));
+                    let failure = item.is_err()
+                        || matches!(&item, Ok(AgentEvent::Error { .. } | AgentEvent::Cancelled));
+                    if failure {
+                        stream.pending_publication.clear();
+                        if stream
+                            .pending_terminal
+                            .as_ref()
+                            .is_none_or(|item| matches!(item, Ok(AgentEvent::FinalAnswer(_))))
+                        {
+                            stream.pending_terminal = Some(item);
+                        }
+                    } else if success {
+                        if stream.pending_terminal.is_none() {
+                            stream.pending_terminal = Some(item);
+                        }
+                    } else if stream.terminal_status.is_some() {
+                        stream.pending_publication.push_back(item);
+                    } else if stream.pending_terminal.is_none() {
+                        return Poll::Ready(Some(stream.sequenced(item)));
                     }
+                    // 读到原EOF再join；不能在FinalAnswer处停读而漏尾失败或卡住原sender。
                 }
                 Poll::Ready(None) => stream.receiver_closed = true,
             }
@@ -256,50 +419,25 @@ impl ReactAgent {
         let mut text = init.text.clone();
         let mut message = init.message.clone();
         let label = init.label.clone();
-        let mut invocation = init.invocation;
-        // Capture value-carried run metadata before the execution mutex wait.
-        // Concurrent callers may update/clear the agent's shared external
-        // context while this invocation is queued, but this snapshot belongs
-        // to the invocation that entered here.
-        let mut legacy_runtime = if invocation.is_none() {
-            Some(self.capture_legacy_external_context())
-        } else {
-            None
-        };
+        // 在任何排队/await前值化。plain调用与显式调用只走同一条当前通路。
+        let mut invocation = init.invocation.unwrap_or_default();
         let requested_cancel = invocation
+            .runtime
             .as_ref()
-            .and_then(|context| {
-                context
-                    .runtime
-                    .as_ref()
-                    .and_then(|runtime| runtime.cancel.as_deref().cloned())
-                    .or_else(|| context.cancel.clone())
-            })
-            .or_else(|| {
-                legacy_runtime
-                    .as_ref()
-                    .and_then(|runtime| runtime.cancel.as_deref().cloned())
-            });
+            .and_then(|runtime| runtime.cancel.as_deref().cloned())
+            .or_else(|| invocation.cancel.clone());
         let (mut turn_lease, lifecycle_cancel) = self.close_authority.admit(requested_cancel)?;
-        if let Some(context) = invocation.as_mut() {
-            context.cancel = Some(lifecycle_cancel.clone());
-            if let Some(runtime) = context.runtime.as_mut() {
-                runtime.cancel = Some(Arc::new(lifecycle_cancel.clone()));
-            }
-        }
-        if let Some(runtime) = legacy_runtime.as_mut() {
+        invocation.cancel = Some(lifecycle_cancel.clone());
+        if let Some(runtime) = invocation.runtime.as_mut() {
             runtime.cancel = Some(Arc::new(lifecycle_cancel.clone()));
         }
         let runtime_state_id = crate::agent::snapshot::effective_runtime_state_id(
             self.config.conversation_id.as_deref(),
-            invocation.as_ref(),
-            legacy_runtime.as_ref(),
+            Some(&invocation),
         );
         crate::agent::snapshot::validate_transcript_generation_identity(
             runtime_state_id,
-            invocation
-                .as_ref()
-                .and_then(|context| context.transcript_generation_id.as_deref()),
+            invocation.transcript_generation_id.as_deref(),
         )?;
         self.validate_persistence_configuration()?;
 
@@ -319,18 +457,28 @@ impl ReactAgent {
         // admission must therefore remain visible as close debt.
         turn_lease.mark_started();
 
-        let admission_snapshot = match (invocation.as_ref(), legacy_runtime.as_ref()) {
-            (Some(invocation), _) => AgentSnapshot::from_agent_with_invocation(self, invocation),
-            (None, Some(legacy)) => AgentSnapshot::from_agent_with_legacy_context(self, legacy),
-            (None, None) => make_snapshot(self),
-        };
+        let mut admission_snapshot = AgentSnapshot::from_agent_with_invocation(self, &invocation);
+        // 当前准备期的同一物理owner持有lease/mutex/资源，直到交给原producer。
+        // 去掉旧控制历史归一不代表正常Store已准入工作可因caller drop提前释放。
+        let mut preparation_owner =
+            ReactStreamTurnOwner::preparation(&admission_snapshot, turn_lease, execution_guard);
         let pending_settlement = match admission_snapshot
             .reconcile_pending_transcript_projection()
             .await
         {
             Ok(settlement) => settlement,
             Err(error) => {
-                turn_lease.settle();
+                if let crate::error::ReactError::ExecutionNotSettled {
+                    run_id,
+                    execution_id,
+                } = &error
+                {
+                    preparation_owner.run_id = Some(run_id.clone());
+                    preparation_owner.execution_id = execution_id.clone();
+                    preparation_owner.retain_unknown();
+                } else {
+                    preparation_owner.settle(crate::agent::AgentSteerTurnOutcome::Failed);
+                }
                 return Err(error);
             }
         };
@@ -338,7 +486,7 @@ impl ReactAgent {
             if settlement.status != crate::memory::TranscriptProjectionSettlementStatus::Settled {
                 let error =
                     crate::agent::snapshot::transcript_settlement_admission_error(&settlement);
-                turn_lease.settle();
+                preparation_owner.settle(crate::agent::AgentSteerTurnOutcome::Failed);
                 return Err(error);
             }
             if tx
@@ -346,7 +494,7 @@ impl ReactAgent {
                 .await
                 .is_err()
             {
-                turn_lease.settle();
+                preparation_owner.settle(crate::agent::AgentSteerTurnOutcome::Failed);
                 return Err(crate::error::ReactError::Other(
                     "event consumer closed during transcript recovery".to_string(),
                 ));
@@ -354,25 +502,38 @@ impl ReactAgent {
         }
         if admission_snapshot.conversation_store.is_some() {
             let Some(scope_id) = admission_snapshot.config.conversation_id.as_deref() else {
-                turn_lease.settle();
+                preparation_owner.settle(crate::agent::AgentSteerTurnOutcome::Failed);
                 return Err(crate::error::ConfigError::ConfigFileError(
                     "managed transcript persistence requires a conversation identity".to_string(),
                 )
                 .into());
             };
             let Some(runtime_state_id) = runtime_state_id else {
-                turn_lease.settle();
+                preparation_owner.settle(crate::agent::AgentSteerTurnOutcome::Failed);
                 return Err(crate::error::ConfigError::ConfigFileError(
                     "managed transcript persistence requires a runtime-state identity".to_string(),
                 )
                 .into());
             };
-            if let Err(error) = self
+            match self
                 .hydrate_managed_runtime_before_input_guard(scope_id, runtime_state_id)
                 .await
             {
-                turn_lease.settle();
-                return Err(error);
+                Ok(event) => admission_snapshot.pending_checkpoint_resume = event,
+                Err(error) => {
+                    if let crate::error::ReactError::ExecutionNotSettled {
+                        run_id,
+                        execution_id,
+                    } = &error
+                    {
+                        preparation_owner.run_id = Some(run_id.clone());
+                        preparation_owner.execution_id = execution_id.clone();
+                        preparation_owner.retain_unknown();
+                    } else {
+                        preparation_owner.settle(crate::agent::AgentSteerTurnOutcome::Failed);
+                    }
+                    return Err(error);
+                }
             }
         }
 
@@ -385,7 +546,17 @@ impl ReactAgent {
             {
                 Ok(result) => result,
                 Err(error) => {
-                    turn_lease.settle();
+                    if let crate::error::ReactError::ExecutionNotSettled {
+                        run_id,
+                        execution_id,
+                    } = &error
+                    {
+                        preparation_owner.run_id = Some(run_id.clone());
+                        preparation_owner.execution_id = execution_id.clone();
+                        preparation_owner.retain_unknown();
+                    } else {
+                        preparation_owner.settle(crate::agent::AgentSteerTurnOutcome::Failed);
+                    }
                     return Err(error);
                 }
             };
@@ -405,35 +576,21 @@ impl ReactAgent {
                         );
                         self.record_audit_event(event).await;
                     }
-                    let trace_run_id = if let Some(runtime) = invocation
-                        .as_ref()
-                        .and_then(|context| context.runtime.as_ref())
-                    {
-                        self.start_scoped_trace_run(
+                    let trace_run_id = self
+                        .start_scoped_trace_run(
                             "[input blocked by guard]",
-                            runtime.run_id.as_deref(),
-                            runtime.conversation_id.as_deref(),
-                            runtime.turn_id.as_deref(),
-                            runtime.execution_id.as_deref(),
+                            admission_snapshot.current_run_id.as_deref(),
+                            admission_snapshot.config.conversation_id.as_deref(),
+                            admission_snapshot.current_turn_id.as_deref(),
+                            admission_snapshot.current_execution_id.as_deref(),
                         )
-                        .await
-                    } else if let Some(legacy) = legacy_runtime.as_ref() {
-                        self.start_legacy_trace_run("[input blocked by guard]", legacy)
-                            .await
-                    } else {
-                        None
-                    };
-                    let mut terminal_snapshot = match (invocation.as_ref(), legacy_runtime.as_ref())
-                    {
-                        (Some(invocation), _) => {
-                            AgentSnapshot::from_agent_with_invocation(self, invocation)
-                        }
-                        (None, Some(legacy)) => {
-                            AgentSnapshot::from_agent_with_legacy_context(self, legacy)
-                        }
-                        (None, None) => make_snapshot(self),
-                    };
+                        .await;
+                    let mut terminal_snapshot =
+                        AgentSnapshot::from_agent_with_invocation(self, &invocation);
                     terminal_snapshot.trace_run_id = trace_run_id;
+                    if let Some(event) = admission_snapshot.pending_checkpoint_resume.take() {
+                        terminal_snapshot.record_event(event).await;
+                    }
                     let terminal_reason = format!("Request blocked by safety guard: {reason}");
                     let (_, events) = finish_pre_spawn_terminal(
                         &terminal_snapshot,
@@ -446,8 +603,15 @@ impl ReactAgent {
                         ),
                     )
                     .await;
-                    turn_lease.settle();
-                    drop(execution_guard);
+                    if let Some((run_id, execution_id)) =
+                        ReactStreamTurnOwner::unknown_identity(&events)
+                    {
+                        preparation_owner.run_id = Some(run_id);
+                        preparation_owner.execution_id = execution_id;
+                        preparation_owner.retain_unknown();
+                        return Ok(Box::pin(futures::stream::iter(events)));
+                    }
+                    preparation_owner.settle(crate::agent::AgentSteerTurnOutcome::Failed);
                     return Ok(Box::pin(futures::stream::iter(events)));
                 }
                 crate::guard::GuardResult::Transform { content, .. } => {
@@ -462,78 +626,51 @@ impl ReactAgent {
 
         // Start a unique trace invocation after guard transformation. Product run identity
         // remains in ExternalRunContext and is only used as correlation.
-        let trace_run_id;
-        if let Some(invocation) = invocation.as_ref() {
-            let parent_run_id = invocation
-                .runtime
-                .as_ref()
-                .and_then(|runtime| runtime.run_id.clone());
-            let conversation_id = invocation
-                .runtime
-                .as_ref()
-                .and_then(|runtime| runtime.conversation_id.clone());
-            let trace_turn_id = invocation
-                .runtime
-                .as_ref()
-                .and_then(|runtime| runtime.turn_id.clone());
-            let execution_id = invocation
-                .runtime
-                .as_ref()
-                .and_then(|runtime| runtime.execution_id.clone());
-            trace_run_id = self
-                .start_scoped_trace_run(
-                    &text,
-                    parent_run_id.as_deref(),
-                    conversation_id.as_deref(),
-                    trace_turn_id.as_deref(),
-                    execution_id.as_deref(),
-                )
-                .await;
-        } else {
-            trace_run_id = match legacy_runtime.as_ref() {
-                Some(legacy) => self.start_legacy_trace_run(&text, legacy).await,
-                None => None,
-            };
-        }
+        let trace_run_id = self
+            .start_scoped_trace_run(
+                &text,
+                admission_snapshot.current_run_id.as_deref(),
+                admission_snapshot.config.conversation_id.as_deref(),
+                admission_snapshot.current_turn_id.as_deref(),
+                admission_snapshot.current_execution_id.as_deref(),
+            )
+            .await;
+        admission_snapshot.trace_run_id = trace_run_id.clone();
+        // 普通prepare会用当前trace重读并发布实际恢复记录；Guard专用暂存不重复发布。
+        admission_snapshot.pending_checkpoint_resume = None;
         let turn_id = invocation
+            .runtime
             .as_ref()
-            .and_then(|value| value.runtime.as_ref())
             .and_then(|runtime| runtime.turn_id.clone().or_else(|| runtime.run_id.clone()))
-            .or_else(|| {
-                legacy_runtime
-                    .as_ref()
-                    .and_then(|runtime| runtime.turn_id.clone())
-                    .or_else(|| {
-                        legacy_runtime
-                            .as_ref()
-                            .and_then(|runtime| runtime.current_run_id.clone())
-                    })
-            })
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
         let active_turn_lease = self.turn_steer_mailbox.begin(turn_id.clone());
+        active_turn_lease.set_run_id(admission_snapshot.current_run_id.clone());
+        // admission与实际drain分开：准备期可排队，只有原safe point才消费。
+        // Hook拒绝/恢复失败仍由同一lease结算Accepted且未drain的receipt。
+        active_turn_lease.set_steerable(true);
+        let turn_steer_incarnation = active_turn_lease.incarnation();
+        preparation_owner.steering = Some(active_turn_lease);
 
         // ── Restore thread context (Execute mode) + memory triggers/recall ──
-        let history = invocation
-            .as_ref()
-            .and_then(|value| value.history.as_deref())
-            .unwrap_or_default();
         let persistence_scope_id = admission_snapshot.config.conversation_id.as_deref();
         let recalled_result = if let Some(ref msg) = message {
             self.prepare_stream_context_with_message(
                 mode,
                 msg,
-                history,
+                &invocation,
                 persistence_scope_id,
                 runtime_state_id,
+                Some(&admission_snapshot),
             )
             .await
         } else {
             self.prepare_stream_context(
                 mode,
                 &text,
-                history,
+                &invocation,
                 persistence_scope_id,
                 runtime_state_id,
+                Some(&admission_snapshot),
             )
             .await
         };
@@ -545,15 +682,8 @@ impl ReactAgent {
                     .starts_with("Blocked by UserPromptSubmit hook:") =>
             {
                 let reason = error.to_string();
-                let mut terminal_snapshot = match (invocation.as_ref(), legacy_runtime.as_ref()) {
-                    (Some(invocation), _) => {
-                        AgentSnapshot::from_agent_with_invocation(self, invocation)
-                    }
-                    (None, Some(legacy)) => {
-                        AgentSnapshot::from_agent_with_legacy_context(self, legacy)
-                    }
-                    (None, None) => make_snapshot(self),
-                };
+                let mut terminal_snapshot =
+                    AgentSnapshot::from_agent_with_invocation(self, &invocation);
                 terminal_snapshot.trace_run_id = trace_run_id;
                 let (outcome, events) = finish_pre_spawn_terminal(
                     &terminal_snapshot,
@@ -566,21 +696,30 @@ impl ReactAgent {
                     ),
                 )
                 .await;
-                active_turn_lease.settle(outcome);
-                turn_lease.settle();
-                drop(execution_guard);
+                if let Some((run_id, execution_id)) =
+                    ReactStreamTurnOwner::unknown_identity(&events)
+                {
+                    preparation_owner.run_id = Some(run_id);
+                    preparation_owner.execution_id = execution_id;
+                    preparation_owner.retain_unknown();
+                    return Ok(Box::pin(futures::stream::iter(events)));
+                }
+                preparation_owner.settle(outcome);
                 return Ok(Box::pin(futures::stream::iter(events)));
             }
             Err(error) => {
-                let mut terminal_snapshot = match (invocation.as_ref(), legacy_runtime.as_ref()) {
-                    (Some(invocation), _) => {
-                        AgentSnapshot::from_agent_with_invocation(self, invocation)
-                    }
-                    (None, Some(legacy)) => {
-                        AgentSnapshot::from_agent_with_legacy_context(self, legacy)
-                    }
-                    (None, None) => make_snapshot(self),
-                };
+                if let crate::error::ReactError::ExecutionNotSettled {
+                    run_id,
+                    execution_id,
+                } = &error
+                {
+                    preparation_owner.run_id = Some(run_id.clone());
+                    preparation_owner.execution_id = execution_id.clone();
+                    preparation_owner.retain_unknown();
+                    return Err(error);
+                }
+                let mut terminal_snapshot =
+                    AgentSnapshot::from_agent_with_invocation(self, &invocation);
                 terminal_snapshot.trace_run_id = trace_run_id;
                 let terminal = AgentEvent::from_error("react_loop", &error)?;
                 let (outcome, events) = finish_pre_spawn_terminal(
@@ -590,9 +729,15 @@ impl ReactAgent {
                     terminal,
                 )
                 .await;
-                active_turn_lease.settle(outcome);
-                turn_lease.settle();
-                drop(execution_guard);
+                if let Some((run_id, execution_id)) =
+                    ReactStreamTurnOwner::unknown_identity(&events)
+                {
+                    preparation_owner.run_id = Some(run_id);
+                    preparation_owner.execution_id = execution_id;
+                    preparation_owner.retain_unknown();
+                    return Ok(Box::pin(futures::stream::iter(events)));
+                }
+                preparation_owner.settle(outcome);
                 return Ok(Box::pin(futures::stream::iter(events)));
             }
         };
@@ -601,10 +746,7 @@ impl ReactAgent {
         // routing or provider execution begins. Generic Agent implementations
         // that do not provide this publisher intentionally leave the receipt
         // at `drained = false`.
-        if let Some(lifecycle) = invocation
-            .as_ref()
-            .and_then(|context| context.input_lifecycle.as_ref())
-        {
+        if let Some(lifecycle) = invocation.input_lifecycle.as_ref() {
             lifecycle.mark_drained();
         }
 
@@ -613,16 +755,7 @@ impl ReactAgent {
         // so every invocation has the same lifecycle and terminal authority.
         if let Some(ref router) = self.intent_router {
             let messages = self.memory.context.lock().await.messages().to_vec();
-            let cancel = invocation
-                .as_ref()
-                .and_then(|context| context.cancel.clone())
-                .or_else(|| {
-                    legacy_runtime
-                        .as_ref()
-                        .and_then(|runtime| runtime.cancel.as_ref())
-                        .map(|token| token.as_ref().clone())
-                })
-                .unwrap_or_default();
+            let cancel = invocation.cancel.clone().unwrap_or_default();
             let intent = router.classify_with_cancel(&text, &messages, cancel).await;
             match intent {
                 crate::intent::Intent::DirectAnswer { confidence } => {
@@ -660,13 +793,12 @@ impl ReactAgent {
             }
         }
 
-        let mut snap = match (invocation.as_ref(), legacy_runtime.as_ref()) {
-            (Some(invocation), _) => AgentSnapshot::from_agent_with_invocation(self, invocation),
-            (None, Some(legacy)) => AgentSnapshot::from_agent_with_legacy_context(self, legacy),
-            (None, None) => make_snapshot(self),
-        };
+        let mut snap = AgentSnapshot::from_agent_with_invocation(self, &invocation);
         snap.current_turn_id = Some(turn_id.clone());
-        snap.turn_steer_incarnation = Some(active_turn_lease.incarnation());
+        if snap.current_execution_id.is_none() {
+            snap.current_execution_id = Some(format!("execution:{}", uuid::Uuid::new_v4()));
+        }
+        snap.turn_steer_incarnation = Some(turn_steer_incarnation);
         snap.current_message = message.clone();
         snap.trace_run_id = trace_run_id;
         let consumer_cancel = snap
@@ -677,47 +809,28 @@ impl ReactAgent {
             .unwrap_or_default();
         snap.cancel_token = Some(consumer_cancel.clone());
         snap.external_cancel = Some(Arc::new(consumer_cancel.clone()));
-        active_turn_lease.set_steerable(true);
         let terminal_cancel = consumer_cancel.clone();
         let failure_snapshot = snap.clone();
 
         let runtime = match tokio::runtime::Handle::try_current() {
             Ok(runtime) => runtime,
             Err(error) => {
-                active_turn_lease.settle(crate::agent::AgentSteerTurnOutcome::Failed);
-                turn_lease.settle();
+                preparation_owner.settle(crate::agent::AgentSteerTurnOutcome::Failed);
                 return Err(crate::error::ReactError::Other(format!(
                     "stream execution requires a Tokio runtime: {error}"
                 )));
             }
         };
-        let observation_run_id = invocation
-            .as_ref()
-            .and_then(|context| context.runtime.as_ref())
-            .and_then(|runtime| runtime.run_id.clone())
-            .or_else(|| {
-                legacy_runtime
-                    .as_ref()
-                    .and_then(|runtime| runtime.current_run_id.clone())
-            })
+        // 流观察身份可使用turn id；它不回填snapshot或current_run_id公共观察值。
+        let observation_run_id = snap
+            .current_run_id
+            .clone()
             .unwrap_or_else(|| turn_id.clone());
-        let observation_execution_id = invocation
-            .as_ref()
-            .and_then(|context| context.runtime.as_ref())
-            .and_then(|runtime| runtime.execution_id.clone())
-            .or_else(|| {
-                legacy_runtime
-                    .as_ref()
-                    .and_then(|runtime| runtime.execution_id.clone())
-            });
-        let mut physical_owner = ReactStreamTurnOwner {
-            lease: Some(turn_lease),
-            steering: Some(active_turn_lease),
-            execution: Some(execution_guard),
-            resource_guards: snap.resource_guards.clone(),
-            run_id: observation_run_id.clone(),
-            execution_id: observation_execution_id.clone(),
-        };
+        let observation_execution_id = snap.current_execution_id.clone();
+        preparation_owner.run_id = Some(observation_run_id.clone());
+        preparation_owner.execution_id = observation_execution_id.clone();
+        preparation_owner.resource_guards = snap.resource_guards.clone();
+        let mut physical_owner = preparation_owner;
         let task = runtime.spawn(async move {
             // The same original resources survive either an explicit unknown
             // result or producer unwind; no parked replacement task is made.
@@ -741,7 +854,7 @@ impl ReactAgent {
                         execution_id,
                     } = &error
                     {
-                        physical_owner.run_id = run_id.clone();
+                        physical_owner.run_id = Some(run_id.clone());
                         physical_owner.execution_id = execution_id.clone();
                         physical_owner.retain_unknown();
                         let _ = tx.send(Err(error)).await;
@@ -784,6 +897,10 @@ impl ReactAgent {
             task: Some(task),
             runtime,
             pending_terminal: None,
+            pending_publication: std::collections::VecDeque::new(),
+            status_sequence: 0,
+            terminal_status: None,
+            publication_ready: false,
             receiver_closed: false,
             observation_run_id,
             observation_execution_id,
@@ -817,9 +934,6 @@ fn message_with_replaced_text(mut message: Message, replacement: &str) -> Messag
 use crate::agent::snapshot::AgentRunSnapshot as AgentSnapshot;
 
 // Helper to create snapshot from agent (keeps the same API for rest of file)
-fn make_snapshot(agent: &ReactAgent) -> AgentSnapshot {
-    AgentSnapshot::from_agent(agent)
-}
 
 impl AgentSnapshot {
     fn failure_terminal(&self) -> crate::agent::AgentSteerTurnOutcome {
@@ -861,7 +975,16 @@ impl AgentSnapshot {
         }
     }
 
-    async fn drain_steer_into_context(
+    pub(super) fn has_pending_steer(&self) -> bool {
+        match (&self.current_turn_id, &self.turn_steer_incarnation) {
+            (Some(turn_id), Some(incarnation)) => {
+                self.turn_steer_mailbox.has_pending(turn_id, incarnation)
+            }
+            _ => false,
+        }
+    }
+
+    pub(super) async fn drain_steer_into_context(
         &self,
         context: &Arc<tokio::sync::Mutex<crate::compression::ContextManager>>,
         assistant_draft: Option<Message>,
@@ -915,6 +1038,16 @@ impl AgentSnapshot {
         // (acquired in run_stream_channel via lock_owned()), so we don't
         // need to lock again here.
 
+        let _ = tx
+            .send(Ok(phases::finalize::execution_status_event(
+                &self,
+                echo_core::agent::ExecutionStatusKind::Started,
+                echo_core::agent::AgentPhase::Thinking,
+                None,
+                0,
+                None,
+            )))
+            .await;
         let structured_format_result = self
             .config
             .response_format
@@ -976,6 +1109,10 @@ impl AgentSnapshot {
         // config still remains bounded here and reaches typed finalization.
         let max_iterations = self.config.max_iterations;
         for iteration in 0..max_iterations {
+            if phases::cancellation_requested(&self) {
+                return phases::finalize::settle_cancelled_final_candidate(&self, &context, &tx)
+                    .await;
+            }
             for cb in self.config.callbacks.iter() {
                 cb.on_iteration(&agent_name, iteration).await;
             }
@@ -1067,26 +1204,30 @@ impl AgentSnapshot {
 
             // Think: callbacks + interventions + LLM stream → buffered output
             let final_only = state.budget.final_only;
-            let think =
-                match phases::think::run_think(&self, &context, &tx, messages, final_only).await? {
-                    phases::ThinkOutcome::Continue(t) => t,
-                    phases::ThinkOutcome::Abandoned => {
-                        self.settle_unobserved_terminal(
-                            &context,
-                            "event consumer disconnected during model response",
-                        )
-                        .await?;
-                        self.finalize_run(
-                            crate::trace::RunStatus::Cancelled,
-                            None,
-                            Some("event consumer disconnected or intervention blocked the run"),
-                        )
-                        .await;
-                        return Ok(crate::agent::AgentSteerTurnOutcome::Cancelled);
-                    }
-                    phases::ThinkOutcome::TerminalSettled { outcome } => return Ok(outcome),
-                };
+            let think = match phases::think::run_think(
+                &self, &context, &tx, messages, final_only, iteration,
+            )
+            .await?
+            {
+                phases::ThinkOutcome::Continue(t) => *t,
+                phases::ThinkOutcome::Abandoned => {
+                    self.settle_unobserved_terminal(
+                        &context,
+                        "event consumer disconnected during model response",
+                    )
+                    .await?;
+                    self.finalize_run(
+                        crate::trace::RunStatus::Cancelled,
+                        None,
+                        Some("event consumer disconnected or intervention blocked the run"),
+                    )
+                    .await;
+                    return Ok(crate::agent::AgentSteerTurnOutcome::Cancelled);
+                }
+                phases::ThinkOutcome::TerminalSettled { outcome } => return Ok(outcome),
+            };
 
+            let response_observation = think.provider_response.clone();
             let iteration_tokens = think.pt.saturating_add(think.ct);
             state
                 .budget
@@ -1119,6 +1260,11 @@ impl AgentSnapshot {
             }
 
             if state.budget.final_only && !think.tool_call_map.is_empty() {
+                phases::retain_provider_response_observation(
+                    &context,
+                    response_observation.as_ref(),
+                )
+                .await;
                 super::context::push_runtime_context_note(
                     &context,
                     "RunBudget:BlockedTools",
@@ -1130,14 +1276,54 @@ impl AgentSnapshot {
 
             // Branch: tool calls vs text answer vs no-response
             let outcome = if !think.tool_call_map.is_empty() {
+                let _ = tx
+                    .send(Ok(phases::finalize::execution_status_event(
+                        &self,
+                        echo_core::agent::ExecutionStatusKind::ToolPending,
+                        echo_core::agent::AgentPhase::Acting,
+                        think
+                            .assistant_blocks
+                            .first()
+                            .map(|block| block.request_id.clone())
+                            .or_else(|| {
+                                think.tool_call_map.values().find_map(|(_, _, _, source)| {
+                                    source.as_ref().map(|source| source.request_id.clone())
+                                })
+                            }),
+                        0,
+                        None,
+                    )))
+                    .await;
                 phases::tools::run_tools(&self, &context, &tx, iteration, think, &label).await?
-            } else if !think.content_buffer.is_empty() {
+            } else if (think.continue_response
+                && (!think.assistant_blocks.is_empty()
+                    || !think.reasoning_blocks.is_empty()
+                    || !think.reasoning_buffer.is_empty()))
+                || (think.candidate_answer.is_none()
+                    && phases::assistant_progress_only(&think.assistant_blocks))
+            {
+                // 显式进度/部分回答存原消息后继续同一执行；它不是最终候选，也不调用Stop。
+                let mut message = phases::with_reasoning_content(
+                    Message::assistant(think.content_buffer),
+                    think.reasoning_buffer,
+                    think.reasoning_blocks,
+                );
+                message.assistant_blocks = Some(think.assistant_blocks);
+                message.approved_assistant_blocks = Some(think.approved_assistant_blocks);
+                message.provider_response = think.provider_response;
+                context.lock().await.push(message);
+                self.save_runtime_checkpoint(&context, None).await?;
+                IterOutcome::Continue
+            } else if think.candidate_answer.is_some() {
                 let mut think = think;
-                let assistant_draft = phases::with_reasoning_content(
+                let mut assistant_draft = phases::with_reasoning_content(
                     Message::assistant(think.content_buffer.clone()),
                     think.reasoning_buffer.clone(),
                     think.reasoning_blocks.clone(),
                 );
+                assistant_draft.assistant_blocks = Some(think.assistant_blocks.clone());
+                assistant_draft.approved_assistant_blocks = Some(Vec::new());
+                assistant_draft.provider_response = think.provider_response.clone();
                 if self
                     .drain_steer_into_context(&context, Some(assistant_draft))
                     .await
@@ -1145,16 +1331,22 @@ impl AgentSnapshot {
                 {
                     continue;
                 }
-                think.content_buffer =
-                    match self.check_final_answer_guard(&think.content_buffer).await {
-                        Ok(answer) => answer,
-                        Err(error) => {
-                            return phases::finalize::settle_final_guard_failure(
-                                &self, &context, &tx, error,
-                            )
-                            .await;
-                        }
-                    };
+                // 只校验完整响应选出的最终块；前面的进度不是最终回答的前缀。
+                let candidate = think.candidate_answer.take().unwrap_or_default();
+                think.content_buffer = match self.check_final_answer_guard(&candidate).await {
+                    Ok(answer) => answer,
+                    Err(error) => {
+                        phases::retain_provider_response_observation(
+                            &context,
+                            response_observation.as_ref(),
+                        )
+                        .await;
+                        return phases::finalize::settle_final_guard_failure(
+                            &self, &context, &tx, error,
+                        )
+                        .await;
+                    }
+                };
                 match phases::verify::validate_structured_final(
                     structured_format.as_ref(),
                     &self,
@@ -1166,8 +1358,20 @@ impl AgentSnapshot {
                 .await
                 {
                     Ok(true) => {}
-                    Ok(false) => continue,
+                    Ok(false) => {
+                        phases::retain_provider_response_observation(
+                            &context,
+                            response_observation.as_ref(),
+                        )
+                        .await;
+                        continue;
+                    }
                     Err(error) => {
+                        phases::retain_provider_response_observation(
+                            &context,
+                            response_observation.as_ref(),
+                        )
+                        .await;
                         phases::finalize::settle_terminal_projection(
                             &self,
                             &context,
@@ -1181,6 +1385,11 @@ impl AgentSnapshot {
                 let pt = think.pt;
                 let ct = think.ct;
                 if phases::cancellation_requested(&self) {
+                    phases::retain_provider_response_observation(
+                        &context,
+                        response_observation.as_ref(),
+                    )
+                    .await;
                     return phases::finalize::settle_cancelled_final_candidate(
                         &self, &context, &tx,
                     )
@@ -1191,24 +1400,77 @@ impl AgentSnapshot {
                         &self, &context, &tx, &mut state, iteration, think, &label,
                     ) => verified,
                     _ = phases::wait_for_cancellation(&self) => {
+                        phases::retain_provider_response_observation(&context, response_observation.as_ref()).await;
                         return phases::finalize::settle_cancelled_final_candidate(
                             &self, &context, &tx,
                         ).await;
                     }
                 };
+                // Critic等待可取消；选中普通失败后由原owner在select外完整等待持久化。
+                // 先处理原失败/unknown，避免通用取消再写或改写首因。
+                let verified = match verified {
+                    Ok(IterOutcome::TerminalSettled { outcome }) => return Ok(outcome),
+                    Ok(verified) => verified,
+                    Err(error) => {
+                        phases::retain_provider_response_observation(
+                            &context,
+                            response_observation.as_ref(),
+                        )
+                        .await;
+                        let terminal = AgentEvent::from_error("critic", &error)?;
+                        let cancelled = match &terminal {
+                            AgentEvent::Cancelled => true,
+                            AgentEvent::Error { failure, .. } => {
+                                failure.terminal_kind == crate::error::AgentTerminalKind::Cancelled
+                            }
+                            _ => false,
+                        };
+                        phases::finalize::settle_terminal_projection(
+                            &self,
+                            &context,
+                            Some(error.to_string()),
+                            &tx,
+                        )
+                        .await?;
+                        self.finalize_run(
+                            if cancelled {
+                                crate::trace::RunStatus::Cancelled
+                            } else {
+                                crate::trace::RunStatus::Failed
+                            },
+                            None,
+                            Some(&error.to_string()),
+                        )
+                        .await;
+                        let _ = tx.send(Ok(terminal)).await;
+                        return Ok(if cancelled {
+                            crate::agent::AgentSteerTurnOutcome::Cancelled
+                        } else {
+                            crate::agent::AgentSteerTurnOutcome::Failed
+                        });
+                    }
+                };
                 if phases::cancellation_requested(&self) {
+                    phases::retain_provider_response_observation(
+                        &context,
+                        response_observation.as_ref(),
+                    )
+                    .await;
                     return phases::finalize::settle_cancelled_final_candidate(
                         &self, &context, &tx,
                     )
                     .await;
                 }
-                match verified? {
+                match verified {
                     IterOutcome::Continue => continue,
                     IterOutcome::FinalText {
                         answer,
                         reasoning_content,
                         reasoning_blocks,
+                        assistant_blocks,
+                        provider_response,
                     } => {
+                        let provider_response = provider_response.map(|observation| *observation);
                         match phases::finalize::emit_final_text(
                             &self,
                             &context,
@@ -1220,6 +1482,8 @@ impl AgentSnapshot {
                             answer,
                             reasoning_content,
                             reasoning_blocks,
+                            assistant_blocks,
+                            provider_response,
                             true,
                         )
                         .await?
@@ -1238,63 +1502,6 @@ impl AgentSnapshot {
                 IterOutcome::Continue => {
                     continue;
                 }
-                IterOutcome::FinishCandidates { outputs } => {
-                    if self.drain_steer_into_context(&context, None).await > 0 {
-                        continue;
-                    }
-                    if phases::cancellation_requested(&self) {
-                        return phases::finalize::settle_cancelled_final_candidate(
-                            &self, &context, &tx,
-                        )
-                        .await;
-                    }
-                    let selected = tokio::select! {
-                        selected = phases::verify::select_final_answer(
-                            structured_format.as_ref(),
-                            &self,
-                            &context,
-                            &mut state,
-                            iteration,
-                            outputs,
-                        ) => selected,
-                        _ = phases::wait_for_cancellation(&self) => {
-                            return phases::finalize::settle_cancelled_final_candidate(
-                                &self, &context, &tx,
-                            ).await;
-                        }
-                    };
-                    if phases::cancellation_requested(&self) {
-                        return phases::finalize::settle_cancelled_final_candidate(
-                            &self, &context, &tx,
-                        )
-                        .await;
-                    }
-                    let output = match selected {
-                        Ok(Some(output)) => output,
-                        Ok(None) => continue,
-                        Err(error) => {
-                            phases::finalize::settle_terminal_projection(
-                                &self,
-                                &context,
-                                Some(error.to_string()),
-                                &tx,
-                            )
-                            .await?;
-                            return Err(error);
-                        }
-                    };
-                    match phases::finalize::finalize_completed_run(
-                        &self, &context, &label, &output, iteration, &state, &tx,
-                    )
-                    .await?
-                    {
-                        ControlFlow::Continue(()) => {
-                            state.stop_hook_continued = true;
-                            continue;
-                        }
-                        ControlFlow::Break(outcome) => return Ok(outcome),
-                    }
-                }
                 // FinalText is only produced by verify_final_text and is
                 // already handled inline in the text branch above. Reaching
                 // it here would mean a phase returned an outcome out of band
@@ -1304,10 +1511,18 @@ impl AgentSnapshot {
                     answer,
                     reasoning_content,
                     reasoning_blocks,
+                    assistant_blocks,
+                    provider_response,
                 } => {
+                    let provider_response = provider_response.map(|observation| *observation);
                     let answer = match self.check_final_answer_guard(&answer).await {
                         Ok(answer) => answer,
                         Err(error) => {
+                            phases::retain_provider_response_observation(
+                                &context,
+                                provider_response.as_ref(),
+                            )
+                            .await;
                             return phases::finalize::settle_final_guard_failure(
                                 &self, &context, &tx, error,
                             )
@@ -1325,8 +1540,20 @@ impl AgentSnapshot {
                     .await
                     {
                         Ok(true) => {}
-                        Ok(false) => continue,
+                        Ok(false) => {
+                            phases::retain_provider_response_observation(
+                                &context,
+                                provider_response.as_ref(),
+                            )
+                            .await;
+                            continue;
+                        }
                         Err(error) => {
+                            phases::retain_provider_response_observation(
+                                &context,
+                                provider_response.as_ref(),
+                            )
+                            .await;
                             phases::finalize::settle_terminal_projection(
                                 &self,
                                 &context,
@@ -1350,6 +1577,8 @@ impl AgentSnapshot {
                         answer,
                         reasoning_content,
                         reasoning_blocks,
+                        assistant_blocks,
+                        provider_response,
                         true,
                     )
                     .await?
@@ -1359,11 +1588,21 @@ impl AgentSnapshot {
                     }
                 }
                 IterOutcome::NoResponse => {
+                    phases::retain_provider_response_observation(
+                        &context,
+                        response_observation.as_ref(),
+                    )
+                    .await;
                     phases::finalize::finalize_no_response(&self, &context, tx).await?;
                     return Ok(crate::agent::AgentSteerTurnOutcome::Failed);
                 }
                 IterOutcome::TerminalSettled { outcome } => return Ok(outcome),
                 IterOutcome::Abandoned => {
+                    phases::retain_provider_response_observation(
+                        &context,
+                        response_observation.as_ref(),
+                    )
+                    .await;
                     self.settle_unobserved_terminal(
                         &context,
                         "event consumer disconnected or tool batch was abandoned",
@@ -1398,6 +1637,133 @@ mod tests {
     use futures::future::BoxFuture;
     use std::sync::Arc;
 
+    /// 验证整个原生事件序列；不剥离新status去满足旧末尾断言。
+    fn assert_native_runtime_terminal(
+        events: &[AgentEvent],
+        expected: echo_core::agent::ExecutionStatusKind,
+    ) {
+        use echo_core::agent::{AgentPhase, ExecutionStatusKind};
+        let statuses: Vec<_> = events
+            .iter()
+            .filter_map(|event| match event {
+                AgentEvent::ExecutionStatus(status) => Some(status),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            statuses
+                .iter()
+                .filter(|status| status.status == ExecutionStatusKind::Started)
+                .count(),
+            1,
+            "{events:?}"
+        );
+        let identity = statuses
+            .first()
+            .map(|status| status.execution_id.as_str())
+            .unwrap_or("");
+        assert!(!identity.is_empty(), "{events:?}");
+        assert!(
+            statuses
+                .iter()
+                .all(|status| status.execution_id == identity),
+            "同执行不能换身份：{events:?}"
+        );
+        for pair in statuses.windows(2) {
+            if let Some((left, right)) = pair.first().zip(pair.get(1)) {
+                assert!(
+                    left.sequence < right.sequence,
+                    "状态序号须严格递增：{events:?}"
+                );
+            }
+        }
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event.is_execution_terminal())
+                .count(),
+            1,
+            "{events:?}"
+        );
+        assert!(
+            matches!(events.last(),Some(AgentEvent::ExecutionStatus(status)) if status.status==expected&&status.phase==AgentPhase::Terminal),
+            "最后一次真实status：{events:?}"
+        );
+        assert!(
+            events
+                .iter()
+                .all(|event| serde_json::to_value(event).is_ok_and(|value| {
+                    value
+                        .get("type")
+                        .and_then(serde_json::Value::as_str)
+                        .is_some_and(|kind| !matches!(kind, "token" | "think_start" | "think_end"))
+                })),
+            "新执行不再重复旧正文/思考事件：{events:?}"
+        );
+        let answers = events
+            .iter()
+            .filter(|event| matches!(event, AgentEvent::FinalAnswer(_)))
+            .count();
+        if expected == ExecutionStatusKind::Settled {
+            assert_eq!(answers, 1, "成功确认回答恰一次：{events:?}");
+            assert!(
+                !events
+                    .iter()
+                    .any(|event| matches!(event, AgentEvent::Error { .. } | AgentEvent::Cancelled)),
+                "失败/取消不能伪成功：{events:?}"
+            );
+            let answer_position = events
+                .iter()
+                .position(|event| matches!(event, AgentEvent::FinalAnswer(_)));
+            assert!(
+                answer_position.is_some_and(|index| index.saturating_add(1) < events.len()),
+                "正文先于末尾物理结算：{events:?}"
+            );
+        } else {
+            assert_eq!(answers, 0, "失败/取消不得有成功回答：{events:?}");
+        }
+    }
+    fn last_confirmed_final(events: &[AgentEvent]) -> Option<&AgentEvent> {
+        assert_native_runtime_terminal(events, echo_core::agent::ExecutionStatusKind::Settled);
+        events
+            .iter()
+            .find(|event| matches!(event, AgentEvent::FinalAnswer(_)))
+    }
+    /// 仅是现Mock的原生协议fixture；不增加runner或执行权威。
+    fn native_response_script(
+        request: &str,
+        parts: &[(echo_core::agent::AssistantPhase, &str)],
+    ) -> Result<Vec<StreamChunk>> {
+        let blocks: Vec<_> = parts
+            .iter()
+            .enumerate()
+            .map(
+                |(index, (phase, text))| echo_core::agent::AssistantMessageBlock {
+                    block_id: format!("{request}:{index}"),
+                    request_id: request.to_string(),
+                    sequence: u64::try_from(index).unwrap_or(u64::MAX),
+                    phase: *phase,
+                    delta: (*text).to_string(),
+                    complete: true,
+                    provider: Some("mock".into()),
+                    provider_source: None,
+                    reasoning: None,
+                },
+            )
+            .collect();
+        let content: String = parts.iter().map(|(_, text)| *text).collect();
+        let delta: DeltaMessage = serde_json::from_value(
+            serde_json::json!({"role":"assistant","content":content,"assistant_blocks":blocks}),
+        )?;
+        Ok(vec![
+            StreamChunk::Delta(Box::new(delta)),
+            StreamChunk::Terminal {
+                finish_reason: Some("stop".into()),
+                usage: None,
+            },
+        ])
+    }
+
     #[tokio::test]
     async fn managed_stream_releases_terminal_after_producer_settlement() -> Result<()> {
         use futures::StreamExt;
@@ -1423,6 +1789,10 @@ mod tests {
             task: Some(task),
             runtime: tokio::runtime::Handle::current(),
             pending_terminal: None,
+            pending_publication: std::collections::VecDeque::new(),
+            status_sequence: 0,
+            terminal_status: None,
+            publication_ready: false,
             receiver_closed: false,
             observation_run_id: "managed-stream-test-run".to_string(),
             observation_execution_id: Some("managed-stream-test-execution".to_string()),
@@ -1446,11 +1816,13 @@ mod tests {
                 "managed stream returned the wrong terminal".to_string(),
             ));
         }
-        if stream.next().await.is_some() {
-            return Err(crate::error::ReactError::Other(
-                "managed stream emitted an event after terminal".to_string(),
-            ));
-        }
+        let settled = stream.next().await.ok_or_else(|| {
+            crate::error::ReactError::Other("missing physical completion status".into())
+        })??;
+        assert!(
+            matches!(settled,AgentEvent::ExecutionStatus(status) if status.status==echo_core::agent::ExecutionStatusKind::Settled)
+        );
+        assert!(stream.next().await.is_none(), "terminal status之后必须EOF");
         Ok(())
     }
 
@@ -1478,6 +1850,10 @@ mod tests {
             task: Some(task),
             runtime: tokio::runtime::Handle::current(),
             pending_terminal: None,
+            pending_publication: std::collections::VecDeque::new(),
+            status_sequence: 0,
+            terminal_status: None,
+            publication_ready: false,
             receiver_closed: false,
             observation_run_id: "managed-stream-test-run".to_string(),
             observation_execution_id: Some("managed-stream-test-execution".to_string()),
@@ -1752,10 +2128,10 @@ mod tests {
             _context: &ProjectionContext,
         ) -> BoxFuture<'_, Result<Vec<ContextProjection>>> {
             Box::pin(async {
-                Ok(vec![ContextProjection {
-                    marker: "routing-test".to_string(),
-                    message: Some(Message::user("required routing projection".to_string())),
-                }])
+                Ok(vec![ContextProjection::replacing(
+                    "routing-test",
+                    Some(Message::user("required routing projection".to_string())),
+                )])
             })
         }
     }
@@ -1821,7 +2197,7 @@ mod tests {
 
     /// A blocked input guard preserves the unconfigured path's single terminal.
     #[tokio::test]
-    async fn stream_guard_block_yields_single_final_answer() {
+    async fn stream_guard_block_yields_one_failed_runtime_terminal() -> Result<()> {
         let agent = agent_with_blocking_guard();
         let stream = agent
             .run_stream_channel(
@@ -1833,22 +2209,21 @@ mod tests {
                 },
                 StreamMode::Chat,
             )
+            .await?;
+
+        let events = stream
+            .collect::<Vec<_>>()
             .await
-            .expect("run_stream_channel must return a stream even when blocked");
-
-        let events: Vec<_> = stream.collect().await;
-
-        assert_eq!(events.len(), 1, "blocked stream should have one terminal");
-        match events.first().and_then(|event| event.as_ref().ok()) {
-            Some(AgentEvent::FinalAnswer(text)) => {
-                assert!(
-                    text.starts_with("Request blocked by safety guard:"),
-                    "expected block message, got: {text:?}",
-                );
-                assert!(text.contains("test-input-blocked"));
-            }
-            other => panic!("expected FinalAnswer, got {other:?}"),
-        }
+            .into_iter()
+            .collect::<Result<Vec<_>>>()?;
+        assert_native_runtime_terminal(&events, echo_core::agent::ExecutionStatusKind::Failed);
+        assert!(
+            matches!(events.as_slice(),[AgentEvent::ExecutionStatus(started),AgentEvent::Error{source,message,failure},AgentEvent::ExecutionStatus(terminal)]
+            if started.status==echo_core::agent::ExecutionStatusKind::Started && source=="input_guard"
+            && message.contains("test-input-blocked") && failure.terminal_kind==crate::error::AgentTerminalKind::Failed
+            && terminal.status==echo_core::agent::ExecutionStatusKind::Failed)
+        );
+        Ok(())
     }
 
     #[tokio::test]
@@ -1900,14 +2275,15 @@ mod tests {
             .await
             .into_iter()
             .collect::<Result<Vec<_>>>()?;
-        assert!(matches!(
-            events.as_slice(),
-            [
-                AgentEvent::TranscriptProjectionSettlement(settlement),
-                AgentEvent::FinalAnswer(_)
-            ] if settlement.status
-                == crate::memory::TranscriptProjectionSettlementStatus::Settled
-        ));
+        assert_native_runtime_terminal(&events, echo_core::agent::ExecutionStatusKind::Failed);
+        let settlement_index=events.iter().position(|event|matches!(event,AgentEvent::TranscriptProjectionSettlement(settlement) if settlement.status==crate::memory::TranscriptProjectionSettlementStatus::Settled));
+        let error_index=events.iter().position(|event|matches!(event,AgentEvent::Error{source,failure,..} if source=="input_guard"&&failure.terminal_kind==crate::error::AgentTerminalKind::Failed));
+        assert!(
+            settlement_index.zip(error_index).is_some_and(
+                |(settled, error)| settled < error && error.saturating_add(1) < events.len()
+            ),
+            "水合/持久化结算先于拒绝，运行status最后：{events:?}"
+        );
         let messages = agent.memory.context.lock().await.messages().to_vec();
         assert!(
             messages
@@ -2229,24 +2605,28 @@ mod tests {
         let settlement_index = events
             .iter()
             .position(|event| matches!(event, AgentEvent::TranscriptProjectionSettlement(_)));
-        let terminal_indices = events
+        assert_native_runtime_terminal(&events, echo_core::agent::ExecutionStatusKind::Failed);
+        let error_indices: Vec<_> = events
             .iter()
             .enumerate()
-            .filter_map(|(index, event)| event.is_terminal().then_some(index))
-            .collect::<Vec<_>>();
-        assert_eq!(terminal_indices.len(), 1);
-        assert!(matches!(
-            events.get(terminal_indices[0]),
-            Some(AgentEvent::Error { source, .. }) if source == "intervention"
-        ));
-        assert!(
-            settlement_index.is_some_and(|index| index < terminal_indices[0]),
-            "settlement must precede the intervention terminal: {events:?}"
+            .filter_map(|(index, event)| {
+                matches!(event,AgentEvent::Error{source,..} if source=="intervention")
+                    .then_some(index)
+            })
+            .collect();
+        assert_eq!(
+            error_indices.len(),
+            1,
+            "原干预拒绝原因须保留恰一次：{events:?}"
         );
+        let error_index = error_indices
+            .first()
+            .copied()
+            .ok_or_else(|| ReactError::Other("intervention error missing".into()))?;
         assert!(
-            events
-                .iter()
-                .all(|event| !matches!(event, AgentEvent::FinalAnswer(_)))
+            settlement_index.is_some_and(|index| index < error_index)
+                && error_index.saturating_add(1) < events.len(),
+            "结算先于Error和末status：{events:?}"
         );
         let stored = echo_core::memory::ConversationStore::get_messages(
             conversations.as_ref(),
@@ -2263,24 +2643,27 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn legacy_guard_block_trace_uses_captured_context() -> Result<()> {
+    async fn invocation_guard_block_trace_uses_current_context() -> Result<()> {
         let mut agent = agent_with_blocking_guard();
         let store = Arc::new(crate::trace::InMemoryRunStore::new());
         agent.set_run_store(store.clone());
-        agent.set_external_context(&echo_core::tools::ExternalRunContext {
-            conversation_id: Some("blocked-conversation".to_string()),
-            run_id: Some("blocked-parent".to_string()),
-            turn_id: Some("blocked-turn".to_string()),
-            execution_id: Some("blocked-execution".to_string()),
-            isolation_id: None,
-            message_id: Some("blocked-message".to_string()),
-            cancel: None,
-            trace_sink: None,
-            delegation_policy: None,
-            resource_guards: Vec::new(),
-            subagent_lineage: None,
-            uplink: None,
-        });
+        let invocation = echo_core::agent::AgentInvocationContext {
+            runtime: Some(echo_core::tools::ExternalRunContext {
+                conversation_id: Some("blocked-conversation".to_string()),
+                run_id: Some("blocked-parent".to_string()),
+                turn_id: Some("blocked-turn".to_string()),
+                execution_id: Some("blocked-execution".to_string()),
+                isolation_id: None,
+                message_id: Some("blocked-message".to_string()),
+                cancel: None,
+                trace_sink: None,
+                delegation_policy: None,
+                resource_guards: Vec::new(),
+                subagent_lineage: None,
+                uplink: None,
+            }),
+            ..Default::default()
+        };
 
         let stream = agent
             .run_stream_channel(
@@ -2288,13 +2671,12 @@ mod tests {
                     text: "blocked input".to_string(),
                     message: None,
                     label: String::new(),
-                    invocation: None,
+                    invocation: Some(invocation),
                 },
                 StreamMode::Chat,
             )
             .await?;
         let _: Vec<_> = stream.collect().await;
-        agent.clear_external_context();
 
         let traces = crate::trace::RunStore::list_all(store.as_ref(), 10).await?;
         let trace = traces
@@ -2312,7 +2694,7 @@ mod tests {
     /// regression where a short-circuited branch forgets to drop the owned
     /// `execution_guard` (the agent would then deadlock forever).
     #[tokio::test]
-    async fn stream_guard_block_releases_execution_mutex() {
+    async fn stream_guard_block_releases_execution_mutex() -> Result<()> {
         let agent = agent_with_blocking_guard();
 
         // First call: blocked, must release the lock.
@@ -2326,9 +2708,14 @@ mod tests {
                 },
                 StreamMode::Chat,
             )
+            .await?;
+        let first = s1
+            .collect::<Vec<_>>()
             .await
-            .expect("first stream");
-        let _: Vec<_> = s1.collect().await;
+            .into_iter()
+            .collect::<Result<Vec<_>>>()?;
+        assert_native_runtime_terminal(&first, echo_core::agent::ExecutionStatusKind::Failed);
+        assert!(agent.execution_mutex.try_lock().is_ok());
 
         // Second call must not hang — if the lock leaked, this await never
         // completes and the test times out.
@@ -2345,19 +2732,19 @@ mod tests {
             ),
         )
         .await
-        .expect("second run_stream_channel must not hang (execution_guard leaked?)")
-        .expect("second stream");
+        .map_err(|_| {
+            ReactError::Other("second blocked invocation leaked execution mutex".into())
+        })??;
 
-        let events: Vec<_> = s2.collect().await;
-        assert_eq!(
-            events.len(),
-            1,
-            "second blocked stream also has one terminal"
-        );
-        assert!(matches!(
-            events.first().and_then(|event| event.as_ref().ok()),
-            Some(AgentEvent::FinalAnswer(_))
-        ));
+        let events = s2
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>>>()?;
+        assert_native_runtime_terminal(&events, echo_core::agent::ExecutionStatusKind::Failed);
+        assert!(events.iter().any(|event|matches!(event,AgentEvent::Error{source,message,..} if source=="input_guard"&&message.contains("test-input-blocked"))));
+        assert!(agent.execution_mutex.try_lock().is_ok());
+        Ok(())
     }
 
     // ── End-to-end run_core_loop tests driven by MockLlmClient ─────────────
@@ -2816,6 +3203,143 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn checkpoint_resume_trace_is_scoped_for_standalone_cold_chat_and_execute() -> Result<()>
+    {
+        for mode in [None, Some(StreamMode::Chat), Some(StreamMode::Execute)] {
+            let root = tempfile::tempdir().map_err(|error| ReactError::Other(error.to_string()))?;
+            let state = Arc::new(crate::state::FileRuntimeStateStore::new(root.path())?);
+            let mut checkpoint = crate::state::AgentCheckpoint::new("current-trace-state");
+            checkpoint.messages_json = crate::state::AgentCheckpoint::serialize_payload(
+                vec![
+                    Message::system("system".into()),
+                    Message::user("historical-current-input".into()),
+                ],
+                None,
+            )
+            .map_err(|error| ReactError::Other(error.to_string()))?;
+            state.save_checkpoint(&checkpoint).await?;
+            let traces = Arc::new(crate::trace::InMemoryRunStore::new());
+            let client = Arc::new(MockLlmClient::new().with_response("current answer"));
+            let agent = ReactAgentBuilder::new()
+                .llm_client(client.clone())
+                .system_prompt("system")
+                .conversation_id("current-trace-state")
+                .state_store(state)
+                .with_run_store(traces.clone())
+                .build()?;
+            match mode {
+                Some(mode) => {
+                    agent
+                        .run_stream_channel(
+                            StreamInit {
+                                text: "current input".into(),
+                                message: None,
+                                label: String::new(),
+                                invocation: Some(echo_core::agent::AgentInvocationContext {
+                                    runtime: Some(echo_core::tools::ExternalRunContext::default()),
+                                    ..Default::default()
+                                }),
+                            },
+                            mode,
+                        )
+                        .await?
+                        .collect::<Vec<_>>()
+                        .await
+                        .into_iter()
+                        .collect::<Result<Vec<_>>>()?;
+                    assert!(
+                        client
+                            .last_messages()
+                            .is_some_and(|messages| messages.iter().any(|message| message
+                                .text_content()
+                                .is_some_and(|text| text == "historical-current-input")))
+                    );
+                }
+                None => {
+                    assert!(agent.resume_from_state_store().await?.is_some());
+                }
+            }
+            assert!(agent.current_run_id().is_none());
+            let recorded = crate::trace::RunStore::list_all(traces.as_ref(), 10).await?;
+            assert_eq!(recorded.len(), 1);
+            let id = &recorded
+                .first()
+                .ok_or_else(|| ReactError::Other("current trace missing".into()))?
+                .run_id;
+            let run = crate::trace::RunStore::load(traces.as_ref(), id)
+                .await?
+                .ok_or_else(|| ReactError::Other("current trace body missing".into()))?;
+            assert_eq!(run.session_id, "current-trace-state");
+            assert!(run.parent_run_id.is_none());
+            assert_eq!(run.events.iter().filter(|event| matches!(event,
+                crate::trace::RunEvent::CheckpointResumed { conversation_id, .. } if conversation_id == "current-trace-state"
+            )).count(), 1);
+            assert_eq!(run.status, crate::trace::RunStatus::Completed);
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn anonymous_runtime_keeps_run_none_with_configured_trace_conversation() -> Result<()> {
+        let mut agent = agent_with_mock_llm(MockLlmClient::new().with_response("answer"));
+        agent.config.conversation_id = Some("configured-trace-conversation".into());
+        let traces = Arc::new(crate::trace::InMemoryRunStore::new());
+        agent.set_run_store(traces.clone());
+        let projector = Arc::new(BlockingRunIdProjection::new());
+        agent.set_pre_model_context_projector(Some(projector.clone()));
+        let invocation = echo_core::agent::AgentInvocationContext {
+            runtime: Some(echo_core::tools::ExternalRunContext {
+                turn_id: Some("anonymous-turn".into()),
+                execution_id: Some("anonymous-execution".into()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let stream = agent
+            .execute_stream_with_invocation_context(
+                "input",
+                crate::agent::CancellationToken::new(),
+                invocation,
+            )
+            .await?;
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            projector.first_started.notified(),
+        )
+        .await
+        .map_err(|_| ReactError::Other("anonymous projection did not start".into()))?;
+        assert!(agent.current_run_id().is_none());
+        let recorded = crate::trace::RunStore::list_all(traces.as_ref(), 10).await?;
+        let trace = recorded
+            .first()
+            .ok_or_else(|| ReactError::Other("anonymous trace missing".into()))?;
+        assert_eq!(trace.session_id, "configured-trace-conversation");
+        assert!(trace.parent_run_id.is_none());
+        assert_eq!(trace.turn_id.as_deref(), Some("anonymous-turn"));
+        projector.release_first.notify_one();
+        let events = stream
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>>>()?;
+        assert!(
+            events.iter().any(
+                |event| matches!(event, AgentEvent::FinalAnswer(answer) if answer == "answer")
+            )
+        );
+        assert!(agent.current_run_id().is_none());
+        assert_eq!(
+            projector
+                .run_ids
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .as_slice(),
+            &[None]
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn queued_stream_keeps_invocation_run_contexts_atomic() -> Result<()> {
         let llm = MockLlmClient::new().with_responses(["first", "second"]);
         let agent = Arc::new(agent_with_mock_llm(llm));
@@ -2845,6 +3369,8 @@ mod tests {
             working_dir: Some(std::path::PathBuf::from("/tmp/worktree-a")),
             cancel: None,
             disabled_tools: None,
+            allowed_tools: None,
+            tool_access: None,
             visible_tools: None,
             run_budget: None,
             history: None,
@@ -2867,6 +3393,7 @@ mod tests {
             crate::error::ReactError::Other("first projection did not start".to_string())
         })?;
 
+        assert_eq!(agent.current_run_id().as_deref(), Some("run-a"));
         let invocation_b = echo_core::agent::AgentInvocationContext {
             runtime: Some(echo_core::tools::ExternalRunContext {
                 conversation_id: None,
@@ -2891,6 +3418,8 @@ mod tests {
             working_dir: Some(std::path::PathBuf::from("/tmp/worktree-b")),
             cancel: None,
             disabled_tools: None,
+            allowed_tools: None,
+            tool_access: None,
             visible_tools: None,
             run_budget: None,
             history: None,
@@ -2911,11 +3440,13 @@ mod tests {
             }
             _ = tokio::task::yield_now() => {}
         }
+        assert_eq!(agent.current_run_id().as_deref(), Some("run-a"));
         projector.release_first.notify_one();
 
         let _: Vec<_> = first_stream.collect().await;
         let second_stream = queued.await?;
         let _: Vec<_> = second_stream.collect().await;
+        assert!(agent.current_run_id().is_none());
         let run_ids = projector
             .run_ids
             .lock()
@@ -3033,10 +3564,11 @@ mod tests {
                     "Agent close attempt {attempt} ignored abandoned preparation debt"
                 ))
             })?;
+            // 输入guard尚未发布原生execution；同一Agent的未知资源仍阻断每次close。
             assert!(
-                close_error
-                    .to_string()
-                    .contains("without canonical settlement")
+                matches!(&close_error, crate::error::ReactError::Other(message)
+                    if message == "Agent close blocked by an admitted recovery whose physical settlement is unknown"),
+                "actual_close_error={close_error:?}"
             );
         }
         Ok(())
@@ -3237,25 +3769,32 @@ mod tests {
 
     #[derive(Default)]
     struct UnknownToolCallbacks {
+        start_call_ids: std::sync::Mutex<Vec<String>>,
         starts: std::sync::atomic::AtomicUsize,
         completions: std::sync::atomic::AtomicUsize,
     }
 
     impl crate::agent::AgentCallback for UnknownToolCallbacks {
-        fn on_tool_start<'a>(
+        fn on_tool_start_with_id<'a>(
             &'a self,
             _agent: &'a str,
+            call_id: &'a str,
             _tool: &'a str,
             _args: &'a serde_json::Value,
         ) -> futures::future::BoxFuture<'a, ()> {
-            Box::pin(async {
+            Box::pin(async move {
+                self.start_call_ids
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .push(call_id.to_string());
                 self.starts
                     .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             })
         }
-        fn on_tool_end<'a>(
+        fn on_tool_end_with_id<'a>(
             &'a self,
             _agent: &'a str,
+            _call_id: &'a str,
             _tool: &'a str,
             _result: &'a str,
         ) -> futures::future::BoxFuture<'a, ()> {
@@ -3264,9 +3803,10 @@ mod tests {
                     .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             })
         }
-        fn on_tool_error<'a>(
+        fn on_tool_error_with_id<'a>(
             &'a self,
             _agent: &'a str,
+            _call_id: &'a str,
             _tool: &'a str,
             _error: &'a ReactError,
         ) -> futures::future::BoxFuture<'a, ()> {
@@ -3359,6 +3899,14 @@ mod tests {
                 .await;
             assert_eq!(executions.load(Ordering::SeqCst), 1);
             assert_eq!(callbacks.starts.load(Ordering::SeqCst), 1);
+            assert_eq!(
+                callbacks
+                    .start_call_ids
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .as_slice(),
+                &["unknown-tool-call".to_string()]
+            );
             assert_eq!(callbacks.completions.load(Ordering::SeqCst), 0);
             assert_eq!(hooks.load(Ordering::SeqCst), 0);
             assert_eq!(llm.call_count(), 1);
@@ -3478,6 +4026,8 @@ mod tests {
             working_dir: None,
             cancel: None,
             disabled_tools: None,
+            allowed_tools: None,
+            tool_access: None,
             visible_tools: None,
             run_budget: None,
             history: None,
@@ -3544,6 +4094,8 @@ mod tests {
             working_dir: None,
             cancel: None,
             disabled_tools: None,
+            allowed_tools: None,
+            tool_access: None,
             visible_tools: None,
             run_budget: None,
             history: None,
@@ -4065,27 +4617,19 @@ mod tests {
         Ok(())
     }
 
-    /// A single-turn text answer: the mock LLM replies with plain content, so
-    /// the loop should emit a Token + a terminal FinalAnswer and stop (no tool
-    /// phase). Guards the core-loop text branch.
+    /// 普通正文经原ReAct校验后发布canonical AssistantMessage及唯一FinalAnswer，
+    /// 原owner结算后以唯一ExecutionStatus结束；不再附加Token副本。
     #[tokio::test]
-    async fn run_core_loop_text_only_yields_final_answer() {
+    async fn run_core_loop_text_only_yields_final_answer() -> Result<()> {
         let llm = MockLlmClient::new().with_response("Paris is the capital of France.");
         let agent = agent_with_mock_llm(llm);
 
         let events = collect_events(&agent, "What is the capital of France?").await;
 
-        // Must end with a FinalAnswer carrying the mock content.
-        let last = events.last().expect("at least one event");
-        match last {
-            AgentEvent::FinalAnswer(text) => {
-                assert!(
-                    text.contains("Paris"),
-                    "final answer should contain the mock text, got: {text:?}"
-                );
-            }
-            other => panic!("expected FinalAnswer as last event, got {other:?}"),
-        }
+        assert!(
+            matches!(last_confirmed_final(&events),Some(AgentEvent::FinalAnswer(text)) if text.contains("Paris"))
+        );
+        Ok(())
     }
 
     #[tokio::test]
@@ -4134,7 +4678,7 @@ mod tests {
 
         let events = collect_events_result(&agent, "input").await?;
         assert!(
-            matches!(events.last(), Some(AgentEvent::FinalAnswer(answer)) if answer == "producer answer")
+            matches!(last_confirmed_final(&events), Some(AgentEvent::FinalAnswer(answer)) if answer == "producer answer")
         );
         let failures = observer.wait_for_count(1)?;
         assert_eq!(failures.len(), 1);
@@ -4197,7 +4741,7 @@ mod tests {
     /// returns a scripted result, then the LLM produces a final text answer.
     /// Guards the core-loop tool-call branch (think → tools → think → finalize).
     #[tokio::test]
-    async fn run_core_loop_tool_call_cycle_completes() {
+    async fn run_core_loop_tool_call_cycle_completes() -> Result<()> {
         // The mock tool returns a fixed result; the LLM script is:
         //   1. request tool_call "mock_calc" with args {"x": 6, "y": 7}
         //   2. after seeing the tool result, emit a final text answer.
@@ -4211,17 +4755,27 @@ mod tests {
             .llm_client(Arc::new(llm))
             .system_prompt("You are a test assistant. Use tools when asked.")
             .tool(Box::new(tool))
-            .build()
-            .expect("agent builds");
+            .build()?;
 
         let events = collect_events(&agent, "What is 6 times 7?").await;
 
-        // The last event must be a FinalAnswer.
-        let last = events.last().expect("at least one event");
         assert!(
-            matches!(last, AgentEvent::FinalAnswer(t) if t.contains("42")),
-            "expected FinalAnswer with 42, got: {last:?}"
+            matches!(last_confirmed_final(&events),Some(AgentEvent::FinalAnswer(text)) if text.contains("42"))
         );
+        let call = events.iter().position(
+            |event| matches!(event,AgentEvent::ToolCall{call_id,..} if call_id=="call_1"),
+        );
+        let result=events.iter().position(|event|matches!(event,AgentEvent::ToolResult{call_id,result,..} if call_id=="call_1"&&result.success&&result.output=="42"));
+        let final_position = events
+            .iter()
+            .position(|event| matches!(event, AgentEvent::FinalAnswer(_)));
+        assert!(call.zip(result).is_some_and(|(call, result)| call < result));
+        assert!(
+            result
+                .zip(final_position)
+                .is_some_and(|(result, answer)| result < answer)
+        );
+        Ok(())
     }
 
     #[tokio::test]
@@ -4397,6 +4951,7 @@ mod tests {
         let checkpoint_messages = vec![
             Message::system("system".to_string()),
             Message::assistant_with_tools(vec![echo_core::llm::types::ToolCall {
+                provider_source: None,
                 id: "write-1".to_string(),
                 call_type: "function".to_string(),
                 function: echo_core::llm::types::FunctionCall {
@@ -4411,8 +4966,9 @@ mod tests {
             ),
         ];
         let mut checkpoint = crate::state::AgentCheckpoint::new("resume-conversation");
-        checkpoint.messages_json = serde_json::to_string(&checkpoint_messages)
-            .map_err(|error| crate::error::ReactError::Other(error.to_string()))?;
+        checkpoint.messages_json =
+            crate::state::AgentCheckpoint::serialize_payload(checkpoint_messages, None)
+                .map_err(|error| crate::error::ReactError::Other(error.to_string()))?;
         store.save_checkpoint(&checkpoint).await?;
 
         let run_store = Arc::new(crate::trace::InMemoryRunStore::new());
@@ -4472,23 +5028,92 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn configured_runtime_with_product_scope_survives_second_turn() -> Result<()> {
+        let root = tempfile::tempdir().map_err(|error| ReactError::Other(error.to_string()))?;
+        let runtime = Arc::new(crate::state::FileRuntimeStateStore::new(
+            root.path().join("runtime"),
+        )?);
+        let conversations = Arc::new(crate::memory::FileConversationStore::new(
+            root.path().join("conversations"),
+        )?);
+        let llm = Arc::new(MockLlmClient::new().with_responses(["first reply", "second reply"]));
+        let mut agent = ReactAgentBuilder::new()
+            .llm_client(llm.clone())
+            .system_prompt("system")
+            .conversation_id("channel-runtime:fixture")
+            .state_store(runtime.clone())
+            .build()?;
+        agent.set_conversation_store(conversations);
+        for answer in ["first reply", "second reply"] {
+            let invocation = echo_core::agent::AgentInvocationContext {
+                runtime_state_id: Some("channel-runtime:fixture".to_string()),
+                transcript_generation_id: Some("channel-runtime:fixture".to_string()),
+                runtime: Some(echo_core::tools::ExternalRunContext {
+                    conversation_id: Some("channel:fixture".to_string()),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            };
+            let events = agent
+                .run_stream_channel(
+                    StreamInit {
+                        text: "continue".to_string(),
+                        message: None,
+                        label: String::new(),
+                        invocation: Some(invocation),
+                    },
+                    StreamMode::Chat,
+                )
+                .await?
+                .collect::<Vec<_>>()
+                .await
+                .into_iter()
+                .collect::<Result<Vec<_>>>()?;
+            assert!(
+                events
+                    .iter()
+                    .any(|event| matches!(event, AgentEvent::FinalAnswer(text) if text == answer))
+            );
+        }
+        let checkpoint = runtime
+            .load_runtime_state("channel:fixture", "channel-runtime:fixture")
+            .await?
+            .ok_or_else(|| ReactError::Other("original runtime state disappeared".to_string()))?;
+        assert_eq!(checkpoint.scope.scope_id, "channel:fixture");
+        assert_eq!(llm.call_count(), 2);
+        assert!(
+            runtime
+                .load_runtime_state("channel-runtime:fixture", "channel-runtime:fixture")
+                .await
+                .is_err()
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn invocation_runtime_state_identity_controls_restore_and_save() -> Result<()> {
         let root = tempfile::tempdir().map_err(|error| ReactError::Other(error.to_string()))?;
         let store = Arc::new(crate::state::FileRuntimeStateStore::new(root.path())?);
 
         let mut configured = crate::state::AgentCheckpoint::new("configured-state");
-        configured.messages_json = serde_json::to_string(&vec![
-            Message::system("system".to_string()),
-            Message::user("configured checkpoint marker".to_string()),
-        ])
+        configured.messages_json = crate::state::AgentCheckpoint::serialize_payload(
+            vec![
+                Message::system("system".to_string()),
+                Message::user("configured checkpoint marker".to_string()),
+            ],
+            None,
+        )
         .map_err(|error| ReactError::Other(error.to_string()))?;
         store.save_checkpoint(&configured).await?;
 
         let mut invocation_checkpoint = crate::state::AgentCheckpoint::new("runtime-incarnation");
-        invocation_checkpoint.messages_json = serde_json::to_string(&vec![
-            Message::system("system".to_string()),
-            Message::user("invocation checkpoint marker".to_string()),
-        ])
+        invocation_checkpoint.messages_json = crate::state::AgentCheckpoint::serialize_payload(
+            vec![
+                Message::system("system".to_string()),
+                Message::user("invocation checkpoint marker".to_string()),
+            ],
+            None,
+        )
         .map_err(|error| ReactError::Other(error.to_string()))?;
         store
             .save_checkpoint_for_scope("product-conversation", &invocation_checkpoint)
@@ -4578,52 +5203,53 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn nonstream_legacy_runtime_identity_controls_restore_and_save() -> Result<()> {
+    async fn nonstream_configured_runtime_identity_controls_restore_and_save() -> Result<()> {
         let root = tempfile::tempdir().map_err(|error| ReactError::Other(error.to_string()))?;
         let store = Arc::new(crate::state::FileRuntimeStateStore::new(root.path())?);
 
         let mut configured = crate::state::AgentCheckpoint::new("configured-state");
-        configured.messages_json = serde_json::to_string(&vec![
-            Message::system("system".to_string()),
-            Message::user("configured checkpoint marker".to_string()),
-        ])
+        configured.messages_json = crate::state::AgentCheckpoint::serialize_payload(
+            vec![
+                Message::system("system".to_string()),
+                Message::user("configured checkpoint marker".to_string()),
+            ],
+            None,
+        )
         .map_err(|error| ReactError::Other(error.to_string()))?;
         store.save_checkpoint(&configured).await?;
 
-        let mut legacy = crate::state::AgentCheckpoint::new("legacy-runtime");
-        legacy.messages_json = serde_json::to_string(&vec![
-            Message::system("system".to_string()),
-            Message::user("legacy checkpoint marker".to_string()),
-        ])
+        let mut invocation = crate::state::AgentCheckpoint::new("invocation-runtime");
+        invocation.messages_json = crate::state::AgentCheckpoint::serialize_payload(
+            vec![
+                Message::system("system".to_string()),
+                Message::user("invocation checkpoint marker".to_string()),
+            ],
+            None,
+        )
         .map_err(|error| ReactError::Other(error.to_string()))?;
         store
-            .save_checkpoint_for_scope("legacy-runtime", &legacy)
+            .save_checkpoint_for_scope("invocation-runtime", &invocation)
             .await?;
 
-        let llm = Arc::new(MockLlmClient::new().with_response("legacy answer"));
+        let llm = Arc::new(MockLlmClient::new().with_response("invocation answer"));
         let agent = ReactAgentBuilder::new()
             .llm_client(llm.clone())
             .system_prompt("system")
-            .conversation_id("configured-state")
+            .conversation_id("invocation-runtime")
             .state_store(store.clone())
             .build()?;
-        agent.set_external_context(&echo_core::tools::ExternalRunContext {
-            conversation_id: Some("legacy-runtime".to_string()),
-            ..echo_core::tools::ExternalRunContext::default()
-        });
 
         let answer = agent
-            .run_react_loop_mode("continue legacy runtime", StreamMode::Chat)
+            .run_react_loop_mode("continue invocation runtime", StreamMode::Chat)
             .await?;
-        agent.clear_external_context();
-        assert_eq!(answer, "legacy answer");
+        assert_eq!(answer, "invocation answer");
         let request = llm
             .last_messages()
             .ok_or_else(|| ReactError::Other("mock LLM request was not recorded".to_string()))?;
         assert!(request.iter().any(|message| {
             message
                 .text_content()
-                .is_some_and(|content| content == "legacy checkpoint marker")
+                .is_some_and(|content| content == "invocation checkpoint marker")
         }));
         assert!(!request.iter().any(|message| {
             message
@@ -4635,14 +5261,14 @@ mod tests {
             .await?
             .ok_or_else(|| ReactError::Other("configured checkpoint disappeared".to_string()))?;
         assert_eq!(configured_after.messages_json, configured.messages_json);
-        let legacy_after = store
-            .get_checkpoint("legacy-runtime")
+        let invocation_after = store
+            .get_checkpoint("invocation-runtime")
             .await?
-            .ok_or_else(|| ReactError::Other("legacy checkpoint was not saved".to_string()))?;
-        assert!(legacy_after.restore_messages()?.iter().any(|message| {
+            .ok_or_else(|| ReactError::Other("invocation checkpoint was not saved".to_string()))?;
+        assert!(invocation_after.restore_messages()?.iter().any(|message| {
             message
                 .text_content()
-                .is_some_and(|content| content == "legacy answer")
+                .is_some_and(|content| content == "invocation answer")
         }));
         Ok(())
     }
@@ -4748,10 +5374,13 @@ mod tests {
         let root = tempfile::tempdir().map_err(|error| ReactError::Other(error.to_string()))?;
         let store = Arc::new(crate::state::FileRuntimeStateStore::new(root.path())?);
         let mut configured = crate::state::AgentCheckpoint::new("configured-state");
-        configured.messages_json = serde_json::to_string(&vec![
-            Message::system("system".to_string()),
-            Message::user("configured-only-marker".to_string()),
-        ])
+        configured.messages_json = crate::state::AgentCheckpoint::serialize_payload(
+            vec![
+                Message::system("system".to_string()),
+                Message::user("configured-only-marker".to_string()),
+            ],
+            None,
+        )
         .map_err(|error| ReactError::Other(error.to_string()))?;
         store.save_checkpoint(&configured).await?;
         let llm = Arc::new(MockLlmClient::new().with_responses([
@@ -4819,15 +5448,6 @@ mod tests {
                     ReactError::Other("runtime A snapshot was not captured".to_string())
                 })?;
                 assert!(!snapshot_id.is_empty());
-                let mut legacy_a = store.get_checkpoint("runtime-a").await?.ok_or_else(|| {
-                    ReactError::Other(
-                        "runtime A checkpoint missing before legacy write".to_string(),
-                    )
-                })?;
-                legacy_a.current_plan = Some("runtime-a-only-plan".to_string());
-                store
-                    .save_checkpoint_for_scope("product-conversation", &legacy_a)
-                    .await?;
                 agent
                     .tools
                     .skill_registry
@@ -4895,13 +5515,13 @@ mod tests {
             .get_checkpoint("runtime-a")
             .await?
             .ok_or_else(|| ReactError::Other("runtime A checkpoint missing".to_string()))?;
-        assert!(runtime_a_checkpoint.current_plan.is_none());
+
         let runtime_a = runtime_a_checkpoint.restore_messages()?;
         let runtime_b_checkpoint = store
             .get_checkpoint("runtime-b")
             .await?
             .ok_or_else(|| ReactError::Other("runtime B checkpoint missing".to_string()))?;
-        assert!(runtime_b_checkpoint.current_plan.is_none());
+
         assert!(runtime_b_checkpoint.active_skills.is_empty());
         assert!(runtime_b_checkpoint.working_dir.is_none());
         let runtime_b = runtime_b_checkpoint.restore_messages()?;
@@ -4921,11 +5541,14 @@ mod tests {
         let root = tempfile::tempdir().map_err(|error| ReactError::Other(error.to_string()))?;
         let store = Arc::new(crate::state::FileRuntimeStateStore::new(root.path())?);
         let mut runtime_b = crate::state::AgentCheckpoint::new("runtime-b");
-        runtime_b.current_plan = Some("stale runtime B plan".to_string());
-        runtime_b.messages_json = serde_json::to_string(&vec![
-            Message::system("system".to_string()),
-            Message::user("runtime-b-checkpoint-marker".to_string()),
-        ])
+
+        runtime_b.messages_json = crate::state::AgentCheckpoint::serialize_payload(
+            vec![
+                Message::system("system".to_string()),
+                Message::user("runtime-b-checkpoint-marker".to_string()),
+            ],
+            None,
+        )
         .map_err(|error| ReactError::Other(error.to_string()))?;
         store
             .save_checkpoint_for_scope("product-conversation", &runtime_b)
@@ -5036,14 +5659,10 @@ mod tests {
             .err()
             .ok_or_else(|| ReactError::Other("runtime B switch was not cancelled".to_string()))?;
         assert!(cancelled.is_cancelled());
-        assert_eq!(
-            store
-                .get_checkpoint("runtime-b")
-                .await?
-                .and_then(|checkpoint| checkpoint.current_plan)
-                .as_deref(),
-            Some("stale runtime B plan")
-        );
+        let retained = store.get_checkpoint("runtime-b").await?.ok_or_else(|| {
+            ReactError::Other("runtime B checkpoint missing after cancellation".to_string())
+        })?;
+        assert_eq!(retained.messages_json, runtime_b.messages_json);
 
         // Caller abort is not a physical receipt for an admitted preparation.
         // Preserve the original atomic-hydration assertions without admitting
@@ -5071,7 +5690,7 @@ mod tests {
             .get_checkpoint("runtime-a")
             .await?
             .ok_or_else(|| ReactError::Other("runtime A checkpoint missing".to_string()))?;
-        assert!(original_checkpoint.current_plan.is_none());
+
         let original = original_checkpoint.restore_messages()?;
         assert!(original.iter().any(|message| {
             message
@@ -5083,62 +5702,65 @@ mod tests {
                 .text_content()
                 .is_some_and(|content| content == "runtime-b-checkpoint-marker")
         }));
-        assert!(
-            store
-                .get_checkpoint("runtime-a")
-                .await?
-                .is_some_and(|checkpoint| checkpoint.current_plan.is_none())
-        );
         Ok(())
     }
 
     #[tokio::test]
-    async fn legacy_runtime_conversation_controls_restore_and_save() -> Result<()> {
+    async fn invocation_runtime_conversation_controls_restore_and_save() -> Result<()> {
         let root = tempfile::tempdir().map_err(|error| ReactError::Other(error.to_string()))?;
         let store = Arc::new(crate::state::FileRuntimeStateStore::new(root.path())?);
         let mut configured = crate::state::AgentCheckpoint::new("configured-a");
-        configured.messages_json = serde_json::to_string(&vec![
-            Message::system("system".to_string()),
-            Message::user("configured-a-marker".to_string()),
-        ])
+        configured.messages_json = crate::state::AgentCheckpoint::serialize_payload(
+            vec![
+                Message::system("system".to_string()),
+                Message::user("configured-a-marker".to_string()),
+            ],
+            None,
+        )
         .map_err(|error| ReactError::Other(error.to_string()))?;
         store.save_checkpoint(&configured).await?;
-        let mut legacy = crate::state::AgentCheckpoint::new("legacy-b");
-        legacy.messages_json = serde_json::to_string(&vec![
-            Message::system("system".to_string()),
-            Message::user("legacy-b-marker".to_string()),
-        ])
+        let mut invocation = crate::state::AgentCheckpoint::new("invocation-b");
+        invocation.messages_json = crate::state::AgentCheckpoint::serialize_payload(
+            vec![
+                Message::system("system".to_string()),
+                Message::user("invocation-b-marker".to_string()),
+            ],
+            None,
+        )
         .map_err(|error| ReactError::Other(error.to_string()))?;
-        store.save_checkpoint(&legacy).await?;
+        store.save_checkpoint(&invocation).await?;
 
-        let llm = Arc::new(MockLlmClient::new().with_response("legacy-b-answer"));
+        let llm = Arc::new(MockLlmClient::new().with_response("invocation-b-answer"));
         let agent = ReactAgentBuilder::new()
             .llm_client(llm.clone())
             .system_prompt("system")
             .conversation_id("configured-a")
             .state_store(store.clone())
             .build()?;
-        agent.set_external_context(&echo_core::tools::ExternalRunContext {
-            conversation_id: Some("legacy-b".to_string()),
-            run_id: Some("legacy-run".to_string()),
-            turn_id: Some("legacy-turn".to_string()),
-            execution_id: None,
-            isolation_id: None,
-            message_id: None,
-            cancel: None,
-            trace_sink: None,
-            delegation_policy: None,
-            resource_guards: Vec::new(),
-            subagent_lineage: None,
-            uplink: None,
-        });
+        let invocation = echo_core::agent::AgentInvocationContext {
+            runtime: Some(echo_core::tools::ExternalRunContext {
+                conversation_id: Some("invocation-b".to_string()),
+                run_id: Some("invocation-run".to_string()),
+                turn_id: Some("invocation-turn".to_string()),
+                execution_id: None,
+                isolation_id: None,
+                message_id: None,
+                cancel: None,
+                trace_sink: None,
+                delegation_policy: None,
+                resource_guards: Vec::new(),
+                subagent_lineage: None,
+                uplink: None,
+            }),
+            ..Default::default()
+        };
         agent
             .run_stream_channel(
                 StreamInit {
-                    text: "legacy-b-user".to_string(),
+                    text: "invocation-b-user".to_string(),
                     message: None,
                     label: String::new(),
-                    invocation: None,
+                    invocation: Some(invocation),
                 },
                 StreamMode::Chat,
             )
@@ -5150,11 +5772,11 @@ mod tests {
 
         let request = llm
             .last_messages()
-            .ok_or_else(|| ReactError::Other("legacy LLM request missing".to_string()))?;
+            .ok_or_else(|| ReactError::Other("invocation LLM request missing".to_string()))?;
         assert!(request.iter().any(|message| {
             message
                 .text_content()
-                .is_some_and(|content| content == "legacy-b-marker")
+                .is_some_and(|content| content == "invocation-b-marker")
         }));
         assert!(!request.iter().any(|message| {
             message
@@ -5166,15 +5788,15 @@ mod tests {
             .await?
             .ok_or_else(|| ReactError::Other("configured checkpoint missing".to_string()))?;
         assert_eq!(configured_after.messages_json, configured.messages_json);
-        let legacy_after = store
-            .get_checkpoint("legacy-b")
+        let invocation_after = store
+            .get_checkpoint("invocation-b")
             .await?
-            .ok_or_else(|| ReactError::Other("legacy checkpoint missing".to_string()))?
+            .ok_or_else(|| ReactError::Other("invocation checkpoint missing".to_string()))?
             .restore_messages()?;
-        assert!(legacy_after.iter().any(|message| {
+        assert!(invocation_after.iter().any(|message| {
             message
                 .text_content()
-                .is_some_and(|content| content == "legacy-b-answer")
+                .is_some_and(|content| content == "invocation-b-answer")
         }));
         Ok(())
     }
@@ -5277,7 +5899,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn model_token_budget_blocks_tools_and_forces_final_only_request() {
+    async fn model_token_budget_blocks_tools_and_forces_final_only_request() -> Result<()> {
         let usage = crate::llm::types::Usage {
             prompt_tokens: Some(6),
             completion_tokens: Some(5),
@@ -5305,8 +5927,7 @@ mod tests {
                 iteration_wind_down_remaining: None,
                 max_model_tokens: Some(10),
             })
-            .build()
-            .expect("agent builds");
+            .build()?;
 
         let events = collect_events(&agent, "run").await;
         assert!(events.iter().any(|event| {
@@ -5326,9 +5947,13 @@ mod tests {
                 .any(|event| matches!(event, AgentEvent::ToolCall { .. }))
         );
         assert!(
-            matches!(events.last(), Some(AgentEvent::FinalAnswer(text)) if text == "final without tools")
+            matches!(last_confirmed_final(&events), Some(AgentEvent::FinalAnswer(text)) if text == "final without tools")
         );
-        assert_eq!(llm.all_tool_choices(), vec![None, Some("none".to_string())]);
+        assert_eq!(
+            llm.all_tool_choices(),
+            vec![None, Some(crate::llm::ToolChoice::None)]
+        );
+        Ok(())
     }
 
     #[tokio::test]
@@ -5352,7 +5977,7 @@ mod tests {
 
         let events = collect_events(&agent, "run").await;
         assert!(
-            matches!(events.last(), Some(AgentEvent::FinalAnswer(text)) if text == r#"{"ok":true}"#)
+            matches!(last_confirmed_final(&events), Some(AgentEvent::FinalAnswer(text)) if text == r#"{"ok":true}"#)
         );
         let formats = llm.all_response_formats();
         assert_eq!(formats.len(), 2);
@@ -5369,15 +5994,22 @@ mod tests {
         let llm = Arc::new(MockLlmClient::new().with_response(r#"{"ok":true}"#));
         let agent = ReactAgentBuilder::new()
             .llm_client(llm.clone())
-            .response_format(crate::llm::ResponseFormat::JsonObject)
+            // 未知模型不能静默获得schema能力；JsonObject走已有独立允许路径。
+            .response_format(crate::llm::ResponseFormat::json_schema(
+                "ok",
+                serde_json::json!({"type":"object","properties":{"ok":{"type":"boolean"}},"required":["ok"],"additionalProperties":false}),
+            ))
             .build()?;
 
         let events = collect_events(&agent, "run").await;
-        assert!(events.iter().any(|event| matches!(
-            event,
-            AgentEvent::Error { message, .. }
-                if message.contains("structured-output model capability")
-        )));
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                AgentEvent::Error { message, .. }
+                    if message.contains("structured-output model capability")
+            )),
+            "actual_structured_output_events={events:#?}"
+        );
         assert!(
             !events
                 .iter()
@@ -5403,7 +6035,7 @@ mod tests {
 
         let events = collect_events(&agent, "run").await;
         assert!(
-            matches!(events.last(), Some(AgentEvent::FinalAnswer(text)) if text == "plain answer")
+            matches!(last_confirmed_final(&events), Some(AgentEvent::FinalAnswer(text)) if text == "plain answer")
         );
         assert_eq!(llm.all_response_formats().len(), 1);
         assert!(llm.all_response_formats().iter().all(Option::is_none));
@@ -5480,19 +6112,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn strict_schema_retries_final_answer_tool_before_success_terminal() -> Result<()> {
+    async fn strict_schema_retries_native_candidate_before_success_terminal() -> Result<()> {
         let llm = Arc::new(
             MockLlmClient::new()
-                .then_tool_call(
-                    "bad-final",
-                    "final_answer",
-                    serde_json::json!({"answer": r#"{"age":"wrong"}"#}).to_string(),
-                )
-                .then_tool_call(
-                    "good-final",
-                    "final_answer",
-                    serde_json::json!({"answer": r#"{"age":28}"#}).to_string(),
-                ),
+                .with_stream_script(native_response_script(
+                    "bad-native",
+                    &[(
+                        echo_core::agent::AssistantPhase::FinalAnswer,
+                        r#"{"age":"wrong"}"#,
+                    )],
+                )?)
+                .with_stream_script(native_response_script(
+                    "good-native",
+                    &[(
+                        echo_core::agent::AssistantPhase::FinalAnswer,
+                        r#"{"age":28}"#,
+                    )],
+                )?),
         );
         let agent = ReactAgentBuilder::new()
             .llm_client(llm.clone())
@@ -5518,16 +6154,21 @@ mod tests {
             .collect();
         assert_eq!(final_answers, vec![r#"{"age":28}"#]);
         assert_eq!(llm.call_count(), 2);
+        assert_native_runtime_terminal(&events, echo_core::agent::ExecutionStatusKind::Settled);
         Ok(())
     }
 
     #[tokio::test]
     async fn strict_final_answer_schema_precedes_optional_critic() -> Result<()> {
-        let llm = Arc::new(MockLlmClient::new().then_tool_call(
-            "bad-final",
-            "final_answer",
-            serde_json::json!({"answer": r#"{"age":"wrong"}"#}).to_string(),
-        ));
+        let llm = Arc::new(
+            MockLlmClient::new().with_stream_script(native_response_script(
+                "schema-before-critic",
+                &[(
+                    echo_core::agent::AssistantPhase::FinalAnswer,
+                    r#"{"age":"wrong"}"#,
+                )],
+            )?),
+        );
         let mut agent = ReactAgent::new(
             AgentConfig::new("mock-model", "critic-agent", "system")
                 .model_profile(
@@ -5544,7 +6185,27 @@ mod tests {
                 .max_iterations(1),
         )
         .with_llm_client(llm.clone());
-        agent.set_critic(Arc::new(echo_core::agent::StaticCritic::always_fail()));
+        struct SchemaOrderCritic(Arc<std::sync::atomic::AtomicUsize>);
+        impl echo_core::agent::Critic for SchemaOrderCritic {
+            fn critique<'a>(
+                &'a self,
+                _task: &'a str,
+                _answer: &'a str,
+                _context: &'a str,
+            ) -> BoxFuture<'a, Result<echo_core::agent::Critique>> {
+                Box::pin(async move {
+                    self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    Ok(echo_core::agent::Critique {
+                        score: 9.0,
+                        passed: true,
+                        feedback: "checked".into(),
+                        suggestions: Vec::new(),
+                    })
+                })
+            }
+        }
+        let critic_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        agent.set_critic(Arc::new(SchemaOrderCritic(critic_calls.clone())));
 
         let events = collect_events(&agent, "run").await;
         assert!(
@@ -5557,59 +6218,126 @@ mod tests {
             AgentEvent::Error { message, .. } if message.contains("does not match JSON Schema")
         )));
         assert_eq!(llm.call_count(), 1);
+        assert_eq!(critic_calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_native_runtime_terminal(&events, echo_core::agent::ExecutionStatusKind::Failed);
         Ok(())
     }
 
     #[tokio::test]
-    async fn later_valid_final_answer_in_same_batch_is_not_poisoned_by_invalid_peer() -> Result<()>
-    {
-        let final_call = |id: &str, answer: &str| crate::llm::types::ToolCall {
-            id: id.to_string(),
-            call_type: "function".to_string(),
-            function: crate::llm::types::FunctionCall {
-                name: "final_answer".to_string(),
-                arguments: serde_json::json!({"answer": answer}).to_string(),
-            },
-        };
-        let llm = Arc::new(MockLlmClient::new().then_tool_calls(vec![
-            final_call("bad-final", r#"{"age":"wrong"}"#),
-            final_call("good-final", r#"{"age":28}"#),
-        ]));
-        let agent = ReactAgentBuilder::new()
-            .llm_client(llm.clone())
-            .model_profile(
-                echo_core::llm::capabilities::ModelProfile::from_provider_name(
-                    "mock-model",
-                    "openai",
-                ),
-            )
-            .response_format(crate::llm::ResponseFormat::json_schema(
-                "person",
-                serde_json::json!({"type":"object","properties":{"age":{"type":"integer"}},"required":["age"]}),
-            ))
-            .max_iterations(1)
-            .build()?;
-
+    async fn native_progress_in_same_response_does_not_poison_schema_final() -> Result<()> {
+        let llm = Arc::new(
+            MockLlmClient::new().with_stream_script(native_response_script(
+                "same-response-schema",
+                &[
+                    (
+                        echo_core::agent::AssistantPhase::PartialAnswer,
+                        r#"{"age":"not-final"}"#,
+                    ),
+                    (
+                        echo_core::agent::AssistantPhase::FinalAnswer,
+                        r#"{"age":28}"#,
+                    ),
+                ],
+            )?),
+        );
+        let agent=ReactAgentBuilder::new().llm_client(llm.clone())
+            .model_profile(echo_core::llm::capabilities::ModelProfile::from_provider_name("mock-model","openai"))
+            .response_format(crate::llm::ResponseFormat::json_schema("person",serde_json::json!({"type":"object","properties":{"age":{"type":"integer"}},"required":["age"]})))
+            .max_iterations(1).build()?;
         let events = collect_events(&agent, "run").await;
-        assert!(events.iter().any(|event| matches!(
-            event,
-            AgentEvent::FinalAnswer(answer) if answer == r#"{"age":28}"#
-        )));
+        assert!(
+            matches!(last_confirmed_final(&events),Some(AgentEvent::FinalAnswer(answer)) if answer==r#"{"age":28}"#)
+        );
+        let raw: Vec<_> = events
+            .iter()
+            .filter_map(|event| match event {
+                AgentEvent::AssistantMessage { block }
+                    if block.request_id == "same-response-schema" =>
+                {
+                    Some((block.sequence, block.phase, block.delta.as_str()))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            raw,
+            vec![
+                (
+                    0,
+                    echo_core::agent::AssistantPhase::PartialAnswer,
+                    r#"{"age":"not-final"}"#
+                ),
+                (
+                    1,
+                    echo_core::agent::AssistantPhase::FinalAnswer,
+                    r#"{"age":28}"#
+                )
+            ]
+        );
         assert_eq!(llm.call_count(), 1);
         Ok(())
     }
 
     #[tokio::test]
-    async fn invalid_tool_final_does_not_preempt_accepted_steer() -> Result<()> {
+    async fn retired_control_tool_proposal_is_not_registered_or_a_success_terminal() -> Result<()> {
+        let llm = Arc::new(MockLlmClient::new().then_tool_call(
+            "retired-proposal",
+            "final_answer",
+            r#"{"answer":"must not complete"}"#,
+        ));
+        let mut agent = ReactAgentBuilder::new()
+            .llm_client(llm.clone())
+            .max_iterations(2)
+            .build()?;
+        agent.config_mut().llm_max_retries = 0;
+        assert!(
+            !agent
+                .tool_names()
+                .iter()
+                .any(|name| name == "final_answer" || name == "think")
+        );
+        let raw = agent
+            .execute_stream("rejected old control proposal")
+            .await?
+            .collect::<Vec<_>>()
+            .await;
+        assert!(
+            raw.iter().any(|event| match event {
+                Ok(AgentEvent::ToolResult { name, result, .. }) =>
+                    name == "final_answer" && !result.success,
+                Ok(AgentEvent::Error { message, .. }) => message.contains("final_answer"),
+                Err(error) => error.to_string().contains("final_answer"),
+                _ => false,
+            }),
+            "必须保实际退休调用拒绝原因：{raw:?}"
+        );
+        assert!(
+            !raw.iter()
+                .any(|event| matches!(event, Err(ReactError::ExecutionNotSettled { .. })))
+        );
+        assert!(
+            matches!(raw.first(),Some(Ok(AgentEvent::ExecutionStatus(status))) if status.status==echo_core::agent::ExecutionStatusKind::Started)
+        );
+        assert!(
+            matches!(raw.last(),Some(Ok(AgentEvent::ExecutionStatus(status))) if status.status==echo_core::agent::ExecutionStatusKind::Failed),
+            "原Result通道也必须最后才结算：{raw:?}"
+        );
+        let events: Vec<_> = raw
+            .iter()
+            .filter_map(|event| event.as_ref().ok().cloned())
+            .collect();
+        assert_native_runtime_terminal(&events, echo_core::agent::ExecutionStatusKind::Failed);
+        assert!(llm.call_count() <= 2);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn invalid_native_final_does_not_preempt_accepted_steer() -> Result<()> {
         use std::time::Duration;
 
         let llm = Arc::new(
             MockLlmClient::new()
-                .then_tool_call(
-                    "bad-final",
-                    "final_answer",
-                    serde_json::json!({"answer": r#"{"age":"wrong"}"#}).to_string(),
-                )
+                .with_response(r#"{"age":"wrong"}"#)
                 .with_response(r#"{"age":28}"#)
                 .with_delay(Duration::from_millis(150)),
         );
@@ -5665,11 +6393,15 @@ mod tests {
     async fn cancellation_during_final_critic_cannot_complete_run() -> Result<()> {
         use futures::StreamExt;
 
-        let llm = Arc::new(MockLlmClient::new().then_tool_call(
-            "valid-final",
-            "final_answer",
-            serde_json::json!({"answer": r#"{"age":28}"#}).to_string(),
-        ));
+        let llm = Arc::new(
+            MockLlmClient::new().with_stream_script(native_response_script(
+                "explicit-final-critic",
+                &[(
+                    echo_core::agent::AssistantPhase::FinalAnswer,
+                    r#"{"age":28}"#,
+                )],
+            )?),
+        );
         let entered = Arc::new(tokio::sync::Notify::new());
         let release = Arc::new(tokio::sync::Notify::new());
         let run_store = Arc::new(crate::trace::InMemoryRunStore::new());
@@ -5695,14 +6427,9 @@ mod tests {
         }));
         agent.set_run_store(run_store.clone());
         let cancel = crate::agent::CancellationToken::new();
-        let mut stream = agent
+        let stream = agent
             .execute_stream_with_cancel("run", cancel.clone())
             .await?;
-        while let Some(event) = stream.next().await {
-            if matches!(event?, AgentEvent::ToolBatchEnd) {
-                break;
-            }
-        }
         tokio::time::timeout(std::time::Duration::from_secs(2), entered.notified())
             .await
             .map_err(|_| ReactError::Other("critic did not start".to_string()))?;
@@ -5725,6 +6452,8 @@ mod tests {
                 .iter()
                 .any(|event| matches!(event, Ok(AgentEvent::FinalAnswer(_))))
         );
+        let observed = remaining.into_iter().collect::<Result<Vec<_>>>()?;
+        assert_native_runtime_terminal(&observed, echo_core::agent::ExecutionStatusKind::Cancelled);
         let summary = crate::trace::RunStore::list_all(run_store.as_ref(), 1)
             .await?
             .into_iter()
@@ -5882,63 +6611,116 @@ mod tests {
 
     #[tokio::test]
     async fn schema_retry_note_follows_every_tool_result_in_its_batch() -> Result<()> {
-        let call = |id: &str, name: &str, arguments: String| crate::llm::types::ToolCall {
-            id: id.to_string(),
-            call_type: "function".to_string(),
-            function: crate::llm::types::FunctionCall {
-                name: name.to_string(),
-                arguments,
-            },
-        };
-        let llm = Arc::new(
-            MockLlmClient::new()
-                .then_tool_calls(vec![
-                    call(
-                        "bad-final",
-                        "final_answer",
-                        serde_json::json!({"answer": r#"{"age":"wrong"}"#}).to_string(),
-                    ),
-                    call("later", "sequential_marker", "{}".to_string()),
-                ])
-                .with_response(r#"{"age":28}"#),
-        );
-        let agent = ReactAgentBuilder::new()
-            .llm_client(llm.clone())
-            .model_profile(
-                echo_core::llm::capabilities::ModelProfile::from_provider_name(
-                    "mock-model",
-                    "openai",
-                ),
-            )
-            .response_format(crate::llm::ResponseFormat::json_schema(
-                "person",
-                serde_json::json!({"type":"object","properties":{"age":{"type":"integer"}},"required":["age"]}),
-            ))
-            .tool(Box::new(SequentialMarkerTool))
-            .max_iterations(2)
-            .build()?;
-
-        let events = collect_events(&agent, "run").await;
-        assert!(events.iter().any(|event| matches!(
-            event,
-            AgentEvent::FinalAnswer(answer) if answer == r#"{"age":28}"#
-        )));
-        let messages = agent.memory.context.lock().await.messages().to_vec();
-        let position = |needle: &str| {
-            messages.iter().position(|message| {
-                message
+        // 原2轮预算仍保负控；原生修正回复需要第三个真实模型请求，不把预算耗尽当成功。
+        for limit in [2, 3] {
+            let call = |id: &str| crate::llm::types::ToolCall {
+                provider_source: None,
+                id: id.into(),
+                call_type: "function".into(),
+                function: crate::llm::types::FunctionCall {
+                    name: "sequential_marker".into(),
+                    arguments: "{}".into(),
+                },
+            };
+            let llm = Arc::new(
+                MockLlmClient::new()
+                    .then_tool_calls(vec![call("earlier"), call("later")])
+                    .with_stream_script(native_response_script(
+                        "invalid-after-tools",
+                        &[(
+                            echo_core::agent::AssistantPhase::FinalAnswer,
+                            r#"{"age":"wrong"}"#,
+                        )],
+                    )?)
+                    .with_stream_script(native_response_script(
+                        "corrected-after-tools",
+                        &[(
+                            echo_core::agent::AssistantPhase::FinalAnswer,
+                            r#"{"age":28}"#,
+                        )],
+                    )?),
+            );
+            let agent=ReactAgentBuilder::new().llm_client(llm.clone())
+                .model_profile(echo_core::llm::capabilities::ModelProfile::from_provider_name("mock-model","openai"))
+                .response_format(crate::llm::ResponseFormat::json_schema("person",serde_json::json!({"type":"object","properties":{"age":{"type":"integer"}},"required":["age"]})))
+                .tool(Box::new(SequentialMarkerTool)).max_iterations(limit).build()?;
+            let events = collect_events(&agent, "run").await;
+            let result_ids: Vec<_> = events
+                .iter()
+                .filter_map(|event| match event {
+                    AgentEvent::ToolResult {
+                        call_id, result, ..
+                    } if result.success => Some(call_id.as_str()),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(result_ids, vec!["earlier", "later"]);
+            let calls = llm.all_calls();
+            let post_tools = calls
+                .get(1)
+                .ok_or_else(|| ReactError::Other("post-tools request missing".into()))?;
+            assert_eq!(
+                post_tools
+                    .iter()
+                    .filter_map(|message| message.tool_call_id.as_deref())
+                    .collect::<Vec<_>>(),
+                vec!["earlier", "later"]
+            );
+            assert!(
+                !post_tools.iter().any(|message| message
                     .text_content()
-                    .is_some_and(|text| text.contains(needle))
-            })
-        };
-        let final_result = position(r#"{"age":"wrong"}"#)
-            .ok_or_else(|| ReactError::Other("final tool result missing".to_string()))?;
-        let later_result = position("later tool result")
-            .ok_or_else(|| ReactError::Other("sequential tool result missing".to_string()))?;
-        let retry_note = position("[runtime_context:StructuredOutput:Retry]")
-            .ok_or_else(|| ReactError::Other("schema retry note missing".to_string()))?;
-        assert!(final_result < later_result && later_result < retry_note);
-        assert_eq!(llm.call_count(), 2);
+                    .is_some_and(|text| text.contains("[runtime_context:StructuredOutput:Retry]"))),
+                "工具回填之前没有最终候选schema重试"
+            );
+            if limit == 2 {
+                assert_native_runtime_terminal(
+                    &events,
+                    echo_core::agent::ExecutionStatusKind::Failed,
+                );
+                assert_eq!(llm.call_count(), 2);
+                let error=events.iter().position(|event|matches!(event,AgentEvent::Error{message,..} if message.contains("does not match JSON Schema")));
+                let last_tool = events
+                    .iter()
+                    .rposition(|event| matches!(event, AgentEvent::ToolResult { .. }));
+                assert!(
+                    last_tool
+                        .zip(error)
+                        .is_some_and(|(tool, error)| tool < error),
+                    "原预算下真实schema失败也只能在批次结果后：{events:?}"
+                );
+            } else {
+                assert!(
+                    matches!(last_confirmed_final(&events),Some(AgentEvent::FinalAnswer(answer)) if answer==r#"{"age":28}"#)
+                );
+                assert_eq!(llm.call_count(), 3);
+                let repair = calls
+                    .get(2)
+                    .ok_or_else(|| ReactError::Other("schema repair request missing".into()))?;
+                let retry = repair
+                    .iter()
+                    .position(|message| {
+                        message.text_content().is_some_and(|text| {
+                            text.contains("[runtime_context:StructuredOutput:Retry]")
+                        })
+                    })
+                    .ok_or_else(|| ReactError::Other("schema retry note missing".into()))?;
+                let positions: Vec<_> = ["earlier", "later"]
+                    .into_iter()
+                    .map(|id| {
+                        repair
+                            .iter()
+                            .position(|message| message.tool_call_id.as_deref() == Some(id))
+                            .ok_or_else(|| ReactError::Other(format!("tool result missing: {id}")))
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                assert!(
+                    positions
+                        .first()
+                        .zip(positions.get(1))
+                        .is_some_and(|(first, second)| first < second && *second < retry)
+                );
+            }
+        }
         Ok(())
     }
 
@@ -6139,7 +6921,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn final_only_falls_back_to_empty_tool_surface_when_none_is_unsupported() {
+    async fn final_only_falls_back_to_empty_tool_surface_when_none_is_unsupported() -> Result<()> {
         let usage = crate::llm::types::Usage {
             prompt_tokens: Some(6),
             completion_tokens: Some(5),
@@ -6164,17 +6946,17 @@ mod tests {
                 iteration_wind_down_remaining: None,
                 max_model_tokens: Some(10),
             })
-            .build()
-            .expect("agent builds");
+            .build()?;
 
         let events = collect_events(&agent, "run").await;
         assert!(
-            matches!(events.last(), Some(AgentEvent::FinalAnswer(text)) if text == "fallback final")
+            matches!(last_confirmed_final(&events), Some(AgentEvent::FinalAnswer(text)) if text == "fallback final")
         );
         assert_eq!(llm.all_tool_choices(), vec![None, None]);
         let tool_counts = llm.all_tool_counts();
         assert!(tool_counts.first().is_some_and(|count| *count > 0));
         assert_eq!(tool_counts.get(1), Some(&0));
+        Ok(())
     }
 
     #[tokio::test]
@@ -6586,7 +7368,7 @@ mod tests {
             event,
             RunEvent::ToolError { call_id, failure: Some(failure), .. }
                 if call_id == "prehook-timeout"
-                    && failure.side_effect == crate::tools::ToolSideEffect::Possible
+                    && failure.side_effect == crate::tools::ToolSideEffect::None
         )));
         let audit_events =
             crate::audit::AuditLogger::query(audit.as_ref(), crate::audit::AuditFilter::default())
@@ -6624,6 +7406,7 @@ mod tests {
         let llm = MockLlmClient::new()
             .then_tool_calls(vec![
                 ToolCall {
+                    provider_source: None,
                     id: "slow-prehook".to_string(),
                     call_type: "function".to_string(),
                     function: FunctionCall {
@@ -6632,6 +7415,7 @@ mod tests {
                     },
                 },
                 ToolCall {
+                    provider_source: None,
                     id: "fast-completed".to_string(),
                     call_type: "function".to_string(),
                     function: FunctionCall {
@@ -6831,6 +7615,8 @@ mod tests {
             working_dir: None,
             cancel: None,
             disabled_tools: None,
+            allowed_tools: None,
+            tool_access: None,
             visible_tools: None,
             run_budget: None,
             history: None,
@@ -6973,6 +7759,8 @@ mod tests {
             working_dir: None,
             cancel: None,
             disabled_tools: None,
+            allowed_tools: None,
+            tool_access: None,
             visible_tools: None,
             run_budget: None,
             history: None,
@@ -7019,6 +7807,74 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn tracked_steer_typed_resource_survives_active_context_and_checkpoint() -> Result<()> {
+        use echo_core::llm::types::LinkedResource;
+        let agent = ReactAgent::new(AgentConfig::new("test-model", "agent", "system"));
+        let lease = agent
+            .turn_steer_mailbox
+            .begin("resource-live-turn".to_string());
+        lease.set_steerable(true);
+        let mut snapshot = AgentSnapshot::from_agent(&agent);
+        snapshot.current_turn_id = Some("resource-live-turn".to_string());
+        snapshot.turn_steer_incarnation = Some(lease.incarnation());
+        let message = Message::user_multimodal(vec![
+            ContentPart::Text {
+                text: "same text can also be an ordinary quotation".into(),
+            },
+            ContentPart::ResourceLink {
+                resource: Box::new(LinkedResource {
+                    annotations: None,
+                    description: None,
+                    mime_type: Some("text/plain".into()),
+                    name: "input".into(),
+                    size: Some(8),
+                    title: None,
+                    uri: "app-resource:identity".into(),
+                    meta: Some(
+                        serde_json::json!({"application_extension":{"identity":"opaque-producer-proof"}}),
+                    ),
+                }),
+            },
+        ]);
+        let expected = serde_json::to_value(&message)?;
+        let mut receipt = agent
+            .steer_input_tracked(Some("resource-live-turn"), message)
+            .map_err(|error| ReactError::Other(error.to_string()))?;
+        assert_eq!(
+            snapshot
+                .drain_steer_into_context(&agent.memory.context, None)
+                .await,
+            1
+        );
+        assert_eq!(
+            receipt.wait_for_drained().await,
+            crate::agent::AgentSteerState::Drained
+        );
+        // Physical turn is still live. Project from the actual active Context, not from a receipt/body match.
+        let messages = agent.memory.context.lock().await.messages().to_vec();
+        let rows = crate::memory::project_messages("branch", &messages)?;
+        let restored = crate::memory::restore_messages(&rows)?;
+        assert!(
+            restored
+                .iter()
+                .any(|message| serde_json::to_value(message).ok().as_ref() == Some(&expected))
+        );
+        assert_eq!(receipt.state(), crate::agent::AgentSteerState::Drained);
+        let mut checkpoint = crate::state::AgentCheckpoint::new("branch");
+        checkpoint.messages_json =
+            crate::state::AgentCheckpoint::serialize_payload(messages, None)?;
+        let recovered = checkpoint.restore_messages()?;
+        assert!(
+            recovered
+                .iter()
+                .any(|message| serde_json::to_value(message).ok().as_ref() == Some(&expected))
+        );
+        // No terminal reconciliation runs before canonical Context and checkpoint already carry the link.
+        lease.settle(crate::agent::AgentSteerTurnOutcome::Completed);
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn tracked_steer_reports_cancelled_after_real_drain() -> Result<()> {
         use futures::StreamExt;
         use std::time::Duration;
@@ -7053,6 +7909,8 @@ mod tests {
             working_dir: None,
             cancel: Some(cancel.clone()),
             disabled_tools: None,
+            allowed_tools: None,
+            tool_access: None,
             visible_tools: None,
             run_budget: None,
             history: None,
@@ -7118,6 +7976,8 @@ mod tests {
                 Message::user("barrier input".to_string()),
             )
             .map_err(|error| ReactError::Other(error.to_string()))?;
+        assert!(snapshot.has_pending_steer());
+        assert_eq!(receipt.state(), crate::agent::AgentSteerState::Accepted);
         let drain = {
             let snapshot = snapshot.clone();
             let context = context.clone();
@@ -7138,6 +7998,7 @@ mod tests {
             receipt.wait_for_drained().await,
             crate::agent::AgentSteerState::Drained
         );
+        assert!(!snapshot.has_pending_steer());
         lease.settle(crate::agent::AgentSteerTurnOutcome::Completed);
         Ok(())
     }
@@ -7205,6 +8066,7 @@ mod tests {
             .map_err(|error| ReactError::Other(error.to_string()))?;
         let context = agent.memory.context.clone();
 
+        assert!(!stale_snapshot.has_pending_steer());
         assert_eq!(
             stale_snapshot
                 .drain_steer_into_context(&context, None)
@@ -7216,6 +8078,7 @@ mod tests {
         let mut current_snapshot = AgentSnapshot::from_agent(&agent);
         current_snapshot.current_turn_id = Some("same-id-drain".to_string());
         current_snapshot.turn_steer_incarnation = Some(current_lease.incarnation());
+        assert!(current_snapshot.has_pending_steer());
         assert_eq!(
             current_snapshot
                 .drain_steer_into_context(&context, None)
@@ -7239,7 +8102,7 @@ mod tests {
     // fix and passes after.
 
     #[tokio::test]
-    async fn stream_script_terminal_chunk_reports_usage() {
+    async fn stream_script_terminal_chunk_reports_usage() -> Result<()> {
         // Real providers report usage on a separate terminal chunk; the
         // loop-level `usage_reported` must be true only in that shape.
         let usage = crate::llm::types::Usage {
@@ -7248,13 +8111,15 @@ mod tests {
             ..Default::default()
         };
         let llm = MockLlmClient::new().with_stream_script(vec![
-            StreamChunk::Delta(DeltaMessage {
+            StreamChunk::Delta(Box::new(DeltaMessage {
+                provider_response: None,
                 role: Some("assistant".to_string()),
                 content: Some("Hello world".to_string()),
                 reasoning_content: None,
                 reasoning_blocks: None,
+                assistant_blocks: None,
                 tool_calls: None,
-            }),
+            })),
             StreamChunk::Terminal {
                 finish_reason: Some("stop".to_string()),
                 usage: Some(usage),
@@ -7266,7 +8131,7 @@ mod tests {
         let usage_event = events
             .iter()
             .find(|event| matches!(event, AgentEvent::LlmUsage { .. }))
-            .expect("LlmUsage event must be emitted");
+            .ok_or_else(|| ReactError::Other("LlmUsage event missing".into()))?;
         match usage_event {
             AgentEvent::LlmUsage {
                 prompt_tokens,
@@ -7278,10 +8143,16 @@ mod tests {
                 assert_eq!(*prompt_tokens, 11);
                 assert_eq!(*completion_tokens, 7);
             }
-            _ => unreachable!("matched LlmUsage above"),
+            _ => {
+                return Err(ReactError::Other(
+                    "usage lookup returned another event".into(),
+                ));
+            }
         }
-        let last = events.last().expect("terminal event");
+        let last = last_confirmed_final(&events)
+            .ok_or_else(|| ReactError::Other("confirmed final missing".into()))?;
         assert!(matches!(last, AgentEvent::FinalAnswer(t) if t == "Hello world"));
+        Ok(())
     }
 
     #[tokio::test]
@@ -7291,13 +8162,15 @@ mod tests {
         // single-chunk mock certified the impossible; this fixture pins the
         // honest negative).
         let llm = MockLlmClient::new().with_stream_script(vec![
-            StreamChunk::Delta(DeltaMessage {
+            StreamChunk::Delta(Box::new(DeltaMessage {
+                provider_response: None,
                 role: Some("assistant".to_string()),
                 content: Some("No usage here".to_string()),
                 reasoning_content: None,
                 reasoning_blocks: None,
+                assistant_blocks: None,
                 tool_calls: None,
-            }),
+            })),
             StreamChunk::Terminal {
                 finish_reason: Some("stop".to_string()),
                 usage: None,
@@ -7328,6 +8201,7 @@ mod tests {
         let llm = MockLlmClient::new()
             .then_tool_calls(vec![
                 ToolCall {
+                    provider_source: None,
                     id: "call_1".to_string(),
                     call_type: "function".to_string(),
                     function: FunctionCall {
@@ -7336,6 +8210,7 @@ mod tests {
                     },
                 },
                 ToolCall {
+                    provider_source: None,
                     id: "call_2".to_string(),
                     call_type: "function".to_string(),
                     function: FunctionCall {
@@ -7382,6 +8257,871 @@ mod tests {
         );
     }
 
+    struct SteerReturnBarrier {
+        inner: MockLlmClient,
+        entered: Arc<tokio::sync::Notify>,
+        release: Arc<tokio::sync::Notify>,
+    }
+
+    impl crate::llm::LlmClient for SteerReturnBarrier {
+        fn model_name(&self) -> &str {
+            crate::llm::LlmClient::model_name(&self.inner)
+        }
+
+        fn chat(
+            &self,
+            request: crate::llm::ChatRequest,
+        ) -> BoxFuture<'_, Result<crate::llm::ChatResponse>> {
+            crate::llm::LlmClient::chat(&self.inner, request)
+        }
+
+        fn chat_stream(
+            &self,
+            request: crate::llm::ChatRequest,
+        ) -> BoxFuture<'_, Result<futures::stream::BoxStream<'static, Result<crate::llm::ChatChunk>>>>
+        {
+            Box::pin(async move {
+                let first = self.inner.call_count() == 0;
+                let stream = crate::llm::LlmClient::chat_stream(&self.inner, request).await?;
+                if first {
+                    self.entered.notify_one();
+                    self.release.notified().await;
+                }
+                Ok(stream)
+            })
+        }
+    }
+
+    struct SteerEffectTool {
+        name: &'static str,
+        path: std::path::PathBuf,
+        parallel: bool,
+        barrier: Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>,
+    }
+
+    impl crate::tools::Tool for SteerEffectTool {
+        fn name(&self) -> &str {
+            self.name
+        }
+
+        fn description(&self) -> &str {
+            "Write one owned test sentinel after an optional physical-execution barrier"
+        }
+
+        fn parameters(&self) -> serde_json::Value {
+            serde_json::json!({"type":"object","properties":{}})
+        }
+
+        fn allows_parallel_batch_execution(&self) -> bool {
+            self.parallel
+        }
+
+        fn execute(
+            &self,
+            _parameters: crate::tools::ToolParameters,
+        ) -> BoxFuture<'_, Result<crate::tools::ToolResult>> {
+            Box::pin(async move {
+                if let Some((entered, release)) = &self.barrier {
+                    entered.notify_one();
+                    release.notified().await;
+                }
+                std::fs::write(&self.path, self.name)?;
+                Ok(crate::tools::ToolResult::success(format!(
+                    "{} physically completed",
+                    self.name
+                )))
+            })
+        }
+    }
+
+    fn steer_effect_call(id: &str, name: &str) -> ToolCall {
+        ToolCall {
+            provider_source: None,
+            id: id.to_string(),
+            call_type: "function".to_string(),
+            function: FunctionCall {
+                name: name.to_string(),
+                arguments: "{}".to_string(),
+            },
+        }
+    }
+
+    async fn wait_for_steer_barrier(barrier: &tokio::sync::Notify) -> Result<()> {
+        tokio::time::timeout(std::time::Duration::from_secs(2), barrier.notified())
+            .await
+            .map_err(|_| ReactError::Other("steer execution barrier was not reached".to_string()))
+    }
+
+    async fn steer_before_model_return_case(parallel: bool, steer: bool) -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("must-not-run-after-correction");
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let llm = Arc::new(SteerReturnBarrier {
+            inner: MockLlmClient::new()
+                .then_tool_call("unpublished-effect", "steer_effect", "{}")
+                .with_response("reconsidered answer"),
+            entered: entered.clone(),
+            release: release.clone(),
+        });
+        let agent = ReactAgentBuilder::new()
+            .llm_client(llm.clone())
+            .tool(Box::new(SteerEffectTool {
+                name: "steer_effect",
+                path: path.clone(),
+                parallel,
+                barrier: None,
+            }))
+            .max_iterations(4)
+            .build()?;
+        let stream = agent
+            .execute_stream_with_cancel("initial request", crate::agent::CancellationToken::new())
+            .await?;
+        wait_for_steer_barrier(&entered).await?;
+        let mut receipt = if steer {
+            let receipt = agent
+                .steer_input_tracked(None, Message::user("do not write the sentinel".to_string()))
+                .map_err(|error| ReactError::Other(error.to_string()))?;
+            assert_eq!(receipt.state(), crate::agent::AgentSteerState::Accepted);
+            Some(receipt)
+        } else {
+            None
+        };
+        assert!(!path.exists());
+        release.notify_one();
+        let events = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            stream.collect::<Vec<_>>(),
+        )
+        .await
+        .map_err(|_| ReactError::Other("steer model-return run did not settle".to_string()))?
+        .into_iter()
+        .collect::<Result<Vec<_>>>()?;
+        assert_eq!(path.exists(), !steer);
+        assert!(events.iter().any(|event| {
+            matches!(event, AgentEvent::FinalAnswer(answer) if answer == "reconsidered answer")
+        }));
+        let messages = llm.inner.last_messages().unwrap_or_default();
+        assert_eq!(
+            messages.iter().any(|message| {
+                message.content.as_text().as_deref() == Some("do not write the sentinel")
+            }),
+            steer
+        );
+        if let Some(receipt) = receipt.as_mut() {
+            assert!(
+                !events
+                    .iter()
+                    .any(|event| matches!(event, AgentEvent::ToolCall { .. }))
+            );
+            assert!(
+                messages
+                    .iter()
+                    .all(|message| { message.tool_calls.as_ref().is_none_or(Vec::is_empty) })
+            );
+            assert_eq!(
+                receipt.wait_for_turn_settled().await,
+                crate::agent::AgentSteerState::TurnSettled {
+                    outcome: crate::agent::AgentSteerTurnOutcome::Completed,
+                    drained: true,
+                }
+            );
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn steer_before_sequential_tool_batch_discards_unpublished_effect() -> Result<()> {
+        steer_before_model_return_case(false, true).await
+    }
+
+    #[tokio::test]
+    async fn steer_before_parallel_tool_batch_discards_unpublished_effect() -> Result<()> {
+        steer_before_model_return_case(true, true).await
+    }
+
+    #[tokio::test]
+    async fn no_steer_preserves_sequential_and_parallel_tool_execution() -> Result<()> {
+        steer_before_model_return_case(false, false).await?;
+        steer_before_model_return_case(true, false).await
+    }
+
+    #[cfg(feature = "files")]
+    #[tokio::test]
+    async fn provider_reader_settles_before_steer_skips_later_provider_wave() -> Result<()> {
+        use echo_core::tools::filesystem::FileSystem;
+        use echo_core::tools::{InvocationResourceGuard, ToolContext, ToolEffect, ToolResult};
+        use std::io::Read;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        // The existing provider fixtures are private to their crates. This
+        // tool only supplies the original Steer barrier around a real reader;
+        // it adds no FileSystem implementation or alternative execution loop.
+        struct ProviderReadAtBarrier {
+            file_system: Arc<dyn FileSystem>,
+            path: std::path::PathBuf,
+            entered: Arc<tokio::sync::Notify>,
+            release: std::sync::Mutex<Option<std::sync::mpsc::Receiver<()>>>,
+            reader_drops: Arc<AtomicUsize>,
+        }
+
+        impl crate::tools::Tool for ProviderReadAtBarrier {
+            fn name(&self) -> &str {
+                "provider_read_at_barrier"
+            }
+
+            fn description(&self) -> &str {
+                "Hold the actual provider reader at the existing Steer boundary"
+            }
+
+            fn parameters(&self) -> serde_json::Value {
+                serde_json::json!({"type":"object","properties":{}})
+            }
+
+            fn risk_level(&self) -> crate::tools::ToolRiskLevel {
+                crate::tools::ToolRiskLevel::ReadOnly
+            }
+
+            fn execute_with_context<'a>(
+                &'a self,
+                _parameters: crate::tools::ToolParameters,
+                context: &'a ToolContext,
+            ) -> BoxFuture<'a, Result<ToolResult>> {
+                Box::pin(async move {
+                    let release = self
+                        .release
+                        .lock()
+                        .map_err(|error| ReactError::Other(error.to_string()))?
+                        .take()
+                        .ok_or_else(|| {
+                            ReactError::Other("reader barrier already consumed".into())
+                        })?;
+                    let file_system = self.file_system.clone();
+                    let path = self.path.clone();
+                    let entered = self.entered.clone();
+                    let reader_drops = self.reader_drops.clone();
+                    let guards = context.resource_guards.clone();
+                    // Match the original run_file_operation boundary: the
+                    // physical closure owns the invocation guards and reader.
+                    tokio::task::spawn_blocking(move || {
+                        let _guards = guards;
+                        let mut reader = file_system.open_read(&path)?;
+                        let reader_lifetime = ResourceGuardDropProof(reader_drops);
+                        let mut first = [0_u8; 1];
+                        reader.read_exact(&mut first)?;
+                        entered.notify_one();
+                        // A failing assertion cannot leave this physical
+                        // fixture parked on a blocking thread indefinitely.
+                        let released = release.recv_timeout(std::time::Duration::from_secs(2));
+                        let mut bytes = first.to_vec();
+                        reader.read_to_end(&mut bytes)?;
+                        drop(reader);
+                        drop(reader_lifetime);
+                        released.map_err(|error| ReactError::Other(error.to_string()))?;
+                        let content = String::from_utf8(bytes)
+                            .map_err(|error| ReactError::Other(error.to_string()))?;
+                        Ok(
+                            ToolResult::success(content).with_effect(ToolEffect::FileRead {
+                                path: path.display().to_string(),
+                            }),
+                        )
+                    })
+                    .await
+                    .map_err(|error| ReactError::Other(error.to_string()))?
+                })
+            }
+        }
+
+        // Both controls use the same actual tool manager, provider, wave
+        // partition and physical barrier. Only accepted Steer differs.
+        for steer in [false, true] {
+            let directory = tempfile::tempdir()?;
+            let source_path = directory.path().join("source.txt");
+            let later_path = directory.path().join("later.txt");
+            let source_content = "original provider bytes 中文 🙂";
+            let file_system: Arc<dyn FileSystem> =
+                Arc::new(echo_tools::filesystem::LocalFileSystem);
+            file_system.write(&source_path, source_content.as_bytes())?;
+            let entered = Arc::new(tokio::sync::Notify::new());
+            let (release_tx, release_rx) = std::sync::mpsc::channel();
+            let reader_drops = Arc::new(AtomicUsize::new(0));
+            let scope_drops = Arc::new(AtomicUsize::new(0));
+            let mut later = steer_effect_call("provider-later", "write_file");
+            later.function.arguments = serde_json::json!({
+                "path":"later.txt","content":"later provider write"
+            })
+            .to_string();
+            let llm = Arc::new(
+                MockLlmClient::new()
+                    .then_tool_calls(vec![
+                        steer_effect_call("provider-started", "provider_read_at_barrier"),
+                        steer_effect_call("provider-wave-boundary", "sequential_marker"),
+                        later,
+                    ])
+                    .with_response("provider work settled"),
+            );
+            let agent = ReactAgentBuilder::new()
+                .llm_client(llm.clone())
+                .enable_tools()
+                .auto_project_rules(false)
+                .file_system(file_system.clone())
+                .tool(Box::new(ProviderReadAtBarrier {
+                    file_system: file_system.clone(),
+                    path: source_path,
+                    entered: entered.clone(),
+                    release: std::sync::Mutex::new(Some(release_rx)),
+                    reader_drops: reader_drops.clone(),
+                }))
+                // Reuse the original explicit sequential boundary, then the
+                // production file tool with the exact same provider instance.
+                .tool(Box::new(SequentialMarkerTool))
+                .tool(Box::new(
+                    echo_tools::files::files::WriteFileTool::with_base_dir(directory.path())
+                        .with_file_system(file_system.clone()),
+                ))
+                .max_iterations(4)
+                .build()?;
+            let invocation = echo_core::agent::AgentInvocationContext {
+                working_dir: Some(directory.path().to_path_buf()),
+                resource_guards: vec![InvocationResourceGuard::new(ResourceGuardDropProof(
+                    scope_drops.clone(),
+                ))],
+                ..Default::default()
+            };
+            let stream = agent
+                .execute_stream_with_invocation_context(
+                    "read then write on the selected provider",
+                    crate::agent::CancellationToken::new(),
+                    invocation,
+                )
+                .await?;
+            wait_for_steer_barrier(&entered).await?;
+            let mut receipt = if steer {
+                let receipt = agent
+                    .steer_input_tracked(
+                        None,
+                        Message::user("do not start the later provider write".to_string()),
+                    )
+                    .map_err(|error| ReactError::Other(error.to_string()))?;
+                assert_eq!(receipt.state(), crate::agent::AgentSteerState::Accepted);
+                Some(receipt)
+            } else {
+                None
+            };
+            assert_eq!(reader_drops.load(Ordering::SeqCst), 0);
+            assert_eq!(scope_drops.load(Ordering::SeqCst), 0);
+            assert!(agent.execution_mutex.try_lock().is_err());
+            assert!(!file_system.exists(&later_path)?);
+            release_tx
+                .send(())
+                .map_err(|error| ReactError::Other(error.to_string()))?;
+            let events = tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                stream.collect::<Vec<_>>(),
+            )
+            .await
+            .map_err(|_| ReactError::Other("provider Steer run did not physically settle".into()))?
+            .into_iter()
+            .collect::<Result<Vec<_>>>()?;
+            assert_eq!(reader_drops.load(Ordering::SeqCst), 1);
+            assert_eq!(scope_drops.load(Ordering::SeqCst), 1);
+            assert!(agent.execution_mutex.try_lock().is_ok());
+            for id in [
+                "provider-started",
+                "provider-wave-boundary",
+                "provider-later",
+            ] {
+                assert_eq!(events.iter().filter(|event| matches!(event, AgentEvent::ToolCall { call_id, .. } if call_id == id)).count(), 1);
+                assert_eq!(events.iter().filter(|event| matches!(event, AgentEvent::ToolResult { call_id, .. } if call_id == id)).count(), 1);
+            }
+            assert!(events.iter().any(|event| matches!(event,
+                AgentEvent::ToolResult { call_id, result, .. }
+                    if call_id == "provider-started" && result.success && result.output == source_content
+            )));
+            let later_result = events
+                .iter()
+                .find_map(|event| match event {
+                    AgentEvent::ToolResult {
+                        call_id, result, ..
+                    } if call_id == "provider-later" => Some(result),
+                    _ => None,
+                })
+                .ok_or_else(|| ReactError::Other("missing later provider result".into()))?;
+            if let Some(receipt) = receipt.as_mut() {
+                assert!(
+                    !file_system.exists(&later_path)?,
+                    "Steer must prevent the later provider invocation"
+                );
+                assert!(!later_result.success);
+                assert!(later_result.failure.as_ref().is_some_and(
+                    |failure| failure.side_effect == crate::tools::ToolSideEffect::None
+                ));
+                assert_eq!(
+                    receipt.wait_for_turn_settled().await,
+                    crate::agent::AgentSteerState::TurnSettled {
+                        outcome: crate::agent::AgentSteerTurnOutcome::Completed,
+                        drained: true,
+                    }
+                );
+                let messages = llm.last_messages().unwrap_or_default();
+                let correction = messages
+                    .iter()
+                    .position(|message| {
+                        message.content.as_text().as_deref()
+                            == Some("do not start the later provider write")
+                    })
+                    .ok_or_else(|| {
+                        ReactError::Other("provider correction was not consumed".into())
+                    })?;
+                for id in [
+                    "provider-started",
+                    "provider-wave-boundary",
+                    "provider-later",
+                ] {
+                    let result = messages
+                        .iter()
+                        .position(|message| message.tool_call_id.as_deref() == Some(id))
+                        .ok_or_else(|| {
+                            ReactError::Other(format!("missing provider result {id}"))
+                        })?;
+                    assert!(
+                        result < correction,
+                        "close the original proposal before correction"
+                    );
+                }
+            } else {
+                assert!(later_result.success);
+                assert_eq!(
+                    file_system.read_to_string(&later_path)?,
+                    "later provider write"
+                );
+            }
+        }
+        Ok(())
+    }
+
+    async fn steer_during_started_wave_case(
+        parallel: bool,
+        cancel_after_steer: bool,
+    ) -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let started_path = directory.path().join("started-effect");
+        let peer_path = directory.path().join("started-peer");
+        let later_path = directory.path().join("later-effect");
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let peer_entered = Arc::new(tokio::sync::Notify::new());
+        let peer_release = Arc::new(tokio::sync::Notify::new());
+        let mut calls = vec![steer_effect_call("started", "started_effect")];
+        if parallel {
+            calls.push(steer_effect_call("peer", "started_peer"));
+        }
+        calls.push(steer_effect_call("later", "later_effect"));
+        let llm = Arc::new(
+            MockLlmClient::new()
+                .then_tool_calls(calls)
+                .with_response("reconsidered after real settlement"),
+        );
+        let mut builder = ReactAgentBuilder::new()
+            .llm_client(llm.clone())
+            .tool(Box::new(SteerEffectTool {
+                name: "started_effect",
+                path: started_path.clone(),
+                parallel,
+                barrier: Some((entered.clone(), release.clone())),
+            }))
+            .tool(Box::new(SteerEffectTool {
+                name: "later_effect",
+                path: later_path.clone(),
+                parallel: false,
+                barrier: None,
+            }))
+            .max_iterations(4);
+        if parallel {
+            builder = builder.tool(Box::new(SteerEffectTool {
+                name: "started_peer",
+                path: peer_path.clone(),
+                parallel: true,
+                barrier: Some((peer_entered.clone(), peer_release.clone())),
+            }));
+        }
+        let agent = builder.build()?;
+        let cancel = crate::agent::CancellationToken::new();
+        let stream = agent
+            .execute_stream_with_cancel("run effects", cancel.clone())
+            .await?;
+        wait_for_steer_barrier(&entered).await?;
+        if parallel {
+            wait_for_steer_barrier(&peer_entered).await?;
+        }
+        let mut receipt = agent
+            .steer_input_tracked(
+                None,
+                Message::user("do not start the later effect".to_string()),
+            )
+            .map_err(|error| ReactError::Other(error.to_string()))?;
+        assert_eq!(receipt.state(), crate::agent::AgentSteerState::Accepted);
+        assert!(!started_path.exists());
+        assert!(!later_path.exists());
+        if cancel_after_steer {
+            cancel.cancel();
+        }
+        release.notify_one();
+        peer_release.notify_one();
+        let events = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            stream.collect::<Vec<_>>(),
+        )
+        .await
+        .map_err(|_| ReactError::Other("started steer wave did not physically settle".to_string()))?
+        .into_iter()
+        .collect::<Result<Vec<_>>>()?;
+        assert_eq!(std::fs::read_to_string(&started_path)?, "started_effect");
+        if parallel {
+            assert_eq!(std::fs::read_to_string(&peer_path)?, "started_peer");
+        }
+        assert!(
+            !later_path.exists(),
+            "a later wave must not execute the stale proposal"
+        );
+        for id in if parallel {
+            vec!["started", "peer", "later"]
+        } else {
+            vec!["started", "later"]
+        } {
+            assert_eq!(events.iter().filter(|event| matches!(event, AgentEvent::ToolCall { call_id, .. } if call_id == id)).count(), 1);
+            assert_eq!(events.iter().filter(|event| matches!(event, AgentEvent::ToolResult { call_id, .. } if call_id == id)).count(), 1);
+        }
+        let later_result = events
+            .iter()
+            .find_map(|event| match event {
+                AgentEvent::ToolResult {
+                    call_id, result, ..
+                } if call_id == "later" => Some(result),
+                _ => None,
+            })
+            .ok_or_else(|| ReactError::Other("missing genuine not-executed result".to_string()))?;
+        assert!(!later_result.success);
+        assert!(
+            later_result
+                .failure
+                .as_ref()
+                .is_some_and(|failure| failure.side_effect == crate::tools::ToolSideEffect::None)
+        );
+        let terminal = receipt.wait_for_turn_settled().await;
+        if cancel_after_steer {
+            assert_eq!(
+                terminal,
+                crate::agent::AgentSteerState::TurnSettled {
+                    outcome: crate::agent::AgentSteerTurnOutcome::Cancelled,
+                    drained: false,
+                }
+            );
+            assert!(
+                !events
+                    .iter()
+                    .any(|event| matches!(event, AgentEvent::FinalAnswer(_)))
+            );
+        } else {
+            assert_eq!(
+                terminal,
+                crate::agent::AgentSteerState::TurnSettled {
+                    outcome: crate::agent::AgentSteerTurnOutcome::Completed,
+                    drained: true,
+                }
+            );
+            let messages = llm.last_messages().unwrap_or_default();
+            let correction = messages
+                .iter()
+                .position(|message| {
+                    message.content.as_text().as_deref() == Some("do not start the later effect")
+                })
+                .ok_or_else(|| {
+                    ReactError::Other("correction absent from next model request".to_string())
+                })?;
+            for id in if parallel {
+                vec!["started", "peer", "later"]
+            } else {
+                vec!["started", "later"]
+            } {
+                let result_position = messages
+                    .iter()
+                    .position(|message| message.tool_call_id.as_deref() == Some(id))
+                    .ok_or_else(|| {
+                        ReactError::Other(format!("model request missing result for {id}"))
+                    })?;
+                assert!(
+                    result_position < correction,
+                    "close the original tool batch before adding user input"
+                );
+            }
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn steer_during_sequential_wave_retains_started_effect_and_skips_later_wave() -> Result<()>
+    {
+        steer_during_started_wave_case(false, false).await
+    }
+
+    #[tokio::test]
+    async fn steer_during_parallel_wave_retains_all_started_effects_and_skips_later_wave()
+    -> Result<()> {
+        steer_during_started_wave_case(true, false).await
+    }
+
+    #[tokio::test]
+    async fn stop_during_steered_wave_preserves_physical_settlement_and_cancelled_receipt()
+    -> Result<()> {
+        steer_during_started_wave_case(false, true).await?;
+        steer_during_started_wave_case(true, true).await
+    }
+
+    async fn steer_with_reused_call_id_case(steer: bool) -> Result<()> {
+        use crate::trace::{InMemoryRunStore, RunEvent, RunStore};
+
+        let directory = tempfile::tempdir()?;
+        let prior_path = directory.path().join("prior-effect");
+        let current_path = directory.path().join("current-started-effect");
+        let later_path = directory.path().join("later-reused-id-effect");
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let store = Arc::new(InMemoryRunStore::new());
+        let llm = Arc::new(
+            MockLlmClient::new()
+                .then_tool_call("reused-id", "prior_effect", "{}")
+                .then_tool_calls(vec![
+                    steer_effect_call("current-wave", "current_effect"),
+                    steer_effect_call("reused-id", "later_effect"),
+                ])
+                .with_response("considered the current request"),
+        );
+        let agent = ReactAgentBuilder::new()
+            .llm_client(llm)
+            .tool(Box::new(SteerEffectTool {
+                name: "prior_effect",
+                path: prior_path.clone(),
+                parallel: false,
+                barrier: None,
+            }))
+            .tool(Box::new(SteerEffectTool {
+                name: "current_effect",
+                path: current_path.clone(),
+                parallel: false,
+                barrier: Some((entered.clone(), release.clone())),
+            }))
+            .tool(Box::new(SteerEffectTool {
+                name: "later_effect",
+                path: later_path.clone(),
+                parallel: false,
+                barrier: None,
+            }))
+            .with_run_store(store.clone())
+            .max_iterations(5)
+            .build()?;
+        let stream = agent
+            .execute_stream("run the first and next proposals")
+            .await?;
+        wait_for_steer_barrier(&entered).await?;
+        assert_eq!(std::fs::read_to_string(&prior_path)?, "prior_effect");
+        let mut receipt = if steer {
+            Some(
+                agent
+                    .steer_input_tracked(None, Message::user("skip the later proposal".to_string()))
+                    .map_err(|error| ReactError::Other(error.to_string()))?,
+            )
+        } else {
+            None
+        };
+        release.notify_one();
+        let events = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            stream.collect::<Vec<_>>(),
+        )
+        .await
+        .map_err(|_| ReactError::Other("reused-ID original loop did not settle".to_string()))?
+        .into_iter()
+        .collect::<Result<Vec<_>>>()?;
+        assert_eq!(std::fs::read_to_string(&current_path)?, "current_effect");
+        assert_eq!(later_path.exists(), !steer);
+
+        // IDs may repeat after completion. Pair each original proposal, not
+        // a synthetic whole-turn map keyed only by the model's string ID.
+        let batches: Vec<_> = events
+            .split(|event| matches!(event, AgentEvent::ToolBatchEnd))
+            .filter(|batch| {
+                batch
+                    .iter()
+                    .any(|event| matches!(event, AgentEvent::ToolBatchStart { .. }))
+            })
+            .collect();
+        assert_eq!(batches.len(), 2);
+        for batch in &batches {
+            assert_eq!(batch.iter().filter(|event| matches!(event, AgentEvent::ToolCall { call_id, .. } if call_id == "reused-id")).count(), 1);
+            assert_eq!(batch.iter().filter(|event| matches!(event, AgentEvent::ToolResult { call_id, .. } if call_id == "reused-id")).count(), 1);
+        }
+        let later_batch = batches
+            .get(1)
+            .copied()
+            .ok_or_else(|| ReactError::Other("missing second tool proposal".to_string()))?;
+        let result = later_batch
+            .iter()
+            .find_map(|event| match event {
+                AgentEvent::ToolResult {
+                    call_id,
+                    name,
+                    result,
+                } if call_id == "reused-id" && name == "later_effect" => Some(result),
+                _ => None,
+            })
+            .ok_or_else(|| {
+                ReactError::Other("missing current-attempt reused-ID result".to_string())
+            })?;
+        assert_eq!(result.success, !steer);
+        if steer {
+            assert!(
+                result.failure.as_ref().is_some_and(
+                    |failure| failure.side_effect == crate::tools::ToolSideEffect::None
+                )
+            );
+        }
+        let summaries = store.list_all(2).await?;
+        assert_eq!(summaries.len(), 1);
+        let summary = summaries
+            .first()
+            .ok_or_else(|| ReactError::Other("missing original trace run".to_string()))?;
+        let run = store
+            .load(&summary.run_id)
+            .await?
+            .ok_or_else(|| ReactError::Other("missing original trace".to_string()))?;
+        assert_eq!(run.events.iter().filter(|event| matches!(event, RunEvent::ToolExecutionSkipped { call_id, name, .. } if call_id == "reused-id" && name == "later_effect")).count(), usize::from(steer));
+        assert!(!run.events.iter().any(|event| matches!(event, RunEvent::ToolExecutionSkipped { call_id, name, .. } if call_id == "reused-id" && name == "prior_effect")));
+        if let Some(receipt) = receipt.as_mut() {
+            assert_eq!(
+                receipt.wait_for_turn_settled().await,
+                crate::agent::AgentSteerState::TurnSettled {
+                    outcome: crate::agent::AgentSteerTurnOutcome::Completed,
+                    drained: true,
+                }
+            );
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn steer_skips_reused_id_in_later_proposal_without_old_started_fact() -> Result<()> {
+        steer_with_reused_call_id_case(true).await
+    }
+
+    #[tokio::test]
+    async fn no_steer_preserves_reused_ids_across_completed_model_proposals() -> Result<()> {
+        steer_with_reused_call_id_case(false).await
+    }
+
+    #[tokio::test]
+    async fn reused_id_pre_execution_timeout_uses_current_attempt_not_started_fact() -> Result<()> {
+        use crate::trace::{InMemoryRunStore, RunEvent, RunStore};
+
+        let directory = tempfile::tempdir()?;
+        let prior_path = directory.path().join("prior-completed-effect");
+        let later_path = directory.path().join("never-executed-after-prehook");
+        let entered = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let release = Arc::new(tokio::sync::Notify::new());
+        let store = Arc::new(InMemoryRunStore::new());
+        let agent = ReactAgentBuilder::new()
+            .llm_client(Arc::new(
+                MockLlmClient::new()
+                    .then_tool_call("same-prehook-id", "prior_effect", "{}")
+                    .then_tool_call("same-prehook-id", "bounded_effect", "{}")
+                    .with_response("must not complete after timeout"),
+            ))
+            .tool(Box::new(SteerEffectTool {
+                name: "prior_effect",
+                path: prior_path.clone(),
+                parallel: false,
+                barrier: None,
+            }))
+            .tool(Box::new(SteerEffectTool {
+                name: "bounded_effect",
+                path: later_path.clone(),
+                parallel: true,
+                barrier: None,
+            }))
+            .intervention_callback(Arc::new(StallingToolIntervention {
+                entered: entered.clone(),
+                tool_name: Some("bounded_effect"),
+                release: release.clone(),
+            }))
+            .tool_execution(crate::tools::ToolExecutionConfig {
+                timeout_ms: 10,
+                retry_on_fail: false,
+                ..Default::default()
+            })
+            .with_run_store(store.clone())
+            .max_iterations(5)
+            .build()?;
+        let stream = agent
+            .execute_stream("complete the first attempt then time out before the next executes")
+            .await?;
+        let collection = stream.collect::<Vec<_>>();
+        tokio::pin!(collection);
+        let observed =
+            tokio::time::timeout(std::time::Duration::from_millis(300), &mut collection).await;
+        let returned_before_original_callback = observed.is_ok();
+        release.notify_one();
+        let events = match observed {
+            Ok(events) => events,
+            Err(_) => tokio::time::timeout(std::time::Duration::from_secs(3), &mut collection)
+                .await
+                .map_err(|_| {
+                    ReactError::Other("reused-ID pre-execution owner did not settle".to_string())
+                })?,
+        }
+        .into_iter()
+        .collect::<Result<Vec<_>>>()?;
+        assert!(!returned_before_original_callback);
+        assert!(entered.load(std::sync::atomic::Ordering::Acquire));
+        assert_eq!(std::fs::read_to_string(&prior_path)?, "prior_effect");
+        assert!(!later_path.exists());
+        let current = events
+            .iter()
+            .find_map(|event| match event {
+                AgentEvent::ToolResult {
+                    call_id,
+                    name,
+                    result,
+                } if call_id == "same-prehook-id" && name == "bounded_effect" => Some(result),
+                _ => None,
+            })
+            .ok_or_else(|| ReactError::Other("missing current pre-execution result".to_string()))?;
+        assert!(
+            current
+                .failure
+                .as_ref()
+                .is_some_and(|failure| failure.side_effect == crate::tools::ToolSideEffect::None)
+        );
+        let summary = store
+            .list_all(1)
+            .await?
+            .into_iter()
+            .next()
+            .ok_or_else(|| ReactError::Other("missing reused-ID timeout trace".to_string()))?;
+        let run = store
+            .load(&summary.run_id)
+            .await?
+            .ok_or_else(|| ReactError::Other("missing timeout trace body".to_string()))?;
+        assert_eq!(run.events.iter().filter(|event| matches!(event, RunEvent::ToolExecutionSkipped { call_id, name, .. } if call_id == "same-prehook-id" && name == "bounded_effect")).count(), 1);
+        assert!(!run.events.iter().any(|event| matches!(event, RunEvent::ToolExecutionSkipped { call_id, name, .. } if call_id == "same-prehook-id" && name == "prior_effect")));
+        assert!(events.iter().any(|event| matches!(event, AgentEvent::ToolResult { call_id, name, result } if call_id == "same-prehook-id" && name == "prior_effect" && result.success)));
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, AgentEvent::FinalAnswer(_)))
+        );
+        Ok(())
+    }
+
     // Truncated / clean-disconnect stream: the loop must NOT accept the
     // partial output as a complete final answer (Q-FLT-01-P1-01). This
     // fixture remains active in the mandatory suite so terminal regressions
@@ -7389,13 +9129,15 @@ mod tests {
     #[tokio::test]
     async fn truncated_stream_is_not_accepted_as_complete() {
         let llm = MockLlmClient::new().with_stream_script(vec![
-            StreamChunk::Delta(DeltaMessage {
+            StreamChunk::Delta(Box::new(DeltaMessage {
+                provider_response: None,
                 role: Some("assistant".to_string()),
                 content: Some("Partial answer that never finished".to_string()),
                 reasoning_content: None,
                 reasoning_blocks: None,
+                assistant_blocks: None,
                 tool_calls: None,
-            }),
+            })),
             StreamChunk::Err(ReactError::Llm(Box::new(LlmError::NetworkError(
                 "connection closed mid-stream".to_string(),
             )))),
@@ -7417,7 +9159,12 @@ mod tests {
         let partial = events
             .iter()
             .filter_map(|event| match event {
-                AgentEvent::Token(token) => Some(token.as_str()),
+                AgentEvent::AssistantMessage { block }
+                    if block.phase == echo_core::agent::AssistantPhase::Unknown
+                        && !block.complete =>
+                {
+                    Some(block.delta.as_str())
+                }
                 _ => None,
             })
             .collect::<String>();

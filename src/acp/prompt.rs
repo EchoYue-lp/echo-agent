@@ -4,7 +4,8 @@ use agent_client_protocol::schema::v1::ContentBlock;
 
 pub(crate) enum MappedPrompt {
     Text(String),
-    Structured(Message),
+    // Message字段随原生协议增长，间接承载避免撑大普通Text请求的临时枚举。
+    Structured(Box<Message>),
 }
 
 pub(crate) fn map_prompt(blocks: Vec<ContentBlock>, max_chars: usize) -> Result<MappedPrompt> {
@@ -79,7 +80,9 @@ pub(crate) fn map_prompt(blocks: Vec<ContentBlock>, max_chars: usize) -> Result<
         parts.push(part);
     }
     if has_resource_link {
-        Ok(MappedPrompt::Structured(Message::user_multimodal(parts)))
+        Ok(MappedPrompt::Structured(Box::new(
+            Message::user_multimodal(parts),
+        )))
     } else {
         let text = parts
             .into_iter()

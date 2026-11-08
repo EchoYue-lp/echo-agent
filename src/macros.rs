@@ -72,9 +72,6 @@ macro_rules! agent {
     (@build $b:expr, enable_memory: $v:expr, $($rest:tt)*) => {
         $crate::agent!(@build { if $v { $b.enable_memory() } else { $b } }, $($rest)*)
     };
-    (@build $b:expr, enable_cot: $v:expr, $($rest:tt)*) => {
-        $crate::agent!(@build { if $v { $b.enable_cot() } else { $b.disable_cot() } }, $($rest)*)
-    };
     (@build $b:expr, audit_logger: $v:expr, $($rest:tt)*) => {
         $crate::agent!(@build $b.audit_logger(::std::sync::Arc::new($v)), $($rest)*)
     };
@@ -246,7 +243,7 @@ macro_rules! __chat_request_field {
         $req.max_tokens = Some($v as u32);
     };
     ($req:expr, tool_choice, $v:expr) => {
-        $req.tool_choice = Some($v.to_string());
+        $req.tool_choice = Some($v);
     };
 }
 
@@ -360,13 +357,10 @@ mod tests {
 
     #[test]
     fn agent_macro_with_tools_and_options() {
-        use crate::tools::builtin::answer::FinalAnswerTool;
-
         let result = agent! {
             model: "test-model",
             system_prompt: "You are a calculation assistant",
             name: "calc",
-            tools: [FinalAnswerTool],
             max_iterations: 5,
         };
         assert!(result.is_err());

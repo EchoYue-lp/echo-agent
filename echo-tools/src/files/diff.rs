@@ -12,23 +12,36 @@ use futures::future::BoxFuture;
 use serde_json::{Value, json};
 use similar::udiff;
 use std::path::PathBuf;
-use tokio::fs;
 
 // ── DiffTool ────────────────────────────────────────────────────────────────────
 
 /// Compare two files or a file against a string, returning a unified diff.
+#[derive(Clone)]
 pub struct DiffTool {
     base_dir: Option<PathBuf>,
+    file_system: std::sync::Arc<dyn echo_core::tools::filesystem::FileSystem>,
 }
 
 impl DiffTool {
+    pub fn with_file_system(
+        mut self,
+        file_system: std::sync::Arc<dyn echo_core::tools::filesystem::FileSystem>,
+    ) -> Self {
+        self.file_system = file_system;
+        self
+    }
+
     pub fn new() -> Self {
-        Self { base_dir: None }
+        Self {
+            base_dir: None,
+            file_system: std::sync::Arc::new(super::LocalFileSystem),
+        }
     }
 
     pub fn with_base_dir(base: impl Into<PathBuf>) -> Self {
         Self {
             base_dir: Some(base.into()),
+            file_system: std::sync::Arc::new(super::LocalFileSystem),
         }
     }
 }
@@ -45,7 +58,7 @@ impl Tool for DiffTool {
     }
 
     fn description(&self) -> &str {
-        "Compare two files or a file against a string, returning a unified diff. Use path_a + path_b to compare two files, or path_a + content_b to compare a file against given content."
+        "Unified diff: path_a vs path_b (file) or content_b (text)."
     }
 
     fn permissions(&self) -> Vec<echo_core::tools::permission::ToolPermission> {
@@ -61,29 +74,29 @@ impl Tool for DiffTool {
             "properties": {
                 "path_a": {
                     "type": "string",
-                    "description": "First file path (the 'before' side)"
+                    "description": "Before-file path."
                 },
                 "path_b": {
                     "type": "string",
-                    "description": "Second file path (the 'after' side). Either path_b or content_b is required."
+                    "description": "After file; path_b or content_b required."
                 },
                 "content_b": {
                     "type": "string",
-                    "description": "Alternative to path_b: compare path_a against this string content."
+                    "description": "After text instead of path_b."
                 },
                 "context": {
                     "type": "integer",
-                    "description": "Number of context lines around changes (default: 3)"
+                    "description": "Context lines; default 3."
                 },
                 "limit": {
                     "type": "integer",
                     "minimum": 1,
                     "maximum": 50,
-                    "description": "Hunks per page (default 10)"
+                    "description": "Hunks/page; default 10."
                 },
                 "cursor": {
                     "type": "string",
-                    "description": "Cursor from the previous page"
+                    "description": "Prior cursor."
                 }
             },
             "required": ["path_a"]
@@ -95,7 +108,10 @@ impl Tool for DiffTool {
         parameters: ToolParameters,
         ctx: &'a echo_core::tools::ToolContext,
     ) -> BoxFuture<'a, Result<ToolResult>> {
-        Box::pin(async move {
+        let this = self.clone();
+        let ctx = ctx.clone();
+        super::run_file_operation("diff", &ctx.clone(), move || {
+            let file_system = this.file_system.as_ref();
             let path_a_str = parameters
                 .get("path_a")
                 .and_then(|v| v.as_str())
@@ -128,49 +144,49 @@ impl Tool for DiffTool {
             }
 
             let path_a = resolve_path(
+                this.file_system.as_ref(),
                 "diff",
                 path_a_str,
-                &self.base_dir,
+                &this.base_dir,
                 ctx.working_dir.as_deref(),
             )?;
 
-            if !path_a.exists() {
+            if !file_system.exists(&path_a)? {
                 return Ok(ToolResult::invalid_arguments(format!(
                     "File does not exist: {}",
                     path_a.display()
                 )));
             }
 
-            let content_a =
-                fs::read_to_string(&path_a)
-                    .await
-                    .map_err(|e| ToolError::ExecutionFailed {
-                        tool: "diff".to_string(),
-                        message: format!("Failed to read {}: {}", path_a.display(), e),
-                    })?;
+            let content_a = file_system.read_to_string(&path_a).map_err(|e| {
+                super::file_error(e, |e| ToolError::ExecutionFailed {
+                    tool: "diff".to_string(),
+                    message: format!("Failed to read {}: {}", path_a.display(), e),
+                })
+            })?;
 
             let (content_b_val, label_b) = if let Some(content) = content_b {
                 (content.to_string(), "<provided content>".to_string())
             } else if let Some(path_b_str) = path_b_str {
                 let path_b = resolve_path(
+                    this.file_system.as_ref(),
                     "diff",
                     path_b_str,
-                    &self.base_dir,
+                    &this.base_dir,
                     ctx.working_dir.as_deref(),
                 )?;
-                if !path_b.exists() {
+                if !file_system.exists(&path_b)? {
                     return Ok(ToolResult::invalid_arguments(format!(
                         "File does not exist: {}",
                         path_b.display()
                     )));
                 }
-                let content =
-                    fs::read_to_string(&path_b)
-                        .await
-                        .map_err(|e| ToolError::ExecutionFailed {
-                            tool: "diff".to_string(),
-                            message: format!("Failed to read {}: {}", path_b.display(), e),
-                        })?;
+                let content = file_system.read_to_string(&path_b).map_err(|e| {
+                    super::file_error(e, |e| ToolError::ExecutionFailed {
+                        tool: "diff".to_string(),
+                        message: format!("Failed to read {}: {}", path_b.display(), e),
+                    })
+                })?;
                 (content, path_b.display().to_string())
             } else {
                 return Ok(ToolResult::invalid_arguments(

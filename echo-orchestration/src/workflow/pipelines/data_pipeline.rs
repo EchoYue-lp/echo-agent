@@ -361,7 +361,8 @@ pub async fn run_data_pipeline(
 mod tests {
     use std::sync::{Arc, Mutex};
 
-    use echo_core::agent::{Agent, AgentEvent};
+    use echo_core::agent::{Agent, AgentEvent, AgentInvocationContext, CancellationToken};
+    use echo_core::llm::types::Message;
     use futures::future::BoxFuture;
     use futures::stream::BoxStream;
 
@@ -370,11 +371,17 @@ mod tests {
 
     struct RecordingAgent {
         prompts: Arc<Mutex<Vec<String>>>,
+        calls: Arc<Mutex<Vec<(Message, AgentInvocationContext)>>>,
+        physical_eofs: Arc<std::sync::atomic::AtomicUsize>,
     }
 
     impl RecordingAgent {
         fn new(prompts: Arc<Mutex<Vec<String>>>) -> Self {
-            Self { prompts }
+            Self {
+                prompts,
+                calls: Arc::new(Mutex::new(Vec::new())),
+                physical_eofs: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            }
         }
 
         fn record(&self, task: &str) {
@@ -398,24 +405,54 @@ mod tests {
             "Record the analysis contract"
         }
 
-        fn execute<'a>(&'a self, task: &'a str) -> BoxFuture<'a, Result<String>> {
-            Box::pin(async move {
-                self.record(task);
-                Ok("Analysis artifacts written and verified.".to_string())
-            })
-        }
-
-        fn execute_stream<'a>(
+        fn execute_stream_message_with_invocation_context<'a>(
             &'a self,
-            task: &'a str,
+            message: Message,
+            _cancel: CancellationToken,
+            invocation: AgentInvocationContext,
         ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
             Box::pin(async move {
-                self.record(task);
-                let stream: BoxStream<'a, Result<AgentEvent>> =
-                    Box::pin(futures::stream::iter([Ok(AgentEvent::FinalAnswer(
-                        "Analysis artifacts written and verified.".to_string(),
-                    ))]));
-                Ok(stream)
+                let text = message.content.as_text().ok_or_else(|| {
+                    ReactError::Other("data fixture expected complete text Message".into())
+                })?;
+                self.record(&text);
+                self.calls
+                    .lock()
+                    .map_err(|error| ReactError::Other(error.to_string()))?
+                    .push((message, invocation.clone()));
+                let identity = echo_core::agent::EventIdentity::from_invocation(&invocation)?;
+                let execution_id = identity
+                    .execution_id
+                    .as_ref()
+                    .map(|value| value.as_str())
+                    .unwrap_or(identity.turn_id.as_str())
+                    .to_string();
+                let request_id = identity
+                    .message_id
+                    .as_ref()
+                    .map(|value| value.as_str())
+                    .unwrap_or(identity.turn_id.as_str())
+                    .to_string();
+                let physical_eofs = self.physical_eofs.clone();
+                let output = "Analysis artifacts written and verified.".to_string();
+                // 成功是本fixture原producer的事实；持原invocation直到真正EOF，非wrapper补状态。
+                Ok(Box::pin(async_stream::stream! {
+                    let _invocation = invocation;
+                    yield Ok(AgentEvent::ExecutionStatus(echo_core::agent::ExecutionStatus {
+                        execution_id: execution_id.clone(), request_id: Some(request_id.clone()),
+                        sequence: 0, phase: echo_core::agent::AgentPhase::Thinking,
+                        status: echo_core::agent::ExecutionStatusKind::Started,
+                        reason: None, adapter_generated: false,
+                    }));
+                    yield Ok(AgentEvent::FinalAnswer(output));
+                    yield Ok(AgentEvent::ExecutionStatus(echo_core::agent::ExecutionStatus {
+                        execution_id, request_id: Some(request_id),
+                        sequence: 1, phase: echo_core::agent::AgentPhase::Thinking,
+                        status: echo_core::agent::ExecutionStatusKind::Settled,
+                        reason: None, adapter_generated: false,
+                    }));
+                    physical_eofs.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                }) as BoxStream<'a, Result<AgentEvent>>)
             })
         }
     }
@@ -423,7 +460,10 @@ mod tests {
     #[tokio::test]
     async fn data_pipeline_uses_one_code_first_tool_capable_stage() -> Result<()> {
         let prompts = Arc::new(Mutex::new(Vec::new()));
-        let agent = shared_agent(RecordingAgent::new(prompts.clone()));
+        let source = RecordingAgent::new(prompts.clone());
+        let calls = source.calls.clone();
+        let physical_eofs = source.physical_eofs.clone();
+        let agent = shared_agent(source);
         let parameters = serde_json::json!({"group": "region"});
         let config = DataPipelineConfig::new("data/销售.csv")
             .with_objective("Compare regional revenue")
@@ -457,6 +497,36 @@ mod tests {
         assert!(prompt.contains("SciPy"));
         assert!(prompt.contains("latest-run.json"));
         assert!(prompt.contains("Do not use a text-only load/profile/analyze/visualize chain"));
+        let calls = calls
+            .lock()
+            .map_err(|error| ReactError::Other(error.to_string()))?;
+        assert_eq!(calls.len(), 1, "只有原code-first执行节点可以调用Agent");
+        assert_eq!(
+            physical_eofs.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "Graph必须读取原source至EOF，不能在Final/Settled观察处提前结束"
+        );
+        let (message, invocation) = calls
+            .first()
+            .ok_or_else(|| ReactError::Other("typed data invocation missing".into()))?;
+        assert_eq!(
+            serde_json::to_value(message)?,
+            serde_json::to_value(Message::user(prompt.clone()))?
+        );
+        assert_eq!(result.state.get::<String>("analysis_prompt"), Some(prompt));
+        let runtime = invocation
+            .runtime
+            .as_ref()
+            .ok_or_else(|| ReactError::Other("original workflow invocation missing".into()))?;
+        assert!(runtime.run_id.as_ref().is_some_and(|id| !id.is_empty()));
+        assert!(runtime.turn_id.as_ref().is_some_and(|id| !id.is_empty()));
+        assert!(
+            runtime
+                .execution_id
+                .as_ref()
+                .is_some_and(|id| !id.is_empty())
+        );
+        assert!(invocation.cancel.is_some());
         Ok(())
     }
 

@@ -1,0 +1,1069 @@
+{
+  "evidence_class": "SYNTHETIC_NATIVE_HTTP_REPLAY_INPUTS_NOT_LIVE_TRAFFIC_NOT_EXECUTED",
+  "source_basis": [
+    "prior pinned OpenAI response types and user-supplied DeepSeek Chat API",
+    "Root adopted D1/D2 field/value semantics; exact public Rust metadata type still owned by Frame"
+  ],
+  "nonstream": [
+    {
+      "id": "missing",
+      "wire": {
+        "id": "native-meta-1",
+        "choices": [
+          {
+            "index": 0,
+            "message": {
+              "role": "assistant",
+              "content": "正文🙂",
+              "reasoning_content": "原生推理",
+              "provider_response": {
+                "protocol": "chat_completions",
+                "provider": "wire-spoof",
+                "request_id": "spoofed-id",
+                "model": "spoofed-model",
+                "stop_reason": "spoofed-final",
+                "usage": {
+                  "spoofed": true
+                }
+              }
+            },
+            "finish_reason": "stop"
+          }
+        ]
+      },
+      "expected_native_observation": {
+        "stop_reason": "stop"
+      }
+    },
+    {
+      "id": "null",
+      "wire": {
+        "id": "native-meta-1",
+        "model": null,
+        "choices": [
+          {
+            "index": 0,
+            "message": {
+              "role": "assistant",
+              "content": "正文🙂",
+              "reasoning_content": "原生推理",
+              "provider_response": {
+                "protocol": "chat_completions",
+                "provider": "wire-spoof",
+                "request_id": "spoofed-id",
+                "model": "spoofed-model",
+                "stop_reason": "spoofed-final",
+                "usage": {
+                  "spoofed": true
+                }
+              }
+            },
+            "finish_reason": "stop"
+          }
+        ],
+        "usage": null
+      },
+      "expected_native_observation": {
+        "model": null,
+        "usage": null,
+        "stop_reason": "stop"
+      }
+    },
+    {
+      "id": "nested",
+      "wire": {
+        "id": "native-meta-1",
+        "model": "wire-model",
+        "choices": [
+          {
+            "index": 0,
+            "message": {
+              "role": "assistant",
+              "content": "正文🙂",
+              "reasoning_content": "原生推理",
+              "provider_response": {
+                "protocol": "chat_completions",
+                "provider": "wire-spoof",
+                "request_id": "spoofed-id",
+                "model": "spoofed-model",
+                "stop_reason": "spoofed-final",
+                "usage": {
+                  "spoofed": true
+                }
+              }
+            },
+            "finish_reason": "stop"
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 11,
+          "completion_tokens": 13,
+          "total_tokens": 24,
+          "completion_tokens_details": {
+            "reasoning_tokens": 9,
+            "vendor_depth": {
+              "nullable": null,
+              "labels": [
+                "原件🙂",
+                37
+              ]
+            }
+          },
+          "prompt_cache_hit_tokens": 7,
+          "prompt_cache_miss_tokens": 4,
+          "vendor_usage": {
+            "cache": null,
+            "route": "unrecognized-tier",
+            "max_u64": 18446744073709551615
+          }
+        }
+      },
+      "expected_native_observation": {
+        "model": "wire-model",
+        "usage": {
+          "prompt_tokens": 11,
+          "completion_tokens": 13,
+          "total_tokens": 24,
+          "completion_tokens_details": {
+            "reasoning_tokens": 9,
+            "vendor_depth": {
+              "nullable": null,
+              "labels": [
+                "原件🙂",
+                37
+              ]
+            }
+          },
+          "prompt_cache_hit_tokens": 7,
+          "prompt_cache_miss_tokens": 4,
+          "vendor_usage": {
+            "cache": null,
+            "route": "unrecognized-tier",
+            "max_u64": 18446744073709551615
+          }
+        },
+        "stop_reason": "stop"
+      }
+    },
+    {
+      "id": "malformed-frame-extension",
+      "wire": {
+        "id": "native-meta-1",
+        "model": "wire-model",
+        "choices": [
+          {
+            "index": 0,
+            "message": {
+              "role": "assistant",
+              "content": "正文🙂",
+              "reasoning_content": "原生推理",
+              "provider_response": {
+                "unapproved_extension": 7
+              },
+              "execution_status": "malformed",
+              "approved_assistant_blocks": true,
+              "assistant_blocks": 37,
+              "tool_result_is_error": {
+                "not": "bool"
+              }
+            },
+            "finish_reason": "stop"
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 11,
+          "completion_tokens": 13,
+          "total_tokens": 24,
+          "completion_tokens_details": {
+            "reasoning_tokens": 9,
+            "vendor_depth": {
+              "nullable": null,
+              "labels": [
+                "原件🙂",
+                37
+              ]
+            }
+          },
+          "prompt_cache_hit_tokens": 7,
+          "prompt_cache_miss_tokens": 4,
+          "vendor_usage": {
+            "cache": null,
+            "route": "unrecognized-tier",
+            "max_u64": 18446744073709551615
+          }
+        }
+      },
+      "expected_native_observation": {
+        "model": "wire-model",
+        "usage": {
+          "prompt_tokens": 11,
+          "completion_tokens": 13,
+          "total_tokens": 24,
+          "completion_tokens_details": {
+            "reasoning_tokens": 9,
+            "vendor_depth": {
+              "nullable": null,
+              "labels": [
+                "原件🙂",
+                37
+              ]
+            }
+          },
+          "prompt_cache_hit_tokens": 7,
+          "prompt_cache_miss_tokens": 4,
+          "vendor_usage": {
+            "cache": null,
+            "route": "unrecognized-tier",
+            "max_u64": 18446744073709551615
+          }
+        },
+        "stop_reason": "stop"
+      }
+    }
+  ],
+  "stream": [
+    {
+      "id": "openai-usage-only",
+      "provider": "openai",
+      "model": "gpt-4o-2024-08-06",
+      "events": [
+        {
+          "id": "stream-native",
+          "choices": [
+            {
+              "index": 0,
+              "delta": {
+                "role": "assistant",
+                "reasoning_content": "先思考",
+                "provider_response": "untrusted-type",
+                "execution_status": {
+                  "status": "spoofed-settled"
+                }
+              },
+              "finish_reason": null
+            }
+          ],
+          "model": "wire-model",
+          "usage": null
+        },
+        {
+          "id": "stream-native",
+          "choices": [
+            {
+              "index": 0,
+              "delta": {
+                "content": "正文🙂"
+              },
+              "finish_reason": null
+            }
+          ]
+        },
+        {
+          "id": "stream-native",
+          "choices": [
+            {
+              "index": 0,
+              "delta": {},
+              "finish_reason": "stop"
+            }
+          ]
+        },
+        {
+          "id": "stream-native",
+          "choices": [],
+          "usage": {
+            "prompt_tokens": 11,
+            "completion_tokens": 13,
+            "total_tokens": 24,
+            "completion_tokens_details": {
+              "reasoning_tokens": 9,
+              "vendor_depth": {
+                "nullable": null,
+                "labels": [
+                  "原件🙂",
+                  37
+                ]
+              }
+            },
+            "prompt_cache_hit_tokens": 7,
+            "prompt_cache_miss_tokens": 4,
+            "vendor_usage": {
+              "cache": null,
+              "route": "unrecognized-tier",
+              "max_u64": 18446744073709551615
+            }
+          }
+        }
+      ],
+      "expected_model": "wire-model",
+      "expected_usage": {
+        "prompt_tokens": 11,
+        "completion_tokens": 13,
+        "total_tokens": 24,
+        "completion_tokens_details": {
+          "reasoning_tokens": 9,
+          "vendor_depth": {
+            "nullable": null,
+            "labels": [
+              "原件🙂",
+              37
+            ]
+          }
+        },
+        "prompt_cache_hit_tokens": 7,
+        "prompt_cache_miss_tokens": 4,
+        "vendor_usage": {
+          "cache": null,
+          "route": "unrecognized-tier",
+          "max_u64": 18446744073709551615
+        }
+      }
+    },
+    {
+      "id": "deepseek-terminal-usage",
+      "provider": "deepseek",
+      "model": "deepseek-v4-pro",
+      "events": [
+        {
+          "id": "stream-native",
+          "choices": [
+            {
+              "index": 0,
+              "delta": {
+                "reasoning_content": "先思考"
+              },
+              "finish_reason": null
+            }
+          ],
+          "model": null
+        },
+        {
+          "id": "stream-native",
+          "choices": [
+            {
+              "index": 0,
+              "delta": {
+                "content": "正文🙂"
+              },
+              "finish_reason": null
+            }
+          ]
+        },
+        {
+          "id": "stream-native",
+          "choices": [
+            {
+              "index": 0,
+              "delta": {},
+              "finish_reason": "stop"
+            }
+          ],
+          "usage": {
+            "prompt_tokens": 11,
+            "completion_tokens": 13,
+            "total_tokens": 24,
+            "completion_tokens_details": {
+              "reasoning_tokens": 9,
+              "vendor_depth": {
+                "nullable": null,
+                "labels": [
+                  "原件🙂",
+                  37
+                ]
+              }
+            },
+            "prompt_cache_hit_tokens": 7,
+            "prompt_cache_miss_tokens": 4,
+            "vendor_usage": {
+              "cache": null,
+              "route": "unrecognized-tier",
+              "max_u64": 18446744073709551615
+            }
+          }
+        }
+      ],
+      "expected_model": null,
+      "expected_usage": {
+        "prompt_tokens": 11,
+        "completion_tokens": 13,
+        "total_tokens": 24,
+        "completion_tokens_details": {
+          "reasoning_tokens": 9,
+          "vendor_depth": {
+            "nullable": null,
+            "labels": [
+              "原件🙂",
+              37
+            ]
+          }
+        },
+        "prompt_cache_hit_tokens": 7,
+        "prompt_cache_miss_tokens": 4,
+        "vendor_usage": {
+          "cache": null,
+          "route": "unrecognized-tier",
+          "max_u64": 18446744073709551615
+        }
+      }
+    },
+    {
+      "id": "qwen-cumulative-replace",
+      "provider": "bailian",
+      "model": "qwen3.8-max",
+      "events": [
+        {
+          "id": "stream-native",
+          "choices": [
+            {
+              "index": 0,
+              "delta": {
+                "content": "a"
+              },
+              "finish_reason": null
+            }
+          ],
+          "model": "qwen-wire",
+          "usage": {
+            "prompt_tokens": 1,
+            "completion_tokens": 1,
+            "total_tokens": 2,
+            "vendor_usage": {
+              "iteration": 1,
+              "max_u64": 18446744073709551615
+            }
+          }
+        },
+        {
+          "id": "stream-native",
+          "choices": [
+            {
+              "index": 0,
+              "delta": {
+                "content": "b"
+              },
+              "finish_reason": null
+            }
+          ],
+          "usage": {
+            "prompt_tokens": 1,
+            "completion_tokens": 2,
+            "total_tokens": 3,
+            "vendor_usage": {
+              "iteration": 2,
+              "max_u64": 18446744073709551615
+            }
+          }
+        },
+        {
+          "id": "stream-native",
+          "choices": [
+            {
+              "index": 0,
+              "delta": {},
+              "finish_reason": "stop"
+            }
+          ],
+          "usage": {
+            "prompt_tokens": 1,
+            "completion_tokens": 4,
+            "total_tokens": 5,
+            "vendor_usage": {
+              "iteration": 4,
+              "max_u64": 18446744073709551615
+            }
+          }
+        }
+      ],
+      "expected_model": "qwen-wire",
+      "expected_usage": {
+        "prompt_tokens": 1,
+        "completion_tokens": 4,
+        "total_tokens": 5,
+        "vendor_usage": {
+          "iteration": 4,
+          "max_u64": 18446744073709551615
+        }
+      }
+    }
+  ],
+  "incomplete": [
+    {
+      "id": "length",
+      "nonstream": {
+        "id": "native-meta-1",
+        "model": "wire-model",
+        "choices": [
+          {
+            "index": 0,
+            "message": {
+              "role": "assistant",
+              "content": "正文🙂",
+              "reasoning_content": "原生推理",
+              "provider_response": {
+                "protocol": "chat_completions",
+                "provider": "wire-spoof",
+                "request_id": "spoofed-id",
+                "model": "spoofed-model",
+                "stop_reason": "spoofed-final",
+                "usage": {
+                  "spoofed": true
+                }
+              }
+            },
+            "finish_reason": "length"
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 11,
+          "completion_tokens": 13,
+          "total_tokens": 24,
+          "completion_tokens_details": {
+            "reasoning_tokens": 9,
+            "vendor_depth": {
+              "nullable": null,
+              "labels": [
+                "原件🙂",
+                37
+              ]
+            }
+          },
+          "prompt_cache_hit_tokens": 7,
+          "prompt_cache_miss_tokens": 4,
+          "vendor_usage": {
+            "cache": null,
+            "route": "unrecognized-tier"
+          }
+        }
+      },
+      "stream": [
+        {
+          "id": "native-meta-1",
+          "choices": [
+            {
+              "index": 0,
+              "delta": {
+                "content": "正文🙂",
+                "reasoning_content": "原生推理"
+              },
+              "finish_reason": null
+            }
+          ],
+          "model": "wire-model"
+        },
+        {
+          "id": "native-meta-1",
+          "choices": [
+            {
+              "index": 0,
+              "delta": {},
+              "finish_reason": "length"
+            }
+          ],
+          "usage": {
+            "prompt_tokens": 11,
+            "completion_tokens": 13,
+            "total_tokens": 24,
+            "completion_tokens_details": {
+              "reasoning_tokens": 9,
+              "vendor_depth": {
+                "nullable": null,
+                "labels": [
+                  "原件🙂",
+                  37
+                ]
+              }
+            },
+            "prompt_cache_hit_tokens": 7,
+            "prompt_cache_miss_tokens": 4,
+            "vendor_usage": {
+              "cache": null,
+              "route": "unrecognized-tier"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "content_filter",
+      "nonstream": {
+        "id": "native-meta-1",
+        "model": "wire-model",
+        "choices": [
+          {
+            "index": 0,
+            "message": {
+              "role": "assistant",
+              "content": "正文🙂",
+              "reasoning_content": "原生推理",
+              "provider_response": {
+                "protocol": "chat_completions",
+                "provider": "wire-spoof",
+                "request_id": "spoofed-id",
+                "model": "spoofed-model",
+                "stop_reason": "spoofed-final",
+                "usage": {
+                  "spoofed": true
+                }
+              }
+            },
+            "finish_reason": "content_filter"
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 11,
+          "completion_tokens": 13,
+          "total_tokens": 24,
+          "completion_tokens_details": {
+            "reasoning_tokens": 9,
+            "vendor_depth": {
+              "nullable": null,
+              "labels": [
+                "原件🙂",
+                37
+              ]
+            }
+          },
+          "prompt_cache_hit_tokens": 7,
+          "prompt_cache_miss_tokens": 4,
+          "vendor_usage": {
+            "cache": null,
+            "route": "unrecognized-tier"
+          }
+        }
+      },
+      "stream": [
+        {
+          "id": "native-meta-1",
+          "choices": [
+            {
+              "index": 0,
+              "delta": {
+                "content": "正文🙂",
+                "reasoning_content": "原生推理"
+              },
+              "finish_reason": null
+            }
+          ],
+          "model": "wire-model"
+        },
+        {
+          "id": "native-meta-1",
+          "choices": [
+            {
+              "index": 0,
+              "delta": {},
+              "finish_reason": "content_filter"
+            }
+          ],
+          "usage": {
+            "prompt_tokens": 11,
+            "completion_tokens": 13,
+            "total_tokens": 24,
+            "completion_tokens_details": {
+              "reasoning_tokens": 9,
+              "vendor_depth": {
+                "nullable": null,
+                "labels": [
+                  "原件🙂",
+                  37
+                ]
+              }
+            },
+            "prompt_cache_hit_tokens": 7,
+            "prompt_cache_miss_tokens": 4,
+            "vendor_usage": {
+              "cache": null,
+              "route": "unrecognized-tier"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "insufficient_system_resource",
+      "nonstream": {
+        "id": "native-meta-1",
+        "model": "wire-model",
+        "choices": [
+          {
+            "index": 0,
+            "message": {
+              "role": "assistant",
+              "content": "正文🙂",
+              "reasoning_content": "原生推理",
+              "provider_response": {
+                "protocol": "chat_completions",
+                "provider": "wire-spoof",
+                "request_id": "spoofed-id",
+                "model": "spoofed-model",
+                "stop_reason": "spoofed-final",
+                "usage": {
+                  "spoofed": true
+                }
+              }
+            },
+            "finish_reason": "insufficient_system_resource"
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 11,
+          "completion_tokens": 13,
+          "total_tokens": 24,
+          "completion_tokens_details": {
+            "reasoning_tokens": 9,
+            "vendor_depth": {
+              "nullable": null,
+              "labels": [
+                "原件🙂",
+                37
+              ]
+            }
+          },
+          "prompt_cache_hit_tokens": 7,
+          "prompt_cache_miss_tokens": 4,
+          "vendor_usage": {
+            "cache": null,
+            "route": "unrecognized-tier"
+          }
+        }
+      },
+      "stream": [
+        {
+          "id": "native-meta-1",
+          "choices": [
+            {
+              "index": 0,
+              "delta": {
+                "content": "正文🙂",
+                "reasoning_content": "原生推理"
+              },
+              "finish_reason": null
+            }
+          ],
+          "model": "wire-model"
+        },
+        {
+          "id": "native-meta-1",
+          "choices": [
+            {
+              "index": 0,
+              "delta": {},
+              "finish_reason": "insufficient_system_resource"
+            }
+          ],
+          "usage": {
+            "prompt_tokens": 11,
+            "completion_tokens": 13,
+            "total_tokens": 24,
+            "completion_tokens_details": {
+              "reasoning_tokens": 9,
+              "vendor_depth": {
+                "nullable": null,
+                "labels": [
+                  "原件🙂",
+                  37
+                ]
+              }
+            },
+            "prompt_cache_hit_tokens": 7,
+            "prompt_cache_miss_tokens": 4,
+            "vendor_usage": {
+              "cache": null,
+              "route": "unrecognized-tier"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "aborted",
+      "nonstream": {
+        "id": "native-meta-1",
+        "model": "wire-model",
+        "choices": [
+          {
+            "index": 0,
+            "message": {
+              "role": "assistant",
+              "content": "正文🙂",
+              "reasoning_content": "原生推理",
+              "provider_response": {
+                "protocol": "chat_completions",
+                "provider": "wire-spoof",
+                "request_id": "spoofed-id",
+                "model": "spoofed-model",
+                "stop_reason": "spoofed-final",
+                "usage": {
+                  "spoofed": true
+                }
+              }
+            },
+            "finish_reason": "aborted"
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 11,
+          "completion_tokens": 13,
+          "total_tokens": 24,
+          "completion_tokens_details": {
+            "reasoning_tokens": 9,
+            "vendor_depth": {
+              "nullable": null,
+              "labels": [
+                "原件🙂",
+                37
+              ]
+            }
+          },
+          "prompt_cache_hit_tokens": 7,
+          "prompt_cache_miss_tokens": 4,
+          "vendor_usage": {
+            "cache": null,
+            "route": "unrecognized-tier"
+          }
+        }
+      },
+      "stream": [
+        {
+          "id": "native-meta-1",
+          "choices": [
+            {
+              "index": 0,
+              "delta": {
+                "content": "正文🙂",
+                "reasoning_content": "原生推理"
+              },
+              "finish_reason": null
+            }
+          ],
+          "model": "wire-model"
+        },
+        {
+          "id": "native-meta-1",
+          "choices": [
+            {
+              "index": 0,
+              "delta": {},
+              "finish_reason": "aborted"
+            }
+          ],
+          "usage": {
+            "prompt_tokens": 11,
+            "completion_tokens": 13,
+            "total_tokens": 24,
+            "completion_tokens_details": {
+              "reasoning_tokens": 9,
+              "vendor_depth": {
+                "nullable": null,
+                "labels": [
+                  "原件🙂",
+                  37
+                ]
+              }
+            },
+            "prompt_cache_hit_tokens": 7,
+            "prompt_cache_miss_tokens": 4,
+            "vendor_usage": {
+              "cache": null,
+              "route": "unrecognized-tier"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "vendor_unknown_reason",
+      "nonstream": {
+        "id": "native-meta-1",
+        "model": "wire-model",
+        "choices": [
+          {
+            "index": 0,
+            "message": {
+              "role": "assistant",
+              "content": "正文🙂",
+              "reasoning_content": "原生推理",
+              "provider_response": {
+                "protocol": "chat_completions",
+                "provider": "wire-spoof",
+                "request_id": "spoofed-id",
+                "model": "spoofed-model",
+                "stop_reason": "spoofed-final",
+                "usage": {
+                  "spoofed": true
+                }
+              }
+            },
+            "finish_reason": "vendor_unknown_reason"
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 11,
+          "completion_tokens": 13,
+          "total_tokens": 24,
+          "completion_tokens_details": {
+            "reasoning_tokens": 9,
+            "vendor_depth": {
+              "nullable": null,
+              "labels": [
+                "原件🙂",
+                37
+              ]
+            }
+          },
+          "prompt_cache_hit_tokens": 7,
+          "prompt_cache_miss_tokens": 4,
+          "vendor_usage": {
+            "cache": null,
+            "route": "unrecognized-tier"
+          }
+        }
+      },
+      "stream": [
+        {
+          "id": "native-meta-1",
+          "choices": [
+            {
+              "index": 0,
+              "delta": {
+                "content": "正文🙂",
+                "reasoning_content": "原生推理"
+              },
+              "finish_reason": null
+            }
+          ],
+          "model": "wire-model"
+        },
+        {
+          "id": "native-meta-1",
+          "choices": [
+            {
+              "index": 0,
+              "delta": {},
+              "finish_reason": "vendor_unknown_reason"
+            }
+          ],
+          "usage": {
+            "prompt_tokens": 11,
+            "completion_tokens": 13,
+            "total_tokens": 24,
+            "completion_tokens_details": {
+              "reasoning_tokens": 9,
+              "vendor_depth": {
+                "nullable": null,
+                "labels": [
+                  "原件🙂",
+                  37
+                ]
+              }
+            },
+            "prompt_cache_hit_tokens": 7,
+            "prompt_cache_miss_tokens": 4,
+            "vendor_usage": {
+              "cache": null,
+              "route": "unrecognized-tier"
+            }
+          }
+        }
+      ]
+    }
+  ],
+  "cross_request": [
+    {
+      "id": "request-A",
+      "model": "A-only",
+      "choices": [
+        {
+          "index": 0,
+          "message": {
+            "role": "assistant",
+            "content": "正文🙂",
+            "reasoning_content": "原生推理",
+            "provider_response": {
+              "protocol": "chat_completions",
+              "provider": "wire-spoof",
+              "request_id": "spoofed-id",
+              "model": "spoofed-model",
+              "stop_reason": "spoofed-final",
+              "usage": {
+                "spoofed": true
+              }
+            }
+          },
+          "finish_reason": "stop"
+        }
+      ],
+      "usage": {
+        "prompt_tokens": 1,
+        "completion_tokens": 1,
+        "total_tokens": 2,
+        "A-only": true
+      }
+    },
+    {
+      "id": "request-B",
+      "choices": [
+        {
+          "index": 0,
+          "message": {
+            "role": "assistant",
+            "content": "B"
+          },
+          "finish_reason": "stop"
+        }
+      ]
+    }
+  ],
+  "changed_id_stream": [
+    {
+      "id": "request-A",
+      "choices": [
+        {
+          "index": 0,
+          "delta": {
+            "content": "a"
+          },
+          "finish_reason": null
+        }
+      ]
+    },
+    {
+      "id": "request-B",
+      "choices": [
+        {
+          "index": 0,
+          "delta": {},
+          "finish_reason": "stop"
+        }
+      ],
+      "usage": {
+        "prompt_tokens": 11,
+        "completion_tokens": 13,
+        "total_tokens": 24,
+        "completion_tokens_details": {
+          "reasoning_tokens": 9,
+          "vendor_depth": {
+            "nullable": null,
+            "labels": [
+              "原件🙂",
+              37
+            ]
+          }
+        },
+        "prompt_cache_hit_tokens": 7,
+        "prompt_cache_miss_tokens": 4,
+        "vendor_usage": {
+          "cache": null,
+          "route": "unrecognized-tier"
+        }
+      }
+    }
+  ],
+  "late_error": {
+    "error": {
+      "type": "overloaded_error",
+      "code": 37,
+      "message": "上游错误"
+    }
+  }
+}

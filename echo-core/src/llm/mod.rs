@@ -9,8 +9,8 @@ use crate::error::Result;
 pub use thinking::{ThinkingConfig, ThinkingLevel, ThinkingProtocol};
 pub use types::{
     ChatCompletionChunk, ChatCompletionRequest, ChatCompletionResponse, DeltaMessage, FunctionCall,
-    FunctionSpec, JsonSchemaSpec, Message, ResponseFormat, Role, ThinkingTypeBlock, ToolCall,
-    ToolDefinition,
+    FunctionSpec, JsonSchemaSpec, Message, ProviderResponseMetadata, ResponseFormat, Role,
+    ThinkingTypeBlock, ToolCall, ToolDefinition,
 };
 
 use futures::future::BoxFuture;
@@ -364,7 +364,7 @@ mod protocol_tests {
 /// Options for [`LlmClient::chat_simple_with_options`].
 #[derive(Debug, Clone)]
 pub struct SimpleChatOptions {
-    /// Sampling temperature (0.0–2.0). Defaults to `0.7`.
+    /// 可选采样温度（0.0–2.0）；默认不发送，只有调用方显式设置才提供。
     pub temperature: Option<f32>,
     /// Maximum tokens to generate. Defaults to `2048`.
     pub max_tokens: Option<u32>,
@@ -373,7 +373,7 @@ pub struct SimpleChatOptions {
 impl Default for SimpleChatOptions {
     fn default() -> Self {
         Self {
-            temperature: Some(0.7),
+            temperature: None,
             max_tokens: Some(2048),
         }
     }
@@ -413,8 +413,8 @@ pub trait LlmClient: Send + Sync {
 
     /// Convenience helper for simple text-only calls.
     ///
-    /// Accepts optional overrides via [`SimpleChatOptions`]; defaults are
-    /// `temperature: 0.7` and `max_tokens: 2048`.
+    /// 通过 [`SimpleChatOptions`] 接收显式选项；默认不提供温度，
+    /// `max_tokens` 仍为 `2048`。显式温度是否可用由原 provider 规则判断。
     fn chat_simple(&self, messages: Vec<Message>) -> BoxFuture<'_, Result<String>> {
         self.chat_simple_with_options(messages, SimpleChatOptions::default())
     }
@@ -444,6 +444,19 @@ pub trait LlmClient: Send + Sync {
     /// Stable provider identity used by the model-fact resolver, when known.
     fn provider_name(&self) -> Option<&str> {
         None
+    }
+
+    /// 读取同一 adapter 已接纳的用量快照；不产生请求、终态或第二次计费事件。
+    ///
+    /// 原 `ChatChunk::usage` 仍保留最终屏障。调用者先核验 observation 的原来源，
+    /// 实现再核对自身协议/provider，复用原规范化器；未实现或缺计数返回 None，
+    /// 与已报告 Some(0) 不同。代理 client 应转发到原 client，不自行解析 vendor JSON。
+    fn reported_usage(
+        &self,
+        _observation: &types::ProviderResponseMetadata,
+        _previous: Option<&types::Usage>,
+    ) -> Result<Option<types::Usage>> {
+        Ok(None)
     }
 
     /// Immutable wire behavior implemented by this client adapter.
@@ -506,6 +519,28 @@ mod client_capability_tests {
 
     struct UnknownClient;
     struct DeclaredClient;
+
+    #[test]
+    fn reported_usage_default_is_unknown_even_when_raw_metadata_contains_zero() -> Result<()> {
+        let observation = serde_json::from_value(serde_json::json!({
+            "protocol":"chat_completions", "provider":"unknown-client",
+            "usage":{"prompt_tokens":0,"completion_tokens":0,"total_tokens":0}
+        }))?;
+        assert!(UnknownClient.reported_usage(&observation, None)?.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn implicit_temperature_is_opt_in_for_simple_chat_options() {
+        assert_eq!(SimpleChatOptions::default().temperature, None);
+        assert_eq!(SimpleChatOptions::default().max_tokens, Some(2048));
+        assert_eq!(
+            SimpleChatOptions::default()
+                .with_temperature(0.25)
+                .temperature,
+            Some(0.25)
+        );
+    }
 
     impl LlmClient for UnknownClient {
         fn chat(&self, _request: ChatRequest) -> BoxFuture<'_, Result<ChatResponse>> {
@@ -608,6 +643,60 @@ impl ToolChoice {
     }
 }
 
+impl serde::Serialize for ToolChoice {
+    fn serialize<S: serde::Serializer>(
+        &self,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
+        serde::Serialize::serialize(&self.to_openai_value(), serializer)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for ToolChoice {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
+        use serde::Deserialize;
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct NamedFunction {
+            name: String,
+        }
+        #[derive(Deserialize)]
+        #[serde(rename_all = "snake_case")]
+        enum FunctionKind {
+            Function,
+        }
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct NamedChoice {
+            #[serde(rename = "type")]
+            kind: FunctionKind,
+            function: NamedFunction,
+        }
+        let value = serde_json::Value::deserialize(deserializer)?;
+        match value.as_str() {
+            Some("auto") => Ok(Self::Auto),
+            Some("none") => Ok(Self::None),
+            Some("required") => Ok(Self::Required),
+            Some(_) => Err(serde::de::Error::custom("unknown tool choice mode")),
+            None => {
+                let named: NamedChoice =
+                    serde_json::from_value(value).map_err(serde::de::Error::custom)?;
+                let FunctionKind::Function = named.kind;
+                if named.function.name.trim().is_empty() {
+                    return Err(serde::de::Error::custom(
+                        "selected function name must not be empty",
+                    ));
+                }
+                Ok(Self::Function {
+                    name: named.function.name,
+                })
+            }
+        }
+    }
+}
+
 /// Chat request parameters
 #[derive(Debug, Clone, Default)]
 pub struct ChatRequest {
@@ -619,10 +708,8 @@ pub struct ChatRequest {
     pub max_tokens: Option<u32>,
     /// Optional tool definitions exposed to the model.
     pub tools: Option<Vec<ToolDefinition>>,
-    /// Controls how the model uses tools (OpenAI wire format).
-    /// Prefer [`ToolChoice`] for type-safe construction; convert via
-    /// [`ToolChoice::to_openai_value`] when building a [`ChatCompletionRequest`].
-    pub tool_choice: Option<String>,
+    /// 通用工具选择；各协议仅在适配边界转换wire形状。
+    pub tool_choice: Option<ToolChoice>,
     /// Optional structured output format hint.
     pub response_format: Option<ResponseFormat>,
     /// Optional reasoning-depth / "thinking" control.

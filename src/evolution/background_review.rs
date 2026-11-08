@@ -463,7 +463,7 @@ impl BackgroundReviewer {
 
         let request = crate::llm::ChatRequest {
             messages,
-            temperature: Some(0.0),
+            temperature: None,
             max_tokens: Some(512),
             ..Default::default()
         };
@@ -637,6 +637,23 @@ mod tests {
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     const PREFERENCE: &str = r#"{"decision":"candidate","kind":"user_preference","content":"The user prefers concise answers","evidence":"I prefer concise answers","confidence":0.98}"#;
+
+    #[tokio::test]
+    async fn implicit_temperature_is_absent_from_background_review() {
+        let client = Arc::new(MockLlmClient::new().with_response(r#"{"decision":"nothing"}"#));
+        let result = BackgroundReviewer::run_review(
+            client.clone(),
+            None,
+            ReviewIdentity::for_run("temperature-test"),
+            "observed".into(),
+            "request".into(),
+            "review".into(),
+            false,
+        )
+        .await;
+        assert!(result.error.is_none());
+        assert_eq!(client.all_temperatures(), vec![None]);
+    }
 
     struct DropProbe(Arc<AtomicBool>);
 

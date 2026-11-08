@@ -30,8 +30,11 @@
 mod cron_task;
 mod runner;
 
-pub use cron_task::{CronTask, CronTaskStatus, CronTaskStore};
+pub use cron_task::{CronTask, CronTaskEdit, CronTaskStatus, CronTaskStore, SchedulerEditError};
 pub use runner::{
-    FireFn, OccurrenceFireFn, SchedulerHandle, SchedulerInvocation, SchedulerRunner,
-    SchedulerTrigger,
+    FireFn, OccurrenceFireFn, SCHEDULER_HISTORY_DEFAULT_LIMIT, SCHEDULER_HISTORY_MAX_LIMIT,
+    SchedulerCommitOutcome, SchedulerHandle, SchedulerHistoryCursor, SchedulerHistoryEvent,
+    SchedulerHistoryPage, SchedulerHistoryReadError, SchedulerHistoryRecord, SchedulerInvocation,
+    SchedulerJournalFailure, SchedulerManualCause, SchedulerManualError, SchedulerManualReceipt,
+    SchedulerOccurrenceRef, SchedulerOccurrenceSnapshot, SchedulerRunner, SchedulerTrigger,
 };

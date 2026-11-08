@@ -67,6 +67,51 @@ that history remains real messages rather than prompt text.
 
 ## Usage
 
+### Host admission of the actual registration
+
+The registry can apply a fallible host check before a Subagent's user factory,
+model or background work starts. It checks the exact definition/executable
+record that the original dispatcher will consume; lifecycle hooks remain
+observational. Install the callback before publishing the registry:
+
+```rust,ignore
+#[async_trait::async_trait]
+impl SubagentRegistrationAdmission for HostAdmission {
+    async fn admit(
+        &self,
+        registration: &SubagentRegistration,
+        request: &DispatchRequest,
+    ) -> echo_agent::error::Result<()> {
+        self.check_actual_role(registration.definition(), request.runtime_context.as_ref())
+    }
+}
+registry.set_registration_admission(Some(Arc::new(host_admission))).await;
+```
+
+The callback receives the original invocation's run context and resource
+guards. Application-specific provider/version rules belong in that callback;
+the framework does not infer a persistent version from a name or revision.
+No callback preserves dynamic registration and normal General self-extension.
+
+`resolve_registration(name)` does not instantiate an Agent. If a caller needs
+definition-based routing, pass that same handle to `dispatch_registered` or
+`dispatch_background_registered`; both still apply host admission and reject
+foreign-registry/target handles. Ordinary by-name dispatch also resolves and
+checks once. Sync, Fork, Teammate, Team members, retries and alternate targets
+consume their actual selected record. An admitted background first attempt
+is not checked a second time after spawning; its retries are checked anew.
+
+Concurrent replacement/removal only changes later selections. In-flight work
+uses its original factory or pre-built Agent and never fills a replacement
+record's cache. `revision()` is diagnostic within one registry and
+`is_same_registration` compares actual process-local records. Neither is a
+durable plugin content/version identity. Raw `get_agent`/`create_fresh_agent`
+are construction APIs, not substitutes for policy-bearing dispatch. See
+[ADR 0097](../adr/0097-subagent-registration-admission.md) and the executable
+`demo50_subagent_communication` for a concrete host callback.
+
+### Compose and execute Agents
+
 ```rust
 use echo_agent::prelude::*;
 use echo_agent::tools::others::math::{AddTool, MultiplyTool};
@@ -135,6 +180,42 @@ Every path first calls the configured `SubagentPromptCompiler`:
 `InheritStructured` keeps only provider-safe user messages and complete
 assistant final messages; system prompts, tool calls/results, reasoning, and
 runtime projections are excluded.
+
+### Invocation tool scope
+
+A nonempty `SubagentContext.allowed_tools` is a hard upper bound for the
+actual invocation, independent of Fresh or inherited conversation context.
+Sync, Fork, Teammate and concrete Team members apply it to both model-visible
+schemas and the original tool execution pipeline. `None` and `Some([])` keep
+the historical no-additional-whitelist meaning; a nonempty bound with zero
+matches in a new role still excludes all that role's tools.
+
+`agent_tool` carries the invoking `ToolContext`'s hard **available** catalog
+through the original context. It does not infer permission from shared
+registered tools or from the smaller first-turn visible set. Descendants can
+only narrow this bound; a role change, Fresh mode or tool-search activation
+cannot recover an excluded tool. A cached call outside the hard scope is
+rejected before creating a child. Independent framework calls without such a
+context retain their existing behavior. Applications continue to own depth
+settings and run policy; see [ADR 0094](../adr/0094-subagent-tool-boundary-inheritance.md).
+
+Programmatic callers can carry the same nonempty positive upper bound in
+`AgentInvocationContext.allowed_tools: Option<HashSet<String>>`. The Agent
+intersects it with the current registered catalog after acquiring its original
+execution lock. Tools added while a turn waits cannot widen that invocation.
+`visible_tools` only selects initial schemas within the hard scope; an absent
+or empty `allowed_tools` set adds no whitelist. Exhaustive Rust invocation
+literals must supply the new optional field or use `..Default::default()`.
+
+Every concrete Subagent invocation also carries the request's **target actor**
+delegation policy. The executor copies it without advancing another level;
+the real dispatch edge owns `child_policy`. An explicitly nondelegating or
+exhausted actor excludes `agent_tool` from the original available/eligible
+catalog, model schemas, search and actual execution. `None` keeps the generic
+framework fallback; applications choose their own depth policy. A separate
+focused batch exercised these target-policy paths in real model requests and
+tool contexts, including the generic maximum 4 control. This framework result
+does not qualify application GUI configuration, run recovery or full features.
 
 ```
 main_agent.execute("...")

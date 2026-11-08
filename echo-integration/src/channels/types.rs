@@ -7,7 +7,7 @@ pub use echo_core::error::ReactError;
 use echo_core::error::Result;
 use futures::stream::{BoxStream, StreamExt};
 use std::sync::{Arc, Mutex, MutexGuard};
-use tokio::sync::Notify;
+use tokio::sync::{Notify, oneshot, watch};
 
 // ── Chat Type ────────────────────────────────────────────────────────────────
 
@@ -448,6 +448,13 @@ pub trait MessageHandler: Send + Sync {
         false
     }
 
+    /// Observe work retained by the original handler after its admission
+    /// stream has returned. This prevents idle expiration from retiring a
+    /// still-active durable pump; it does not create a queue or own its state.
+    fn has_pending_work(&self) -> bool {
+        false
+    }
+
     /// Run one stream with the owning session's cancellation lifetime.
     async fn handle_stream_with_cancel<'a>(
         &'a self,
@@ -456,6 +463,68 @@ pub trait MessageHandler: Send + Sync {
     ) -> Result<BoxStream<'a, Result<OutboundMessage>>> {
         self.handle_stream(msg).await
     }
+
+    /// Bind the original durable host to one transport service lifetime.
+    ///
+    /// The host must stop new claims when this child is cancelled and retain
+    /// its original physical work until `close` settles it. Binding must fail
+    /// for unsupported, already bound or closed handlers, without running a
+    /// legacy invocation as a capability probe. Cancelling this child never
+    /// cancels its transport parent.
+    fn bind_durable_ingress(&self, _service_cancel: CancellationToken) -> Result<()> {
+        Err(ReactError::Channel(Box::new(ChannelError::Other(
+            "handler does not support durable channel ingress ownership".to_string(),
+        ))))
+    }
+
+    /// Admit through the original durable input/control authority, without
+    /// returning or waiting for a response stream, claim slot or model result.
+    ///
+    /// The host owns queued DATA and its bounded claimed driver/renderers;
+    /// publishing a receipt must not leave a per-input output waiter behind.
+    /// Return only when this admission call's own effects have settled, also
+    /// after cancellation. Returning, failing or dropping a publisher is never
+    /// an acknowledgement; only the original authority publishes its fact.
+    async fn admit_with_ingress(
+        &self,
+        _msg: InboundMessage,
+        _cancel: CancellationToken,
+        _receipt: ChannelIngressReceipt,
+    ) -> Result<()> {
+        Err(ReactError::Channel(Box::new(ChannelError::Other(
+            "handler does not support durable channel ingress ownership".to_string(),
+        ))))
+    }
+}
+
+/// Facts owned by the existing input or control journal, never by a transport.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChannelIngressDisposition {
+    DurableInput,
+    ControlHandled,
+    TerminalRejected,
+    /// The control owner durably retains an uncertain effect and forbids
+    /// replay. This releases the transport cursor without claiming success.
+    ControlRecoveryRequired,
+}
+
+/// One invocation's process-local observer of its original admission fact.
+/// Dropping it without publishing leaves admission unknown.
+#[derive(Debug)]
+pub struct ChannelIngressReceipt(oneshot::Sender<ChannelIngressDisposition>);
+
+impl ChannelIngressReceipt {
+    pub fn publish(self, disposition: ChannelIngressDisposition) -> bool {
+        self.0.send(disposition).is_ok()
+    }
+}
+
+pub fn channel_ingress_receipt() -> (
+    ChannelIngressReceipt,
+    oneshot::Receiver<ChannelIngressDisposition>,
+) {
+    let (sender, receiver) = oneshot::channel();
+    (ChannelIngressReceipt(sender), receiver)
 }
 
 /// Channel capability description
@@ -467,6 +536,115 @@ pub struct ChannelCapabilities {
     pub supports_media: bool,
     /// Whether topics/threads are supported
     pub supports_threads: bool,
+}
+
+/// Latest fact observed by the original transport, not a connection controller.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChannelTransportPhase {
+    Stopped,
+    Connecting,
+    Ready,
+    Disconnected,
+    Failed,
+    Unknown,
+}
+
+/// What a transport actually confirmed. Local listening does not prove that a
+/// platform can reach the listener, and none of these facts proves delivery.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChannelTransportEvidence {
+    QqSessionReady,
+    QqSessionResumed,
+    FeishuWebSocketHandshake,
+    LocalWebhookListener,
+    WeixinAuthenticatedPoll,
+}
+
+/// A latest-value observation. It neither admits work nor schedules retries.
+/// Errors published by built-in adapters are redacted before entering the watch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChannelTransportSnapshot {
+    pub phase: ChannelTransportPhase,
+    pub evidence: Option<ChannelTransportEvidence>,
+    pub last_error: Option<String>,
+    pub observed_at: std::time::SystemTime,
+}
+
+impl ChannelTransportSnapshot {
+    pub fn unknown() -> Self {
+        Self::new(ChannelTransportPhase::Unknown, None, None)
+    }
+
+    pub(crate) fn new(
+        phase: ChannelTransportPhase,
+        evidence: Option<ChannelTransportEvidence>,
+        last_error: Option<String>,
+    ) -> Self {
+        Self {
+            phase,
+            evidence,
+            last_error,
+            observed_at: std::time::SystemTime::now(),
+        }
+    }
+}
+
+/// Private publisher retained by the existing adapter and its own transport
+/// loop. Replacing it at start closes the old generation's observation source.
+#[derive(Clone)]
+pub(crate) struct TransportStatus(watch::Sender<ChannelTransportSnapshot>);
+
+impl TransportStatus {
+    pub(crate) fn new(phase: ChannelTransportPhase) -> Self {
+        Self(watch::channel(ChannelTransportSnapshot::new(phase, None, None)).0)
+    }
+
+    pub(crate) fn subscribe(&self) -> watch::Receiver<ChannelTransportSnapshot> {
+        self.0.subscribe()
+    }
+
+    pub(crate) fn publish(
+        &self,
+        phase: ChannelTransportPhase,
+        evidence: Option<ChannelTransportEvidence>,
+        error: Option<String>,
+    ) {
+        // send_replace retains the latest fact even while no page subscribes.
+        self.0
+            .send_replace(ChannelTransportSnapshot::new(phase, evidence, error));
+    }
+
+    pub(crate) fn task_guard(&self) -> TransportTaskObservation {
+        TransportTaskObservation {
+            status: self.clone(),
+            finished: false,
+        }
+    }
+}
+
+/// Abnormal transport future destruction must not leave a historical Ready
+/// value looking live. Normal stop publishes Stopped only after original joins.
+pub(crate) struct TransportTaskObservation {
+    status: TransportStatus,
+    finished: bool,
+}
+
+impl TransportTaskObservation {
+    pub(crate) fn finish(&mut self) {
+        self.finished = true;
+    }
+}
+
+impl Drop for TransportTaskObservation {
+    fn drop(&mut self) {
+        if !self.finished {
+            self.status.publish(
+                ChannelTransportPhase::Unknown,
+                None,
+                Some("transport task ended without a settlement observation".into()),
+            );
+        }
+    }
 }
 
 /// Unified interface for IM channel plugins
@@ -492,6 +670,14 @@ pub trait ChannelPlugin: Send + Sync {
     /// Send a message
     async fn send(&self, msg: OutboundMessage) -> Result<()>;
 
+    /// Subscribe to facts from this adapter's current start generation.
+    /// None means observations are unsupported/unknown, never implicitly Ready.
+    /// Dropping a receiver must not stop the transport. A closed watch is not a
+    /// successful stop receipt; owners still explicitly await stop.
+    fn transport_status(&self) -> Option<watch::Receiver<ChannelTransportSnapshot>> {
+        None
+    }
+
     /// Health check — verifies whether the channel is in normal working state.
     ///
     /// Returns Ok(()) by default; subclasses may override to perform more
@@ -516,6 +702,48 @@ impl ChannelContext {
 mod tests {
     use super::*;
     use futures::StreamExt;
+
+    #[test]
+    fn transport_observation_retains_latest_without_a_receiver() {
+        let status = TransportStatus::new(ChannelTransportPhase::Connecting);
+        status.publish(
+            ChannelTransportPhase::Ready,
+            Some(ChannelTransportEvidence::LocalWebhookListener),
+            None,
+        );
+        assert_eq!(
+            status.subscribe().borrow().evidence,
+            Some(ChannelTransportEvidence::LocalWebhookListener)
+        );
+    }
+
+    #[test]
+    fn transport_task_drop_is_unknown_and_a_new_source_ignores_old_publishers() {
+        let old = TransportStatus::new(ChannelTransportPhase::Connecting);
+        old.publish(
+            ChannelTransportPhase::Ready,
+            Some(ChannelTransportEvidence::QqSessionReady),
+            None,
+        );
+        let old_receiver = old.subscribe();
+        let current = TransportStatus::new(ChannelTransportPhase::Connecting);
+        let receiver = current.subscribe();
+        old.publish(
+            ChannelTransportPhase::Ready,
+            Some(ChannelTransportEvidence::QqSessionResumed),
+            None,
+        );
+        assert_eq!(receiver.borrow().phase, ChannelTransportPhase::Connecting);
+        assert_eq!(
+            old_receiver.borrow().evidence,
+            Some(ChannelTransportEvidence::QqSessionResumed)
+        );
+        {
+            let _guard = current.task_guard();
+        }
+        assert_eq!(receiver.borrow().phase, ChannelTransportPhase::Unknown);
+        assert!(receiver.borrow().last_error.is_some());
+    }
 
     /// 只 impl `handle` 的 dummy handler —— 验证默认 `handle_stream` 行为。
     struct OnceHandler {

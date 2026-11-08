@@ -72,6 +72,9 @@ jobs:
           cache-targets: "false"
       - name: Test default feature surface
         run: cargo test ${{ matrix.packages }} --lib --tests --locked
+      - name: 编译入门文档片段
+        if: matrix.group == 'learning'
+        run: cargo test -p echo-agent-learning --doc --locked
 
   windows-check:
     runs-on: windows-latest

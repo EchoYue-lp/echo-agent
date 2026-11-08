@@ -192,7 +192,7 @@ impl WorkflowDefinition {
         self.build_graph_with(llm_config, None)
     }
 
-    /// Build Graph with an explicit [`LlmClient`] injection: agent nodes
+    /// Build Graph with an explicit [`LlmClient`](crate::llm::LlmClient) injection: agent nodes
     /// reuse a caller-owned client (for example the Session Agent's own
     /// provider) instead of constructing one from configuration.
     pub fn build_graph_with_client(

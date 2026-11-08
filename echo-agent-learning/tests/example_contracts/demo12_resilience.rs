@@ -131,9 +131,10 @@ impl AgentCallback for SimpleLog {
             println!("  [{}] 🔄 迭代 {}", self.label, iteration + 1);
         })
     }
-    fn on_tool_start<'a>(
+    fn on_tool_start_with_id<'a>(
         &'a self,
         _agent: &'a str,
+        _call_id: &'a str,
         tool: &'a str,
         args: &'a Value,
     ) -> futures::future::BoxFuture<'a, ()> {
@@ -146,9 +147,10 @@ impl AgentCallback for SimpleLog {
             );
         })
     }
-    fn on_tool_end<'a>(
+    fn on_tool_end_with_id<'a>(
         &'a self,
         _agent: &'a str,
+        _call_id: &'a str,
         tool: &'a str,
         result: &'a str,
     ) -> futures::future::BoxFuture<'a, ()> {
@@ -161,9 +163,10 @@ impl AgentCallback for SimpleLog {
             );
         })
     }
-    fn on_tool_error<'a>(
+    fn on_tool_error_with_id<'a>(
         &'a self,
         _agent: &'a str,
+        _call_id: &'a str,
         tool: &'a str,
         err: &'a ReactError,
     ) -> futures::future::BoxFuture<'a, ()> {
@@ -231,11 +234,7 @@ async fn demo_feedback_on() -> echo_agent::error::Result<()> {
                 r#"{"input":"trigger failure"}"#,
             )
             .then_tool_call("call_add_once", "add", r#"{"a":3,"b":4}"#)
-            .then_tool_call(
-                "call_final_answer",
-                "final_answer",
-                r#"{"answer":"broken_tool 失败后已自动改用 add，结果是 7。"}"#,
-            ),
+            .with_response(r###"broken_tool 失败后已自动改用 add，结果是 7。"###),
     );
 
     let mut agent = ReactAgentBuilder::new()
@@ -273,11 +272,7 @@ async fn demo_flaky_tool() -> echo_agent::error::Result<()> {
             .then_tool_call("call_weather_1", "weather_api", r#"{"city":"北京"}"#)
             .then_tool_call("call_weather_2", "weather_api", r#"{"city":"北京"}"#)
             .then_tool_call("call_weather_3", "weather_api", r#"{"city":"北京"}"#)
-            .then_tool_call(
-                "call_final_answer",
-                "final_answer",
-                r#"{"answer":"北京天气查询已在偶发故障后恢复成功：北京：晴，26°C"}"#,
-            ),
+            .with_response(r###"北京天气查询已在偶发故障后恢复成功：北京：晴，26°C"###),
     );
 
     let mut agent = ReactAgentBuilder::new()

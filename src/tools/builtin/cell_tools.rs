@@ -41,11 +41,7 @@ impl Tool for WaitCellTool {
     }
 
     fn description(&self) -> &str {
-        "Long-poll a background command cell (from shell with background=true). Returns when the command \
-         finishes, produces new output, or the yield budget expires. Pass the previously returned \
-         next_cursor as cursor to continue reading incremental output. A terminal cell can still have \
-         unread capped output, so keep draining while next_cursor is below output bytes. \
-         yield_time_ms=0 is a non-blocking status check."
+        "Long-poll a shell(background=true) cell until exit/new output/yield timeout. Resume at next_cursor; drain capped output after exit to byte count. yield_time_ms=0: nonblocking check."
     }
 
     fn parameters(&self) -> Value {
@@ -54,15 +50,15 @@ impl Tool for WaitCellTool {
             "properties": {
                 "cell_id": {
                     "type": "string",
-                    "description": "The cell ID returned by the background shell launch"
+                    "description": "Background-shell cell ID."
                 },
                 "cursor": {
                     "type": "integer",
-                    "description": "Byte cursor from the previous wait's next_cursor (0 for the first call)"
+                    "description": "Byte next_cursor; initially 0."
                 },
                 "yield_time_ms": {
                     "type": "integer",
-                    "description": "How long to wait for progress before returning (default 30000, max 3600000)"
+                    "description": "Wait ms; default 30000, max 3600000."
                 }
             },
             "required": ["cell_id"]

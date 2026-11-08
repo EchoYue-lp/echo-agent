@@ -285,7 +285,7 @@ impl VisibilityHorizonCompressor {
                 // Count user turns after this group
                 let user_turns_after = messages[result_end..]
                     .iter()
-                    .filter(|m| m.role == Role::User)
+                    .filter(|m| super::compressor::sliding_window::is_user_request(m))
                     .count();
 
                 groups.push(ToolGroup {
@@ -430,11 +430,30 @@ mod tests {
     use echo_core::llm::types::ToolCall;
     use echo_core::tokenizer::HeuristicTokenizer;
 
+    #[test]
+    fn runtime_snapshots_do_not_advance_user_turn_horizon() {
+        let mut context = crate::compression::ContextManager::builder(4096).build();
+        context.push(Message::user("original request".into()));
+        context.push(assistant_with_tools(&[("call", "read")]));
+        context.push(tool_result("call", "read", "original result"));
+        for version in 0..10 {
+            context.append_versioned_projection(
+                "state",
+                version.to_string(),
+                Some(Message::user("facts".into())),
+            );
+        }
+        let horizon = VisibilityHorizonCompressor::new(VisibilityHorizonConfig::default());
+        let groups = horizon.identify_tool_groups(context.messages(), &HeuristicTokenizer);
+        assert!(groups.iter().all(|group| group.user_turns_after == 0));
+    }
+
     /// Helper: create an assistant message with tool_calls.
     fn assistant_with_tools(calls: &[(&str, &str)]) -> Message {
         let tool_calls: Vec<ToolCall> = calls
             .iter()
             .map(|(id, name)| ToolCall {
+                provider_source: None,
                 id: id.to_string(),
                 call_type: "function".to_string(),
                 function: echo_core::llm::types::FunctionCall {

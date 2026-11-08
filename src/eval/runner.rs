@@ -1101,6 +1101,37 @@ mod tests {
         Ok(())
     }
 
+    fn eval_source_status(
+        execution: &str,
+        kind: echo_core::agent::ExecutionStatusKind,
+        sequence: u64,
+    ) -> AgentEvent {
+        AgentEvent::ExecutionStatus(echo_core::agent::ExecutionStatus {
+            adapter_generated: false,
+            execution_id: execution.to_string(),
+            request_id: Some("eval-fixture-response".into()),
+            sequence,
+            phase: if kind == echo_core::agent::ExecutionStatusKind::Started {
+                echo_core::agent::AgentPhase::Thinking
+            } else {
+                echo_core::agent::AgentPhase::Terminal
+            },
+            status: kind,
+            reason: None,
+        })
+    }
+    fn eval_source_execution(invocation: &AgentInvocationContext) -> crate::error::Result<String> {
+        invocation
+            .runtime
+            .as_ref()
+            .and_then(|runtime| runtime.execution_id.clone())
+            .ok_or_else(|| {
+                crate::error::ReactError::Other(
+                    "eval invocation omitted original execution identity".into(),
+                )
+            })
+    }
+
     struct WorkspaceRecordingAgent {
         cwd_tx: tokio::sync::mpsc::UnboundedSender<PathBuf>,
         release: Option<Arc<tokio::sync::Notify>>,
@@ -1159,12 +1190,6 @@ mod tests {
             self.run_id = Some(run_id.to_string());
             self
         }
-
-        fn final_stream<'a>() -> futures::stream::BoxStream<'a, crate::error::Result<AgentEvent>> {
-            Box::pin(futures::stream::once(async {
-                Ok(AgentEvent::FinalAnswer("done".to_string()))
-            }))
-        }
     }
 
     impl Agent for WorkspaceRecordingAgent {
@@ -1184,26 +1209,9 @@ mod tests {
             self.run_id.clone()
         }
 
-        fn execute<'a>(
+        fn execute_stream_message_with_invocation_context<'a>(
             &'a self,
-            _task: &'a str,
-        ) -> futures::future::BoxFuture<'a, crate::error::Result<String>> {
-            Box::pin(async { Ok("done".to_string()) })
-        }
-
-        fn execute_stream<'a>(
-            &'a self,
-            _task: &'a str,
-        ) -> futures::future::BoxFuture<
-            'a,
-            crate::error::Result<futures::stream::BoxStream<'a, crate::error::Result<AgentEvent>>>,
-        > {
-            Box::pin(async { Ok(Self::final_stream()) })
-        }
-
-        fn execute_stream_with_invocation_context<'a>(
-            &'a self,
-            _task: &'a str,
+            message: crate::llm::types::Message,
             _cancel: CancellationToken,
             invocation: AgentInvocationContext,
         ) -> futures::future::BoxFuture<
@@ -1211,7 +1219,8 @@ mod tests {
             crate::error::Result<futures::stream::BoxStream<'a, crate::error::Result<AgentEvent>>>,
         > {
             Box::pin(async move {
-                let cwd = invocation.working_dir.ok_or_else(|| {
+                let execution = eval_source_execution(&invocation)?;
+                let cwd = invocation.working_dir.clone().ok_or_else(|| {
                     crate::error::ReactError::Other(
                         "eval invocation did not contain a working directory".to_string(),
                     )
@@ -1229,7 +1238,16 @@ mod tests {
                         "forced typed Agent error".to_string(),
                     ));
                 }
-                Ok(Self::final_stream())
+                Ok(Box::pin(async_stream::stream! {
+                    let _retained_input_and_resources = (message, invocation);
+                    yield Ok(eval_source_status(&execution, echo_core::agent::ExecutionStatusKind::Started, 0));
+                    yield Ok(AgentEvent::FinalAnswer("done".into()));
+                    yield Ok(eval_source_status(&execution, echo_core::agent::ExecutionStatusKind::Settled, 1));
+                })
+                    as futures::stream::BoxStream<
+                        'a,
+                        crate::error::Result<AgentEvent>,
+                    >)
             })
         }
     }
@@ -1247,26 +1265,9 @@ mod tests {
             "settle after cancellation"
         }
 
-        fn execute<'a>(
+        fn execute_stream_message_with_invocation_context<'a>(
             &'a self,
-            _task: &'a str,
-        ) -> futures::future::BoxFuture<'a, crate::error::Result<String>> {
-            Box::pin(async { Ok("done".to_string()) })
-        }
-
-        fn execute_stream<'a>(
-            &'a self,
-            _task: &'a str,
-        ) -> futures::future::BoxFuture<
-            'a,
-            crate::error::Result<futures::stream::BoxStream<'a, crate::error::Result<AgentEvent>>>,
-        > {
-            Box::pin(async { Ok(WorkspaceRecordingAgent::final_stream()) })
-        }
-
-        fn execute_stream_with_invocation_context<'a>(
-            &'a self,
-            _task: &'a str,
+            message: crate::llm::types::Message,
             cancel: CancellationToken,
             invocation: AgentInvocationContext,
         ) -> futures::future::BoxFuture<
@@ -1275,7 +1276,8 @@ mod tests {
         > {
             Box::pin(async move {
                 self.stream_invocations.fetch_add(1, Ordering::AcqRel);
-                let cwd = invocation.working_dir.ok_or_else(|| {
+                let execution = eval_source_execution(&invocation)?;
+                let cwd = invocation.working_dir.clone().ok_or_else(|| {
                     crate::error::ReactError::Other(
                         "eval invocation did not contain a working directory".to_string(),
                     )
@@ -1286,6 +1288,8 @@ mod tests {
                     )
                 })?;
                 let stream = async_stream::try_stream! {
+                    let _retained_input_and_resources = (message, invocation);
+                    yield eval_source_status(&execution, echo_core::agent::ExecutionStatusKind::Started, 0);
                     cancel.cancelled().await;
                     std::fs::write(cwd.join("cancel-settled.marker"), "settled")
                         .map_err(crate::error::ReactError::from)?;
@@ -1293,8 +1297,14 @@ mod tests {
                         let _ = settled.send(());
                     }
                     match self.terminal_answer.as_ref() {
-                        Some(answer) => yield AgentEvent::FinalAnswer(answer.clone()),
-                        None => yield AgentEvent::Cancelled,
+                        Some(answer) => {
+                            yield AgentEvent::FinalAnswer(answer.clone());
+                            yield eval_source_status(&execution, echo_core::agent::ExecutionStatusKind::Settled, 1);
+                        }
+                        None => {
+                            yield AgentEvent::Cancelled;
+                            yield eval_source_status(&execution, echo_core::agent::ExecutionStatusKind::Cancelled, 1);
+                        }
                     }
                 };
                 let stream: futures::stream::BoxStream<'a, crate::error::Result<AgentEvent>> =
@@ -1421,7 +1431,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn eval_result_uses_the_real_trace_id_not_the_legacy_product_run() -> Result<(), String> {
+    async fn eval_result_uses_real_trace_id_and_value_scoped_eval_correlation() -> Result<(), String>
+    {
         use crate::agent::ReactAgentBuilder;
         use crate::testing::MockLlmClient;
         use crate::trace::{InMemoryRunStore, RunStore};
@@ -1442,10 +1453,7 @@ mod tests {
             .build()
             .map_err(|error| error.to_string())?;
         agent.set_run_store(store.clone());
-        agent.set_external_context(&crate::tools::ExternalRunContext {
-            run_id: Some("product-run".to_string()),
-            ..crate::tools::ExternalRunContext::default()
-        });
+        let idle_identity = agent.current_run_id();
         let runner = EvalRunner::new(parent.path().join("runs")).with_run_store(store.clone());
         let case = workspace_case("trace-correlation", None);
 
@@ -1454,9 +1462,6 @@ mod tests {
             .run_id
             .as_deref()
             .ok_or_else(|| "EvalResult did not return a trace run ID".to_string())?;
-        if trace_run_id == "product-run" {
-            return Err("EvalResult exposed the product run as a trace run".to_string());
-        }
         let trace = store
             .load(trace_run_id)
             .await
@@ -1467,7 +1472,7 @@ mod tests {
             .as_deref()
             .ok_or_else(|| "real trace did not retain the Eval correlation".to_string())?;
         if trace.run_id != trace_run_id
-            || correlation_id == "product-run"
+            || trace_run_id == correlation_id
             || !correlation_id.starts_with("eval-")
             || trace.turn_id.as_deref() != Some(correlation_id)
             || trace.execution_id.as_deref() != Some(correlation_id)
@@ -1478,8 +1483,10 @@ mod tests {
                 "EvalResult and trace metrics did not use the real invocation trace".into(),
             );
         }
-        if agent.current_run_id().as_deref() != Some("product-run") {
-            return Err("Eval mutated the Agent product run identity".to_string());
+        if agent.current_run_id() != idle_identity {
+            return Err(
+                "Eval left its value-scoped identity installed on the idle Agent".to_string(),
+            );
         }
         Ok(())
     }

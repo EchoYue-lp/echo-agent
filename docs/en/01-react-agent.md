@@ -8,7 +8,7 @@ ReAct (**Re**asoning + **Act**ing) is the most widely adopted Agent execution pa
 Thought (reasoning) → Action (tool call) → Observation (result)
 ```
 
-This loop repeats until the LLM determines the task is complete and calls the `final_answer` tool.
+完整原生响应形成候选后，继续经 Guard/Critic、Stop Hook、持久化和执行 owner 结算；消息 phase 不直接结束运行。
 
 `ReactAgent` is the core implementation in echo-agent. It integrates tool management, memory, context compression, human-in-the-loop, Subagent orchestration, and streaming output into a single cohesive structure.
 
@@ -22,7 +22,7 @@ ReAct solves:
 - **Reasoning-action separation**: LLM thinks before acting, enabling arbitrarily complex tasks
 - **Tool invocation**: Execute code, query databases, call APIs
 - **Iterative error correction**: Adjust strategy when tools return errors
-- **Chain-of-Thought**: Naturally produces a traceable reasoning trail for debugging
+- **原生消息**：分别保留 provider reasoning 与普通 assistant 正文，不把普通文字推断为 thinking
 
 ---
 
@@ -41,15 +41,15 @@ execute(task)
           ├─ llm.chat()            ← call LLM
           │
           ├─ Parse response:
-          │     ├─ content present → Token event (CoT reasoning text)
+          │     ├─ assistant blocks → 按原 phase 分别保留 reasoning 与正文
           │     └─ tool_calls      → tool call list
           │
           ├─ Execute all tool calls in parallel:
           │     ├─ Human approval check (if tool is marked)
           │     ├─ ToolManager.execute_tool()
-          │     └─ Fire on_tool_start / on_tool_end callbacks
+          │     └─ Fire on_tool_start_with_id / on_tool_end_with_id callbacks
           │
-          ├─ final_answer called → return result, exit loop
+          ├─ 原生最终候选 → 校验/Stop/持久化/结算
           │
           └─ Append assistant + tool_results messages to context
 
@@ -75,7 +75,6 @@ AgentConfig::new("qwen3-max", "my_agent", "You are a helpful assistant")
     .enable_subagent(true)      // enable Subagent dispatch (Orchestrator mode)
     .enable_memory(true)        // enable approved Store recall/search; manager adds writes
     .enable_human_in_loop(true) // enable human approval gate
-    .enable_cot(true)           // enable Chain-of-Thought prompt injection (Builder default: true)
     .session_id("thread-001")   // logical run-grouping label
     .conversation_id("conv-001")// transcript ID, also keys RuntimeStateStore restore
     .token_limit(8192)          // context token limit (auto-compress when exceeded)
@@ -148,16 +147,16 @@ impl AgentCallback for MyCallback {
         })
     }
 
-    fn on_tool_start<'a>(&'a self, agent: &'a str, tool: &'a str, args: &'a Value) -> BoxFuture<'a, ()> {
+    fn on_tool_start_with_id<'a>(&'a self, agent: &'a str, call_id: &'a str, tool: &'a str, args: &'a Value) -> BoxFuture<'a, ()> {
         Box::pin(async move {
-            println!("[{}] Calling tool: {} {:?}", agent, tool, args);
+            println!("[{}] 调用工具: {} call_id={call_id} {:?}", agent, tool, args);
         })
     }
 
-    fn on_tool_end<'a>(&'a self, agent: &'a str, tool: &'a str, result: &'a str) -> BoxFuture<'a, ()> {
+    fn on_tool_end_with_id<'a>(&'a self, agent: &'a str, call_id: &'a str, tool: &'a str, result: &'a str) -> BoxFuture<'a, ()> {
         Box::pin(async move {
             let preview: String = result.chars().take(80).collect();
-            println!("[{}] Tool result: {} -> {}", agent, tool, preview);
+            println!("[{}] 工具结果: {} call_id={call_id} -> {}", agent, tool, preview);
         })
     }
 
@@ -197,10 +196,10 @@ use std::sync::Arc;
 
 struct LogCallback;
 
-#[async_trait::async_trait]
-impl AgentCallback for LogCallback {
-    async fn on_tool_start(&self, agent: &str, tool: &str, args: &serde_json::Value) {
-        println!("  [{}] Calling {} args={}", agent, tool, args);
+#[echo_agent::callback]
+impl LogCallback {
+    async fn on_tool_start_with_id(&self, agent: &str, call_id: &str, tool: &str, args: &serde_json::Value) {
+        println!("  [{}] 调用工具 {} call_id={call_id} args={}", agent, tool, args);
     }
     async fn on_final_answer(&self, _agent: &str, answer: &str) {
         println!("Final answer: {}", answer);
@@ -233,12 +232,10 @@ See: `echo-agent-learning/examples/demo01_tools.rs`, `echo-agent-learning/exampl
 
 ## Design Notes
 
-**Why CoT text instead of a dedicated `think` tool?**
+**原生消息与控制工具退役**
 
-The old approach provided a `think` tool for the LLM to reason. The new approach appends `COT_INSTRUCTION` to the system prompt, letting the LLM output reasoning text in the `content` field before each tool call. Benefits:
-1. Reasoning content is naturally part of message history (context)
-2. Directly produces streaming Token events — UI can show thinking in real time
-3. Eliminates one round-trip tool call
+原生 reasoning 与 assistant 正文使用独立 typed 块；不再注册 Think/FinalAnswer 控制工具，也不注入工具前强制分析提示。普通文字不因同响应调用工具而成为 thinking；最终发布须经原 Guard/Critic/Stop、持久化与物理结算。这里的运行时结算不等于应用 TaskRun 或 Goal 已完成。块身份、来源、阶段、增量与运行时最后终态见[原生消息合同](../zh/43-native-message-execution.md)。
+
 
 **Parallel tool calls**
 

@@ -8,9 +8,9 @@ observed_at: 554f2f50d3705d219519f306055a3d26d6a5211c
 boundary_refs: [boundary.agent-session-turn]
 behavior_refs: [behavior.channel-handler-invocation, behavior.agent-turn-lifecycle]
 rule_refs: [rule.turn-terminal-authority, rule.context-persistence-separation]
-evidence_refs: [evidence.subagent-physical-settlement-repair, evidence.agent-context-execution, evidence.high-risk-audit-frontier, evidence.eval-timeout-turn-settlement-repair, evidence.eval-timeout-turn-settlement-verification, evidence.eval-trace-correlation-repair, evidence.eval-trace-correlation-verification, evidence.agent-adapter-close-settlement-repair, evidence.agent-adapter-close-settlement-verification, evidence.framework-concept-navigation]
-finding_refs: [finding.subagent-physical-settlement-observation, finding.turn-driver-entry-coverage, finding.agent-adapter-close-settlement, finding.eval-timeout-settlement, finding.eval-trace-identity]
-audit_refs: [audit.subagent-physical-settlement-focused-review, audit.channel-handler-invocation-rereview, audit.agent-session-turn.state-authority, audit.agent-adapter-close-settlement-rereview]
+evidence_refs: [evidence.subagent-physical-settlement-repair, evidence.agent-context-execution, evidence.high-risk-audit-frontier, evidence.eval-timeout-turn-settlement-repair, evidence.eval-timeout-turn-settlement-verification, evidence.eval-trace-correlation-repair, evidence.eval-trace-correlation-verification, evidence.agent-adapter-close-settlement-repair, evidence.agent-adapter-close-settlement-verification, evidence.framework-concept-navigation, evidence.native-control-retirement-before-source, evidence.native-control-retirement-observations, evidence.native-control-retained-contracts-equivalence]
+finding_refs: [finding.subagent-physical-settlement-observation, finding.turn-driver-entry-coverage, finding.agent-adapter-close-settlement, finding.eval-timeout-settlement, finding.eval-trace-identity, finding.native-control-tools-retirement]
+audit_refs: [audit.subagent-physical-settlement-focused-review, audit.channel-handler-invocation-rereview, audit.agent-session-turn.state-authority, audit.agent-adapter-close-settlement-rereview, audit.native-control-tools-retirement-rereview]
 related_map_refs: [map.context-memory, map.task-subagent-workflow, map.observation-persistence-delivery, map.protocol-surfaces]
 scenarios:
   channel-handler-forward-invocation:
@@ -57,6 +57,23 @@ scenarios:
 ---
 
 # Agent、Session、Invocation 与 Turn
+
+## 当前 Task 的原生输出消费者依据
+
+本段为当前 Task 增量，不改顶层历史 `observed_at`、原场景状态或开放问题。
+当前来源与导航场景独立记录于 `map.canonical-output-consumers`，不归入旧观察。
+`echo-core/src/agent/output_projection.rs` 的 `AgentOutputProjection`／`AssistantTextDelta`
+是 `src/agent/subagent/executor.rs` 与 `echo-orchestration/src/workflow/node.rs` 共用的纯投影，
+由 `docs/adr/0102-canonical-agent-consumers.md` 记录分层与选择，继续受
+`rule.turn-terminal-authority` 的原执行权威约束。它整理当前原生块、身份与精确去重，
+不拥有执行、取消、Store、重试或物理结算；不是第二个 runtime owner。
+
+完整 Message/history 与调用上下文沿原入口传递；runtime FinalAnswer 通知及回调保留。
+只有已验证的新 native terminal 能清理匹配 unknown，foreign unknown 仍优先；纯只读
+`terminal_failure` 将原取消类型／失败原因交给既有首因槽，尾部 cleanup 不得覆盖，
+原 source 仍须读到物理 EOF 后才能 `finish`。新增 Rust helper 的 SDK inventory／pin
+另验，不在这里声明跨语言 wire 或下游接受。当前 source／final 具名检查与 focused
+工程票各自保存，不使历史场景、旧45／外部#10／旧402成为已关闭。
 
 ## 能力范围
 
@@ -118,3 +135,51 @@ Channel forward当前本地三链闭合见audit.channel-handler-invocation-rerev
 原观察revision、needs_review与未闭路线不重标。本B增量由ADR0088及evidence.subagent-physical-settlement-repair的当前源码与独审承接：观察Unknown不是TurnReceipt/Task终态；原raw producer/Join、permit和资源不能由取消、logical terminal、socket或local task Drop代替。原Rule所述bounded reaper不能作为B当前强制释放策略。ACP close同receipt保Some原typed身份或无identity的None知识，同generation/repeat不重发；普通明确返回失败仍按原策略重试，真实close成功仍按原指针限定清理。完整gate/consumer/main与其它开放路线独立，不以本局部增量宣全域verified。
 
 Headless便利观察返回经私有owner投影保原HeadlessRunHandle，内部stored result无owner环；原5值/格式不变，不把Unknown文本视为物理关闭。可能取消等待且需后续保原authority者用start_headless持handle，销毁最后parent不是停止凭证；新增Rust构造器/getter不自动接受为语言API。
+
+
+## 两个控制工具退役的当前增量职责
+
+当前 `source:69225014cbf5d5b28fa8e8bff9fd368792c1ad199efbb8afb55b5b688f01ac5f`／发布 `590824d2…95188` 延续 ADR 0101 的唯一 ReAct 权威。
+`src/agent/react/run/processor.rs` 复用既有碎片累积器，携带 provider来源坐标；不是第二
+执行器。`src/tools/builtin/think.rs` 与 `src/tools/builtin/answer.rs` 是经具名批准删除的
+旧内置控制工具源码；其原件可由 Git `0e404185c8f252da3e335c35547e52249c74dc65` 恢复。
+替代能力为原生 reasoning/block 与同一循环的最终候选，原 Structured/Guard/Critic/Stop、
+持久化及物理结算保持权威。自定义同名工具继续按普通工具执行，不能按名称封锁。
+原 ReAct407包含完整43项native合同与“旧内置提案拒绝且不成功”负控，Legacy17包含
+两同名自定义工具正控；这证明指定保留合同和批准的surface退出，不宣称删除前后所有
+API/默认工具面等价，也不关闭本图其它 needs_review。正式删除finding/证据须另行绑定。
+
+
+## 两个具名控制工具退役的项目证明导航
+
+`finding.native-control-tools-retirement`仅处理已批准的两内置控制工具退出与限定保留合同。
+普通before Git来源、after原运行观察与限定等价Evidence分开，专项Audit保实际复核范围。
+导航不改变本图原observed_at/needs_review/unknown，不宣称全部API、旧wire或全source等价。
+source:692、发布5908与官方task摘要有各自身份；after绑定和完整来源门禁不能互相代替。
+
+
+## 当前保存切点具名删除的源码准入
+
+本段只补已批准A2A/LSP专用退出路径的事实关联，不更改本地图历史observed_at、
+scenarios、未知/needs_review或其它Finding。18源码before按Git0e4定位，当前不存在；
+原F30/Frame15审批、ADR0090/0101与当前whole workspace/Clippy原件分开保存。
+- `echo-agent-learning/examples/demo23_a2a.rs`：已批准具名专用源退出；保留通用Agent执行、ACP/MCP/channel、Subagent、Store及plugin generation的当前合同，非runtime全等声明。
+- `echo-agent-learning/tests/example_contracts/demo55_lsp_tools.rs`：已批准具名专用源退出；保留通用Agent执行、ACP/MCP/channel、Subagent、Store及plugin generation的当前合同，非runtime全等声明。
+- `echo-core/src/lsp/client.rs`：已批准具名专用源退出；保留通用Agent执行、ACP/MCP/channel、Subagent、Store及plugin generation的当前合同，非runtime全等声明。
+- `echo-core/src/lsp/mod.rs`：已批准具名专用源退出；保留通用Agent执行、ACP/MCP/channel、Subagent、Store及plugin generation的当前合同，非runtime全等声明。
+- `echo-core/src/lsp/types.rs`：已批准具名专用源退出；保留通用Agent执行、ACP/MCP/channel、Subagent、Store及plugin generation的当前合同，非runtime全等声明。
+- `echo-integration/src/lsp/client.rs`：已批准具名专用源退出；保留通用Agent执行、ACP/MCP/channel、Subagent、Store及plugin generation的当前合同，非runtime全等声明。
+- `echo-integration/src/lsp/config.rs`：已批准具名专用源退出；保留通用Agent执行、ACP/MCP/channel、Subagent、Store及plugin generation的当前合同，非runtime全等声明。
+- `echo-integration/src/lsp/jsonrpc.rs`：已批准具名专用源退出；保留通用Agent执行、ACP/MCP/channel、Subagent、Store及plugin generation的当前合同，非runtime全等声明。
+- `echo-integration/src/lsp/manager.rs`：已批准具名专用源退出；保留通用Agent执行、ACP/MCP/channel、Subagent、Store及plugin generation的当前合同，非runtime全等声明。
+- `echo-integration/src/lsp/mod.rs`：已批准具名专用源退出；保留通用Agent执行、ACP/MCP/channel、Subagent、Store及plugin generation的当前合同，非runtime全等声明。
+- `src/a2a/auth.rs`：已批准具名专用源退出；保留通用Agent执行、ACP/MCP/channel、Subagent、Store及plugin generation的当前合同，非runtime全等声明。
+- `src/a2a/client.rs`：已批准具名专用源退出；保留通用Agent执行、ACP/MCP/channel、Subagent、Store及plugin generation的当前合同，非runtime全等声明。
+- `src/a2a/mod.rs`：已批准具名专用源退出；保留通用Agent执行、ACP/MCP/channel、Subagent、Store及plugin generation的当前合同，非runtime全等声明。
+- `src/a2a/serve.rs`：已批准具名专用源退出；保留通用Agent执行、ACP/MCP/channel、Subagent、Store及plugin generation的当前合同，非runtime全等声明。
+- `src/a2a/server.rs`：已批准具名专用源退出；保留通用Agent执行、ACP/MCP/channel、Subagent、Store及plugin generation的当前合同，非runtime全等声明。
+- `src/a2a/types.rs`：已批准具名专用源退出；保留通用Agent执行、ACP/MCP/channel、Subagent、Store及plugin generation的当前合同，非runtime全等声明。
+- `src/lsp.rs`：已批准具名专用源退出；保留通用Agent执行、ACP/MCP/channel、Subagent、Store及plugin generation的当前合同，非runtime全等声明。
+- `src/tools/builtin/answer.rs`：已批准具名专用源退出；保留通用Agent执行、ACP/MCP/channel、Subagent、Store及plugin generation的当前合同，非runtime全等声明。
+- `src/tools/builtin/think.rs`：已批准具名专用源退出；保留通用Agent执行、ACP/MCP/channel、Subagent、Store及plugin generation的当前合同，非runtime全等声明。
+- `src/tools/lsp.rs`：已批准具名专用源退出；保留通用Agent执行、ACP/MCP/channel、Subagent、Store及plugin generation的当前合同，非runtime全等声明。

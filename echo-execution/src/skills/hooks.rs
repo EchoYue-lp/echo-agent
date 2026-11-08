@@ -503,12 +503,21 @@ tokio::task_local! {
 
 // ── Hook Registry ──────────────────────────────────────────────────────
 
+// Transparent shorthand for the existing ordered-origin tuple, not a new
+// HookSource identity or serialized contract.
+type HookOrigin = (
+    HooksDefinition,
+    String,
+    Option<Arc<dyn SandboxExecutor>>,
+    bool,
+);
+
 /// Registry of hooks from all sources (skills and user config).
 // Manual Clone keeps the type-erased runtime callbacks attached to snapshots.
 #[derive(Default)]
 pub struct HookRegistry {
     /// Source -> hooks definition.
-    sources: HashMap<HookSource, RegisteredHook>,
+    sources: HashMap<HookSource, Vec<RegisteredHook>>,
     /// Optional sandbox manager for executing hook commands.
     sandbox: Option<Arc<dyn SandboxExecutor>>,
     /// Optional HTTP client for Http hook actions.
@@ -544,11 +553,15 @@ impl Clone for HookRegistry {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 struct RegisteredHook {
     definition: HooksDefinition,
     source_dir: String,
     plugin_data_dir: Option<String>,
+    // None preserves the legacy registry-wide default; Some(None) is an
+    // explicitly bound source with no executor, never permission to inherit.
+    executor: Option<Option<Arc<dyn SandboxExecutor>>>,
+    require_executor: bool,
 }
 
 /// One action that would execute for a hook context, without side effects.
@@ -597,12 +610,36 @@ impl HookRegistry {
         );
         self.sources.insert(
             HookSource::Skill(skill_name.to_string()),
-            RegisteredHook {
+            vec![RegisteredHook {
                 definition,
                 source_dir: skill_dir.to_string(),
                 plugin_data_dir: None,
-            },
+                executor: None,
+                require_executor: false,
+            }],
         );
+    }
+
+    /// Bind one already-registered source to the caller's existing resources.
+    /// Later registry-wide executor changes cannot move this source. Setting a
+    /// required executor to None yields a diagnostic, never a bare local spawn.
+    /// Unbound registrations retain the original registry-wide behavior.
+    pub fn bind_source_executor(
+        &mut self,
+        source: &HookSource,
+        source_dir: &str,
+        executor: Option<Arc<dyn SandboxExecutor>>,
+        require_executor: bool,
+    ) -> bool {
+        let Some(registered) = self.sources.get_mut(source) else {
+            return false;
+        };
+        for registered in registered {
+            registered.source_dir = source_dir.to_string();
+            registered.executor = Some(executor.clone());
+            registered.require_executor = require_executor;
+        }
+        true
     }
 
     /// Register hooks from user configuration.
@@ -617,12 +654,40 @@ impl HookRegistry {
         );
         self.sources.insert(
             HookSource::UserConfig,
-            RegisteredHook {
+            vec![RegisteredHook {
                 definition,
                 source_dir: String::new(),
                 plugin_data_dir: None,
-            },
+                executor: None,
+                require_executor: false,
+            }],
         );
+    }
+
+    /// Replace UserConfig with its original ordered origin groups. This keeps
+    /// one source identity/clear operation while each group's rules retain the
+    /// execution location admitted by the host. Input order is append order
+    /// within each event, matching HooksDefinition::merge.
+    pub fn register_user_hooks_with_sources(&mut self, origins: Vec<HookOrigin>) -> bool {
+        let mut registered = Vec::new();
+        for (definition, source_dir, executor, require_executor) in origins {
+            let (definition, _) = validate_hook_definition(definition, "user_config");
+            if !definition.is_empty() {
+                registered.push(RegisteredHook {
+                    definition,
+                    source_dir,
+                    plugin_data_dir: None,
+                    executor: Some(executor),
+                    require_executor,
+                });
+            }
+        }
+        if registered.is_empty() {
+            self.sources.remove(&HookSource::UserConfig);
+            return false;
+        }
+        self.sources.insert(HookSource::UserConfig, registered);
+        true
     }
 
     /// Register hooks contributed by an installed plugin.
@@ -670,11 +735,13 @@ impl HookRegistry {
         );
         self.sources.insert(
             HookSource::Plugin(plugin_name.to_string()),
-            RegisteredHook {
+            vec![RegisteredHook {
                 definition: clean,
                 source_dir: source_dir.to_string(),
                 plugin_data_dir: Some(plugin_data_dir.to_string()),
-            },
+                executor: None,
+                require_executor: false,
+            }],
         );
         true
     }
@@ -735,7 +802,11 @@ impl HookRegistry {
                     HookSource::Skill(name) => format!("skill:{}", name),
                     HookSource::Plugin(name) => format!("plugin:{}", name),
                 };
-                let count = registered.definition.rules.values().map(|v| v.len()).sum();
+                let count = registered
+                    .iter()
+                    .flat_map(|registered| registered.definition.rules.values())
+                    .map(Vec::len)
+                    .sum();
                 (name, count)
             })
             .collect()
@@ -750,6 +821,7 @@ impl HookRegistry {
     pub fn has_hooks_for(&self, event: HookEvent) -> bool {
         self.sources
             .values()
+            .flatten()
             .any(|r| !r.definition.rules_for(event).is_empty())
             || self
                 .programmatic
@@ -764,16 +836,18 @@ impl HookRegistry {
             let Some(registered) = self.sources.get(source) else {
                 continue;
             };
-            for rule in registered.definition.rules_for(context.event) {
-                if !matches_hook(&rule.matcher, context) {
-                    continue;
-                }
-                for action in &rule.hooks {
-                    matches.push(HookDryRunMatch {
-                        source: source.to_string(),
-                        matcher: rule.matcher.clone(),
-                        action: action.kind().to_string(),
-                    });
+            for registered in registered {
+                for rule in registered.definition.rules_for(context.event) {
+                    if !matches_hook(&rule.matcher, context) {
+                        continue;
+                    }
+                    for action in &rule.hooks {
+                        matches.push(HookDryRunMatch {
+                            source: source.to_string(),
+                            matcher: rule.matcher.clone(),
+                            action: action.kind().to_string(),
+                        });
+                    }
                 }
             }
         }
@@ -873,39 +947,46 @@ impl HookRegistry {
             let Some(registered) = self.sources.get(source) else {
                 continue;
             };
-            let rules = registered.definition.rules_for(event);
-            let runtime = HookActionRuntime {
-                plugin_data_dir: registered.plugin_data_dir.as_deref(),
-                sandbox: self.sandbox.as_ref(),
-                http_client: self.http_client.as_ref(),
-                mcp_executor: self.mcp_executor.as_ref(),
-                subagent_executor: self.subagent_executor.as_ref(),
-            };
+            for registered in registered {
+                let rules = registered.definition.rules_for(event);
+                let runtime = HookActionRuntime {
+                    plugin_data_dir: registered.plugin_data_dir.as_deref(),
+                    sandbox: registered
+                        .executor
+                        .as_ref()
+                        .unwrap_or(&self.sandbox)
+                        .as_ref(),
+                    source_bound: registered.executor.is_some(),
+                    require_executor: registered.require_executor,
+                    http_client: self.http_client.as_ref(),
+                    mcp_executor: self.mcp_executor.as_ref(),
+                    subagent_executor: self.subagent_executor.as_ref(),
+                };
 
-            for rule in rules {
-                if !matches_hook(&rule.matcher, context) {
-                    continue;
-                }
+                for rule in rules {
+                    if !matches_hook(&rule.matcher, context) {
+                        continue;
+                    }
 
-                debug!(
-                    source = %source,
-                    event = ?event,
-                    "Hook matched"
-                );
+                    debug!(
+                        source = %source,
+                        event = ?event,
+                        "Hook matched"
+                    );
 
-                for action in &rule.hooks {
-                    let result =
-                        execute_action(action, &registered.source_dir, context, &runtime).await;
+                    for action in &rule.hooks {
+                        let result =
+                            execute_action(action, &registered.source_dir, context, &runtime).await;
 
-                    merge_result(&mut combined, result);
+                        merge_result(&mut combined, result);
 
-                    if combined.stop_propagation || combined.block {
-                        return combined;
+                        if combined.stop_propagation || combined.block {
+                            return combined;
+                        }
                     }
                 }
             }
         }
-
         // Programmatic hooks run after every data-driven source, in name
         // order, with the same merge/short-circuit semantics. An empty
         // event subscription observes everything.
@@ -1003,6 +1084,8 @@ fn matches_tool_name(matcher: &str, tool_name: &str) -> bool {
 struct HookActionRuntime<'a> {
     plugin_data_dir: Option<&'a str>,
     sandbox: Option<&'a Arc<dyn SandboxExecutor>>,
+    source_bound: bool,
+    require_executor: bool,
     http_client: Option<&'a reqwest::Client>,
     mcp_executor: Option<&'a McpExecutorFn>,
     subagent_executor: Option<&'a SubagentExecutorFn>,
@@ -1020,14 +1103,19 @@ async fn execute_action(
             shell,
             timeout,
         } => {
+            if runtime.require_executor && runtime.sandbox.is_none() {
+                return hook_execution_message(
+                    "Source-bound hook requires its matching executor; local fallback is disabled"
+                        .to_string(),
+                );
+            }
             execute_command_hook(
                 command,
                 shell.as_deref(),
                 *timeout,
                 source_dir,
-                runtime.plugin_data_dir,
                 context,
-                runtime.sandbox,
+                runtime,
             )
             .await
         }
@@ -1199,10 +1287,13 @@ async fn execute_command_hook(
     shell: Option<&str>,
     timeout_secs: u64,
     source_dir: &str,
-    plugin_data_dir: Option<&str>,
     context: &HookContext,
-    sandbox: Option<&Arc<dyn SandboxExecutor>>,
+    runtime: &HookActionRuntime<'_>,
 ) -> HookResult {
+    let plugin_data_dir = runtime.plugin_data_dir;
+    let sandbox = runtime.sandbox;
+    let source_bound = runtime.source_bound;
+    let requires_target = runtime.require_executor;
     // Build JSON context for stdin (include hook_event_name for compatibility)
     let mut stdin_value = serde_json::to_value(context).unwrap_or_default();
     stdin_value["hook_event_name"] = json!(context.event.as_str());
@@ -1215,7 +1306,7 @@ async fn execute_command_hook(
         let (program, args) = build_hook_shell_command(command, shell);
         let mut sandbox_cmd = SandboxCommand::program(&program, args).with_timeout(timeout);
 
-        if !source_dir.is_empty() && Path::new(source_dir).exists() {
+        if !source_dir.is_empty() && (source_bound || Path::new(source_dir).exists()) {
             sandbox_cmd = sandbox_cmd.with_working_dir(source_dir);
         }
 
@@ -1227,6 +1318,11 @@ async fn execute_command_hook(
             &context.cwd,
         );
         add_plugin_hook_env(&mut env, source_dir, plugin_data_dir);
+        if requires_target {
+            // These values describe this process, not the selected target.
+            env.remove("PATH");
+            env.remove("TMPDIR");
+        }
         for (k, v) in env {
             sandbox_cmd = sandbox_cmd.with_env(k, v);
         }
@@ -1261,12 +1357,25 @@ async fn execute_command_hook(
     }
 
     // -- Fallback: direct process execution (no sandbox) --
+    // 同一动作期限覆盖输入和输出；序列化不持有已启动的子进程。
+    let mut stdin_bytes = serde_json::to_vec(&stdin_json).unwrap_or_default();
+    stdin_bytes.push(b'\n');
+    // 公开注册已校验 timeout <= MAX_HOOK_TIMEOUT；内部输入仍显式拒绝不可表示的期限。
+    let Some(deadline) = tokio::time::Instant::now().checked_add(timeout) else {
+        return hook_execution_message(
+            "Hook command execution failed: timeout deadline is out of range".to_string(),
+        );
+    };
     let (program, args) = build_hook_shell_command(command, shell);
     let mut cmd = tokio::process::Command::new(&program);
     for arg in &args {
         cmd.arg(arg);
     }
     cmd.kill_on_drop(true);
+    // 本地可信命令也须防框架超时后遗留子进程；只清理由本次 spawn 创建的独立组，
+    // 不把宿主或其它 Hook 的进程组误当成这个 Child 的清理对象。
+    #[cfg(unix)]
+    cmd.process_group(0);
 
     if !source_dir.is_empty() && Path::new(source_dir).exists() {
         cmd.current_dir(source_dir);
@@ -1302,15 +1411,50 @@ async fn execute_command_hook(
     };
 
     let mut child = child;
-    if let Some(mut stdin) = child.stdin.take() {
-        use tokio::io::AsyncWriteExt;
-        let json_str = serde_json::to_string(&stdin_json).unwrap_or_default();
-        let _ = stdin.write_all(json_str.as_bytes()).await;
-        let _ = stdin.write_all(b"\n").await;
-        drop(stdin);
-    }
+    let process_group_id = child.id();
+    let stdin = child.stdin.take();
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+    let output = {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let write_input = async move {
+            if let Some(mut stdin) = stdin {
+                // 旧合同允许命令不读输入即正常退出。BrokenPipe 等输入错误不能提前
+                // 丢弃该命令的合法 stdout/exit；输出和原 Child 仍受同一期限观察。
+                let _ = stdin.write_all(&stdin_bytes).await;
+            }
+            Ok::<(), std::io::Error>(())
+        };
+        let read_stdout = async move {
+            let mut bytes = Vec::new();
+            if let Some(mut stdout) = stdout {
+                stdout.read_to_end(&mut bytes).await?;
+            }
+            Ok::<_, std::io::Error>(bytes)
+        };
+        let read_stderr = async move {
+            let mut bytes = Vec::new();
+            if let Some(mut stderr) = stderr {
+                stderr.read_to_end(&mut bytes).await?;
+            }
+            Ok::<_, std::io::Error>(bytes)
+        };
+        let communicate = async {
+            // 同一 future 并行消费双向管道，不另 spawn reader/writer，也不移动 Child。
+            // 首个被观察到的输出/等待 I/O 错误立即结束通信，不能等到 deadline
+            // 后把它归成 timeout；外层仍显式清理同一原 Child 后再返回该错误。
+            let ((), stdout, stderr, status) =
+                tokio::try_join!(write_input, read_stdout, read_stderr, child.wait())?;
+            Ok::<_, std::io::Error>(std::process::Output {
+                stdout,
+                stderr,
+                status,
+            })
+        };
+        tokio::time::timeout_at(deadline, communicate).await
+    };
 
-    match tokio::time::timeout(timeout, child.wait_with_output()).await {
+    match output {
         Ok(Ok(output)) => {
             let stdout = String::from_utf8_lossy(&output.stdout).to_string();
             let stderr = String::from_utf8_lossy(&output.stderr).to_string();
@@ -1333,7 +1477,23 @@ async fn execute_command_hook(
                 error_kind = ?e.kind(),
                 "Hook command execution error"
             );
-            hook_execution_message(format!("Hook command execution failed: {e}"))
+            let cleanup_started = std::time::Instant::now();
+            let cleanup =
+                crate::sandbox::local::cleanup_child_process(&mut child, process_group_id).await;
+            debug!(
+                event = %context.event.as_str(),
+                action = "command",
+                cleanup_elapsed_ms = cleanup_started.elapsed().as_millis(),
+                cleanup_confirmed = cleanup.is_ok(),
+                "Hook original child cleanup observed"
+            );
+            let message = match cleanup {
+                Ok(()) => format!("Hook command execution failed: {e}"),
+                Err(cleanup) => {
+                    format!("Hook command execution failed: {e}; cleanup failed: {cleanup}")
+                }
+            };
+            hook_execution_message(message)
         }
         Err(_) => {
             warn!(
@@ -1342,7 +1502,26 @@ async fn execute_command_hook(
                 timeout_secs = timeout_secs,
                 "Hook command timed out"
             );
-            hook_execution_message(format!("Hook command timed out after {timeout_secs}s"))
+            // 动作期限已到，communicate 的管道 future 已结束；不解析迟到输出。
+            // 复用原显式 kill/wait 合同后才返回，不能以 wrapper 超时冒充物理结算。
+            // 原 helper 的 Child.wait 没有独立期限，因此清理等待可能超过动作期限。
+            let cleanup_started = std::time::Instant::now();
+            let cleanup =
+                crate::sandbox::local::cleanup_child_process(&mut child, process_group_id).await;
+            debug!(
+                event = %context.event.as_str(),
+                action = "command",
+                cleanup_elapsed_ms = cleanup_started.elapsed().as_millis(),
+                cleanup_confirmed = cleanup.is_ok(),
+                "Hook original child cleanup observed"
+            );
+            let message = match cleanup {
+                Ok(()) => format!("Hook command timed out after {timeout_secs}s"),
+                Err(cleanup) => format!(
+                    "Hook command timed out after {timeout_secs}s; cleanup failed: {cleanup}"
+                ),
+            };
+            hook_execution_message(message)
         }
     }
 }
@@ -3403,6 +3582,296 @@ Notification:
         assert_eq!(
             combined.activate_skill.as_ref().map(|(s, _)| s.clone()),
             Some("pdf".into())
+        );
+    }
+    struct OriginExecutor {
+        label: &'static str,
+        calls: Arc<std::sync::Mutex<Vec<SandboxCommand>>>,
+    }
+
+    impl SandboxExecutor for OriginExecutor {
+        fn name(&self) -> &str {
+            self.label
+        }
+        fn isolation_level(&self) -> crate::sandbox::IsolationLevel {
+            crate::sandbox::IsolationLevel::None
+        }
+        fn is_available(&self) -> futures::future::BoxFuture<'_, bool> {
+            Box::pin(async { true })
+        }
+        fn execute(
+            &self,
+            command: SandboxCommand,
+        ) -> futures::future::BoxFuture<'_, crate::skills::Result<crate::sandbox::ExecutionResult>>
+        {
+            Box::pin(async move {
+                self.calls
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .push(command);
+                Ok(crate::sandbox::ExecutionResult {
+                    exit_code: 0,
+                    stdout: self.label.into(),
+                    stderr: String::new(),
+                    duration: Duration::ZERO,
+                    sandbox_type: self.label.into(),
+                    timed_out: false,
+                    cancelled: false,
+                    output_truncated: false,
+                    stdout_bytes: self.label.len() as u64,
+                    stderr_bytes: 0,
+                })
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn source_bound_hooks_keep_executor_and_target_cwd_after_host_changes() {
+        let local_calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let target_calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let wrong_calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let local = Arc::new(OriginExecutor {
+            label: "local-origin",
+            calls: local_calls.clone(),
+        });
+        let target = Arc::new(OriginExecutor {
+            label: "target-origin",
+            calls: target_calls.clone(),
+        });
+        let wrong = Arc::new(OriginExecutor {
+            label: "wrong-host",
+            calls: wrong_calls.clone(),
+        });
+        let definition = HooksDefinition {
+            rules: HashMap::from([(
+                HookEvent::PreToolUse,
+                vec![HookRule {
+                    matcher: "*".into(),
+                    hooks: vec![HookAction::Command {
+                        command: "same-command".into(),
+                        shell: None,
+                        timeout: 1,
+                    }],
+                }],
+            )]),
+        };
+        let mut registry = HookRegistry::new();
+        registry.register(
+            "same-name",
+            "not-present-on-client/same-path",
+            definition.clone(),
+        );
+        registry.register_user_hooks(definition.clone());
+        assert!(registry.bind_source_executor(
+            &HookSource::Skill("same-name".into()),
+            "not-present-on-client/same-path",
+            Some(target),
+            true
+        ));
+        assert!(registry.bind_source_executor(
+            &HookSource::UserConfig,
+            "not-present-on-client/same-path",
+            Some(local.clone()),
+            false
+        ));
+        registry.set_sandbox_manager(wrong.clone());
+        registry
+            .run_pre_tool_use("read_file", &json!({}), "origin-test")
+            .await;
+        assert!(
+            wrong_calls
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .is_empty()
+        );
+        {
+            let target = target_calls
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            assert_eq!(target.len(), 1);
+            assert_eq!(
+                target
+                    .first()
+                    .and_then(|command| command.working_dir.as_deref()),
+                Some(Path::new("not-present-on-client/same-path"))
+            );
+            assert!(
+                target
+                    .first()
+                    .is_some_and(|command| !command.env.contains_key("PATH")
+                        && !command.env.contains_key("TMPDIR"))
+            );
+        }
+
+        assert_eq!(
+            local_calls
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .len(),
+            1
+        );
+
+        // A second host may own the same skill/source name without sharing its
+        // first host's executor; the existing registry remains the authority.
+        let mut second = HookRegistry::new();
+        second.register("same-name", "not-present-on-client/same-path", definition);
+        assert!(second.bind_source_executor(
+            &HookSource::Skill("same-name".into()),
+            "not-present-on-client/same-path",
+            Some(local),
+            false
+        ));
+        second.set_sandbox_manager(wrong);
+        second
+            .run_pre_tool_use("read_file", &json!({}), "second-host")
+            .await;
+        assert_eq!(
+            local_calls
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .len(),
+            2
+        );
+        assert!(
+            wrong_calls
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn source_bound_hook_without_executor_does_not_spawn_locally() {
+        let definition = HooksDefinition {
+            rules: HashMap::from([(
+                HookEvent::PreToolUse,
+                vec![HookRule {
+                    matcher: "*".into(),
+                    hooks: vec![HookAction::Command {
+                        command: "printf SHOULD_NOT_RUN_LOCALLY".into(),
+                        shell: None,
+                        timeout: 1,
+                    }],
+                }],
+            )]),
+        };
+        let mut registry = HookRegistry::new();
+        registry.register("target-only", "/target-only", definition);
+        assert!(registry.bind_source_executor(
+            &HookSource::Skill("target-only".into()),
+            "/target-only",
+            None,
+            true
+        ));
+        let result = registry
+            .run_pre_tool_use("read_file", &json!({}), "missing-executor")
+            .await;
+        assert!(
+            result
+                .messages
+                .iter()
+                .any(|message| message.contains("local fallback is disabled"))
+        );
+        assert!(
+            !result
+                .injected_context
+                .as_deref()
+                .is_some_and(|value| value.contains("SHOULD_NOT_RUN_LOCALLY"))
+        );
+    }
+    #[tokio::test]
+    async fn mixed_user_config_keeps_original_append_order_and_per_origin_resources() {
+        let calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let wrong_calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let local: Arc<dyn SandboxExecutor> = Arc::new(OriginExecutor {
+            label: "local",
+            calls: calls.clone(),
+        });
+        let target: Arc<dyn SandboxExecutor> = Arc::new(OriginExecutor {
+            label: "target",
+            calls: calls.clone(),
+        });
+        let wrong = Arc::new(OriginExecutor {
+            label: "wrong-host",
+            calls: wrong_calls.clone(),
+        });
+        let definition = || HooksDefinition {
+            rules: HashMap::from([(
+                HookEvent::PreToolUse,
+                vec![HookRule {
+                    matcher: "*".into(),
+                    hooks: vec![HookAction::Command {
+                        command: "same-command".into(),
+                        shell: None,
+                        timeout: 1,
+                    }],
+                }],
+            )]),
+        };
+        let mut registry = HookRegistry::new();
+        assert!(registry.register_user_hooks_with_sources(vec![
+            (
+                definition(),
+                "inline-config".into(),
+                Some(local.clone()),
+                false
+            ),
+            (definition(), "user-file".into(), Some(local), false),
+            (
+                definition(),
+                "remote-project-file".into(),
+                Some(target),
+                true
+            ),
+        ]));
+        registry.set_sandbox_manager(wrong);
+        assert_eq!(registry.list_sources(), vec![("user_config".into(), 3)]);
+        assert!(registry.has_hooks_for(HookEvent::PreToolUse));
+        let matches = registry.dry_run(&HookContext::for_dry_run(
+            HookEvent::PreToolUse,
+            "read_file",
+        ));
+        assert_eq!(matches.matches.len(), 3);
+        assert!(
+            matches
+                .matches
+                .iter()
+                .all(|matched| matched.source == HookSource::UserConfig.to_string())
+        );
+        registry
+            .run_pre_tool_use("read_file", &json!({}), "mixed-origins")
+            .await;
+        let directories = calls
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .iter()
+            .filter_map(|command| command.working_dir.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            directories,
+            vec![
+                Path::new("inline-config").to_path_buf(),
+                Path::new("user-file").to_path_buf(),
+                Path::new("remote-project-file").to_path_buf()
+            ]
+        );
+        assert!(
+            wrong_calls
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .is_empty()
+        );
+        assert!(registry.clear_user_hooks());
+        assert!(registry.is_empty());
+        registry
+            .run_pre_tool_use("read_file", &json!({}), "cleared")
+            .await;
+        assert_eq!(
+            calls
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .len(),
+            3
         );
     }
 }

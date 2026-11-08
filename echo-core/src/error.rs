@@ -65,11 +65,25 @@ impl TryFrom<&ReactError> for AgentFailure {
                     "llm_api",
                     Some(*status),
                 ),
+                LlmError::ProviderError { retryable, .. } => (
+                    AgentFailureCategory::Llm,
+                    AgentTerminalKind::Failed,
+                    *retryable,
+                    "llm_provider",
+                    None,
+                ),
                 LlmError::InvalidResponse(_) => (
                     AgentFailureCategory::Llm,
                     AgentTerminalKind::Failed,
                     false,
                     "llm_invalid_response",
+                    None,
+                ),
+                LlmError::IncompleteResponse { .. } => (
+                    AgentFailureCategory::Llm,
+                    AgentTerminalKind::Failed,
+                    false,
+                    "llm_incomplete_response",
                     None,
                 ),
                 LlmError::EmptyResponse => (
@@ -87,13 +101,46 @@ impl TryFrom<&ReactError> for AgentFailure {
                     None,
                 ),
             },
-            ReactError::Tool(_) => (
-                AgentFailureCategory::Tool,
-                AgentTerminalKind::Failed,
-                false,
-                "tool",
-                None,
-            ),
+            ReactError::Tool(inner) => match inner.as_ref() {
+                ToolError::RemoteFailure {
+                    http_status,
+                    failure,
+                    ..
+                } => (
+                    AgentFailureCategory::Tool,
+                    match failure.category {
+                        crate::tools::ToolFailureCategory::Timeout => AgentTerminalKind::TimedOut,
+                        crate::tools::ToolFailureCategory::Cancelled => {
+                            AgentTerminalKind::Cancelled
+                        }
+                        _ => AgentTerminalKind::Failed,
+                    },
+                    failure.allows_automatic_retry(),
+                    "tool_remote",
+                    *http_status,
+                ),
+                ToolError::Timeout(_) => (
+                    AgentFailureCategory::Tool,
+                    AgentTerminalKind::TimedOut,
+                    true,
+                    "tool_timeout",
+                    None,
+                ),
+                ToolError::Cancelled(_) => (
+                    AgentFailureCategory::Tool,
+                    AgentTerminalKind::Cancelled,
+                    false,
+                    "tool_cancelled",
+                    None,
+                ),
+                _ => (
+                    AgentFailureCategory::Tool,
+                    AgentTerminalKind::Failed,
+                    false,
+                    "tool",
+                    None,
+                ),
+            },
             ReactError::Parse(_) => (
                 AgentFailureCategory::Parse,
                 AgentTerminalKind::Failed,
@@ -470,9 +517,25 @@ pub enum LlmError {
         /// Error message
         message: String,
     },
+    /// 上游在有效响应流中明确报告的失败，不等同HTTP失败或解析损坏。
+    #[error("Provider {provider} error (type {error_type:?}, code {code:?}): {message}")]
+    ProviderError {
+        provider: String,
+        error_type: Option<String>,
+        /// None表示缺字段，Some(Null)保留显式null；不改变供应商code原JSON类型。
+        code: Option<serde_json::Value>,
+        message: String,
+        /// 分类事实，不授权重放原操作；当前provider适配器统一为false。
+        retryable: bool,
+    },
     /// Invalid response
     #[error("Invalid response: {0}")]
     InvalidResponse(String),
+    /// 已合法解码但未成功完成的响应；原partial只供直接调用方检查，不自动发布。
+    #[error("Incomplete response from LLM")]
+    IncompleteResponse {
+        partial: Box<crate::llm::types::Message>,
+    },
     /// Empty response
     #[error("Empty response from LLM")]
     EmptyResponse,
@@ -505,6 +568,16 @@ pub enum ToolError {
         tool: String,
         /// Error message
         message: String,
+    },
+    /// A remote operation failed while its owner still had structured facts.
+    /// HTTP adapters normalize their own types here; core does not depend on
+    /// a client or infer recovery by parsing the diagnostic message.
+    #[error("Tool '{tool}' remote operation failed: {message}")]
+    RemoteFailure {
+        tool: String,
+        message: String,
+        http_status: Option<u16>,
+        failure: Box<crate::tools::ToolFailure>,
     },
     /// Execution timed out
     #[error("Tool '{0}' execution timed out")]
@@ -811,6 +884,34 @@ impl From<reqwest::Error> for ReactError {
 pub type Result<T> = std::result::Result<T, ReactError>;
 
 #[cfg(test)]
+mod remote_tool_projection_tests {
+    use super::*;
+    use crate::tools::{ToolFailure, ToolFailureCategory};
+
+    #[test]
+    fn remote_tool_terminal_projection_preserves_domain_status_and_cause() -> Result<()> {
+        for (category, terminal) in [
+            (ToolFailureCategory::Transient, AgentTerminalKind::Failed),
+            (ToolFailureCategory::Timeout, AgentTerminalKind::TimedOut),
+            (ToolFailureCategory::Cancelled, AgentTerminalKind::Cancelled),
+        ] {
+            let error = ToolError::RemoteFailure {
+                tool: "web_search".to_string(),
+                message: "fixture".to_string(),
+                http_status: Some(429),
+                failure: Box::new(ToolFailure::new(category)),
+            }
+            .into();
+            let projected = AgentFailure::try_from(&error)?;
+            assert_eq!(projected.category, AgentFailureCategory::Tool);
+            assert_eq!(projected.terminal_kind, terminal);
+            assert_eq!(projected.http_status, Some(429));
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
 mod agent_failure_tests {
     use super::*;
 
@@ -950,6 +1051,40 @@ mod agent_failure_tests {
         }
         Ok(())
     }
+    #[test]
+    fn provider_error_preserves_runtime_code_shape_without_new_failure_wire() -> Result<()> {
+        for code in [
+            None,
+            Some(serde_json::Value::Null),
+            Some(serde_json::json!(37)),
+            Some(serde_json::json!("server_code")),
+        ] {
+            let source = LlmError::ProviderError {
+                provider: "anthropic".into(),
+                error_type: Some("overloaded_error".into()),
+                code: code.clone(),
+                message: "original provider error".into(),
+                retryable: false,
+            };
+            assert!(matches!(&source,LlmError::ProviderError {code:actual,..}if actual==&code));
+            let error = ReactError::from(source);
+            let failure = AgentFailure::try_from(&error)?;
+            assert_eq!(failure.category, AgentFailureCategory::Llm);
+            assert_eq!(failure.terminal_kind, AgentTerminalKind::Failed);
+            assert_eq!(failure.code, "llm_provider");
+            assert!(!failure.retryable);
+            assert_eq!(failure.http_status, None);
+            assert!(failure.message.contains("overloaded_error"));
+            assert!(failure.message.contains("original provider error"));
+            let wire = serde_json::to_value(&failure)?;
+            let object = wire
+                .as_object()
+                .ok_or_else(|| ReactError::Other("failure wire not object".into()))?;
+            assert_eq!(object.len(), 6, "既有有界failure wire不得暗增raw字段");
+            assert!(!object.contains_key("provider_code"));
+        }
+        Ok(())
+    }
 }
 
 /// Runtime state error
@@ -993,5 +1128,73 @@ pub enum RuntimeStateError {
 impl From<RuntimeStateError> for ReactError {
     fn from(err: RuntimeStateError) -> Self {
         ReactError::RuntimeState(Box::new(err))
+    }
+}
+
+// NEW_API_ONLY：Root选定名字已明确；Frame正式IncompleteResponse声明后才可采用。
+// 附到echo-core/src/error.rs；不要求LlmError序列化，不暴露partial到SDK。
+#[cfg(test)]
+mod incomplete_response_failure_contract_tests {
+    use super::{AgentFailure, AgentFailureCategory, AgentTerminalKind, LlmError, ReactError};
+    use crate::llm::types::Message;
+
+    #[test]
+    fn incomplete_response_remains_failed_nonretryable_and_does_not_display_partial()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let expected = serde_json::json!({
+            "role":"assistant", "content":"UNPUBLISHED-private-partial-正文🙂",
+            "provider_response":{"protocol":"responses","provider":"configured-responses",
+                "request_id":"resp-incomplete","status":"incomplete","incomplete_details":{"reason":"max_output_tokens"},
+                "usage":{"output_tokens":10,"opaque_extension":"UNPUBLISHED-native-observation"}}
+        });
+        let partial: Message = serde_json::from_value(expected.clone())?;
+        let error = LlmError::IncompleteResponse {
+            partial: Box::new(partial),
+        };
+        let display = error.to_string();
+        assert!(!display.contains("UNPUBLISHED-private-partial"));
+        assert!(!display.contains("正文🙂"));
+        assert!(!display.contains("UNPUBLISHED-native-observation"));
+        let LlmError::IncompleteResponse { partial } = &error else {
+            return Err("typed incomplete observation was replaced".into());
+        };
+        assert_eq!(serde_json::to_value(partial.as_ref())?, expected);
+        assert!(partial.execution_status.is_none());
+        assert!(partial.approved_assistant_blocks.is_none());
+        assert_eq!(
+            partial.text_content().as_deref(),
+            Some("UNPUBLISHED-private-partial-正文🙂")
+        );
+        let failure = AgentFailure::try_from(&ReactError::Llm(Box::new(error)))?;
+        assert_eq!(failure.category, AgentFailureCategory::Llm);
+        assert_eq!(failure.terminal_kind, AgentTerminalKind::Failed);
+        assert!(!failure.retryable);
+        assert!(failure.http_status.is_none());
+        assert!(!failure.message.contains("UNPUBLISHED-private-partial"));
+        assert!(!failure.message.contains("UNPUBLISHED-native-observation"));
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod incomplete_response_identity_contract_tests {
+    use super::{AgentFailure, AgentFailureCategory, AgentTerminalKind, LlmError, ReactError};
+    use crate::llm::types::Message;
+
+    #[test]
+    fn incomplete_failure_uses_exact_fixed_display_and_bounded_cause_code()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let error = LlmError::IncompleteResponse {
+            partial: Box::new(Message::assistant("PRIVATE-partial-正文🙂".into())),
+        };
+        assert_eq!(error.to_string(), "Incomplete response from LLM");
+        let failure = AgentFailure::try_from(&ReactError::Llm(Box::new(error)))?;
+        assert_eq!(failure.code, "llm_incomplete_response");
+        assert_eq!(failure.category, AgentFailureCategory::Llm);
+        assert_eq!(failure.terminal_kind, AgentTerminalKind::Failed);
+        assert!(!failure.retryable);
+        assert!(failure.http_status.is_none());
+        assert!(!failure.message.contains("PRIVATE-partial-正文🙂"));
+        Ok(())
     }
 }

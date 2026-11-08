@@ -10,6 +10,7 @@
 use super::providers::SearchProvider;
 use super::providers::brave::BraveSearchProvider;
 use super::providers::duckduckgo::DuckDuckGoProvider;
+use super::providers::exa::ExaSearchProvider;
 use super::providers::tavily::TavilyProvider;
 use echo_core::error::{Result, ToolError};
 use echo_core::tools::pagination::PageRequest;
@@ -49,6 +50,11 @@ impl WebSearchTool {
         Self::new(Box::new(BraveSearchProvider::new(api_key)))
     }
 
+    /// 使用Exa搜索（API Key）；结果沿原SearchProvider归一化和分页。
+    pub fn with_exa(api_key: impl Into<String>) -> Self {
+        Self::new(Box::new(ExaSearchProvider::new(api_key)))
+    }
+
     /// Create with Tavily (requires API key, AI-optimized search)
     pub fn with_tavily(api_key: impl Into<String>) -> Self {
         Self::new(Box::new(TavilyProvider::new(api_key)))
@@ -56,13 +62,18 @@ impl WebSearchTool {
 
     /// Auto-select the best available Provider
     ///
-    /// Priority: Tavily > Brave > DuckDuckGo
+    /// 优先级：Exa（非空Key）> Tavily > Brave > DuckDuckGo。构造后失败不自动换引擎。
     ///
     /// Reads API keys from environment variables:
+    /// - `EXA_API_KEY` → Exa（忽略空白Key）
     /// - `TAVILY_API_KEY` → Tavily (AI-optimized, highest quality)
     /// - `BRAVE_SEARCH_API_KEY` → Brave Search (high quality)
     /// - No key → DuckDuckGo (free fallback)
     pub fn auto() -> Self {
+        if let Some(provider) = ExaSearchProvider::from_env() {
+            tracing::info!("WebSearch: auto-selected Exa Provider");
+            return Self::new(Box::new(provider));
+        }
         if let Some(provider) = TavilyProvider::from_env() {
             tracing::info!("WebSearch: auto-selected Tavily Provider");
             return Self::new(Box::new(provider));
@@ -97,8 +108,7 @@ impl Tool for WebSearchTool {
     }
 
     fn description(&self) -> &str {
-        "Search for information on the internet. Returns search result titles, links, and snippets. \
-         Results use cursor pagination; repeat the same query and limit with page.next_cursor."
+        "Web search: titles, links and snippets. Page with the same query/limit and page.next_cursor."
     }
 
     fn parameters(&self) -> Value {
@@ -107,17 +117,17 @@ impl Tool for WebSearchTool {
             "properties": {
                 "query": {
                     "type": "string",
-                    "description": "Search keywords"
+                    "description": "Search terms."
                 },
                 "limit": {
                     "type": "integer",
                     "minimum": 1,
                     "maximum": MAX_ALLOWED_RESULTS,
-                    "description": format!("Results per page (default {}, max {})", DEFAULT_MAX_RESULTS, MAX_ALLOWED_RESULTS)
+                    "description": format!("Results/page; default {}, max {}.", DEFAULT_MAX_RESULTS, MAX_ALLOWED_RESULTS)
                 },
                 "cursor": {
                     "type": "string",
-                    "description": "Cursor from the previous page"
+                    "description": "Prior cursor."
                 }
             },
             "required": ["query"]
@@ -174,15 +184,29 @@ impl Tool for WebSearchTool {
                     page_info.apply_to(&mut result);
                     Ok(result)
                 }
-                Err(error) => Ok(ToolResult::error(format!(
-                    "Search provider '{}' failed: {error}",
-                    self.provider.name()
-                ))
-                .with_failure(
-                    ToolFailure::new(ToolFailureCategory::Transient)
-                        .retryable()
-                        .with_retry_after(1_000),
-                )),
+                Err(error @ echo_core::error::ReactError::ExecutionNotSettled { .. }) => Err(error),
+                Err(error) => {
+                    let failure = ToolFailure::from_error(&error, false);
+                    let status = match &error {
+                        echo_core::error::ReactError::Tool(tool_error) => match tool_error.as_ref()
+                        {
+                            ToolError::RemoteFailure { http_status, .. } => *http_status,
+                            _ => None,
+                        },
+                        _ => None,
+                    };
+                    let mut result = ToolResult::error(format!(
+                        "Search provider '{}' failed: {error}",
+                        self.provider.name()
+                    ))
+                    .with_failure(failure);
+                    if let Some(status) = status {
+                        result
+                            .metadata
+                            .insert("http_status".to_string(), status.to_string());
+                    }
+                    Ok(result)
+                }
             }
         })
     }
@@ -255,9 +279,11 @@ mod tests {
         async fn search(&self, _query: &str, _max_results: usize) -> Result<Vec<SearchResult>> {
             let call = self.call_count.fetch_add(1, Ordering::SeqCst);
             if call < self.fail_count {
-                Err(echo_core::error::ToolError::ExecutionFailed {
+                Err(echo_core::error::ToolError::RemoteFailure {
                     tool: "mock".to_string(),
                     message: format!("Simulated failure #{}", call + 1),
+                    http_status: Some(503),
+                    failure: Box::new(ToolFailure::new(ToolFailureCategory::Transient)),
                 }
                 .into())
             } else {
@@ -289,14 +315,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn transient_failure_is_returned_to_the_central_retry_policy() {
+    async fn transient_failure_is_returned_to_the_central_retry_policy() -> Result<()> {
         let (provider, counter) = FailNTimesProvider::new(2);
         let tool = WebSearchTool::new(Box::new(provider));
 
         let mut params = std::collections::HashMap::new();
         params.insert("query".to_string(), serde_json::json!("test"));
 
-        let result = tool.execute(params).await.unwrap();
+        let result = tool.execute(params).await?;
         assert!(!result.success);
         assert_eq!(counter.load(Ordering::SeqCst), 1);
         assert!(
@@ -305,20 +331,92 @@ mod tests {
                 .as_ref()
                 .is_some_and(ToolFailure::allows_automatic_retry)
         );
+        Ok(())
     }
 
     #[tokio::test]
-    async fn provider_failure_is_classified_as_transient() {
+    async fn unclassified_provider_failure_keeps_original_permanent_policy() -> Result<()> {
         let tool = WebSearchTool::new(Box::new(AlwaysFailProvider));
 
         let mut params = std::collections::HashMap::new();
         params.insert("query".to_string(), serde_json::json!("test"));
 
-        let result = tool.execute(params).await.unwrap();
+        let result = tool.execute(params).await?;
         assert!(!result.success);
         assert_eq!(
             result.failure.map(|failure| failure.category),
-            Some(ToolFailureCategory::Transient)
+            Some(ToolFailureCategory::Permanent)
         );
+        Ok(())
+    }
+
+    struct RemoteFailureProvider {
+        failure: ToolFailure,
+    }
+
+    #[async_trait::async_trait]
+    impl SearchProvider for RemoteFailureProvider {
+        fn name(&self) -> &str {
+            "fixture-name-is-not-a-classifier"
+        }
+
+        async fn search(&self, _query: &str, _max_results: usize) -> Result<Vec<SearchResult>> {
+            Err(ToolError::RemoteFailure {
+                tool: "web_search".to_string(),
+                message: "diagnostic HTTP401 words do not classify this error".to_string(),
+                http_status: Some(429),
+                failure: Box::new(self.failure.clone()),
+            }
+            .into())
+        }
+    }
+
+    #[tokio::test]
+    async fn direct_search_preserves_complete_remote_failure_and_status() -> Result<()> {
+        for category in [
+            ToolFailureCategory::Permanent,
+            ToolFailureCategory::Transient,
+            ToolFailureCategory::Cancelled,
+        ] {
+            let expected = ToolFailure::new(category)
+                .with_retry_after(1_234)
+                .with_postcondition("retain original cause");
+            let tool = WebSearchTool::new(Box::new(RemoteFailureProvider {
+                failure: expected.clone(),
+            }));
+            let result = tool
+                .execute(std::collections::HashMap::from([(
+                    "query".to_string(),
+                    serde_json::json!("query"),
+                )]))
+                .await?;
+            assert!(!result.success);
+            assert_eq!(result.failure, Some(expected));
+            assert_eq!(
+                result.metadata.get("http_status").map(String::as_str),
+                Some("429")
+            );
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn cursor_rejection_keeps_the_original_fetch_boundary() -> Result<()> {
+        for (cursor, expected_calls) in [("", 0), ("not-a-cursor", 1)] {
+            let (provider, calls) = FailNTimesProvider::new(0);
+            let tool = WebSearchTool::new(Box::new(provider));
+            let result = tool
+                .execute(std::collections::HashMap::from([
+                    ("query".to_string(), serde_json::json!("query")),
+                    ("cursor".to_string(), serde_json::json!(cursor)),
+                ]))
+                .await?;
+            assert_eq!(
+                result.failure.as_ref().map(|failure| failure.category),
+                Some(ToolFailureCategory::InvalidArguments)
+            );
+            assert_eq!(calls.load(Ordering::SeqCst), expected_calls);
+        }
+        Ok(())
     }
 }

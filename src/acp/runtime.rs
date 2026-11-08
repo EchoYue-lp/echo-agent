@@ -1121,28 +1121,76 @@ mod turn_identity_tests {
     use crate::llm::types::Message;
     use crate::runtime::{TurnMode, TurnOutcome};
     use crate::tools::{ExternalRunContext, NestedDelegationPolicy, SubagentLineage};
+    use echo_core::agent::{
+        AgentPhase, AssistantMessageBlock, AssistantPhase, ExecutionStatus, ExecutionStatusKind,
+    };
     use futures::{FutureExt as _, StreamExt, stream::BoxStream};
 
     #[derive(Clone, Default)]
     struct CapturingAgent {
-        calls: Arc<StdMutex<Vec<(String, AgentInvocationContext)>>>,
+        calls: Arc<StdMutex<Vec<(Message, AgentInvocationContext)>>>,
     }
 
     impl CapturingAgent {
         fn record<'a>(
             &'a self,
-            text: String,
+            message: Message,
             invocation: AgentInvocationContext,
         ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
             Box::pin(async move {
+                // 该 fixture 自己是原始 producer；沿用 ACP 已保留的执行/Turn 身份，
+                // 不靠 text fallback、包装 UUID 或 FinalAnswer 自动合成成功。
+                let execution_id = invocation
+                    .runtime
+                    .as_ref()
+                    .and_then(|runtime| runtime.execution_id.as_ref().or(runtime.turn_id.as_ref()))
+                    .filter(|identity| !identity.trim().is_empty())
+                    .cloned()
+                    .ok_or_else(|| {
+                        ReactError::Other(
+                            "capturing fixture lacks original execution identity".to_string(),
+                        )
+                    })?;
+                let request_id = format!("{execution_id}:capturing-request");
                 self.calls
                     .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .push((text, invocation));
-                Ok(
-                    futures::stream::iter([Ok(AgentEvent::FinalAnswer("captured".to_string()))])
-                        .boxed(),
-                )
+                    .unwrap_or_else(|error| error.into_inner())
+                    .push((message, invocation));
+                Ok(futures::stream::iter([
+                    Ok(AgentEvent::ExecutionStatus(ExecutionStatus {
+                        adapter_generated: false,
+                        execution_id: execution_id.clone(),
+                        request_id: Some(request_id.clone()),
+                        sequence: 0,
+                        phase: AgentPhase::Thinking,
+                        status: ExecutionStatusKind::Started,
+                        reason: None,
+                    })),
+                    Ok(AgentEvent::AssistantMessage {
+                        block: AssistantMessageBlock {
+                            provider_source: None,
+                            block_id: "capturing-final".to_string(),
+                            request_id: request_id.clone(),
+                            sequence: 0,
+                            phase: AssistantPhase::FinalAnswer,
+                            delta: "captured".to_string(),
+                            complete: true,
+                            provider: None,
+                            reasoning: None,
+                        },
+                    }),
+                    Ok(AgentEvent::FinalAnswer("captured".to_string())),
+                    Ok(AgentEvent::ExecutionStatus(ExecutionStatus {
+                        adapter_generated: false,
+                        execution_id,
+                        request_id: Some(request_id),
+                        sequence: 1,
+                        phase: AgentPhase::Terminal,
+                        status: ExecutionStatusKind::Settled,
+                        reason: None,
+                    })),
+                ])
+                .boxed())
             })
         }
     }
@@ -1160,37 +1208,13 @@ mod turn_identity_tests {
         fn tool_names(&self) -> Vec<String> {
             Vec::new()
         }
-        fn execute<'a>(&'a self, task: &'a str) -> BoxFuture<'a, Result<String>> {
-            Box::pin(async move { Ok(task.to_string()) })
-        }
-        fn execute_stream<'a>(
-            &'a self,
-            text: &'a str,
-        ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
-            self.record(text.to_string(), AgentInvocationContext::default())
-        }
-        fn chat_stream_with_cancel<'a>(
-            &'a self,
-            text: &'a str,
-            _cancel: CancellationToken,
-        ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
-            self.record(text.to_string(), AgentInvocationContext::default())
-        }
-        fn execute_stream_with_invocation_context<'a>(
-            &'a self,
-            text: &'a str,
-            _cancel: CancellationToken,
-            invocation: AgentInvocationContext,
-        ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
-            self.record(text.to_string(), invocation)
-        }
         fn chat_stream_message_with_invocation_context<'a>(
             &'a self,
             message: Message,
             _cancel: CancellationToken,
             invocation: AgentInvocationContext,
         ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
-            self.record(message.content.as_text().unwrap_or_default(), invocation)
+            self.record(message, invocation)
         }
         fn execute_stream_message_with_invocation_context<'a>(
             &'a self,
@@ -1198,7 +1222,7 @@ mod turn_identity_tests {
             _cancel: CancellationToken,
             invocation: AgentInvocationContext,
         ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
-            self.record(message.content.as_text().unwrap_or_default(), invocation)
+            self.record(message, invocation)
         }
     }
 
@@ -1371,6 +1395,26 @@ mod turn_identity_tests {
             ReactError::Other("original completed driver did not publish receipt".to_string())
         })?;
         assert_eq!(receipt.outcome, TurnOutcome::Completed);
+        assert_eq!(receipt.final_answer.as_deref(), Some("captured"));
+        let events = entry.ledger.events_after(0);
+        let statuses = events
+            .iter()
+            .filter_map(|event| match &event.payload {
+                AgentEvent::ExecutionStatus(status) => Some(status),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(statuses.len(), 2);
+        assert!(statuses.first().is_some_and(|status| {
+            !status.adapter_generated
+                && status.execution_id == entry.run_id
+                && status.status == ExecutionStatusKind::Started
+        }));
+        assert!(statuses.last().is_some_and(|status| {
+            !status.adapter_generated
+                && status.execution_id == entry.run_id
+                && status.status == ExecutionStatusKind::Settled
+        }));
         assert_eq!(
             agent
                 .calls
@@ -1401,7 +1445,10 @@ mod turn_identity_tests {
         let (text, context) = calls
             .first()
             .ok_or_else(|| ReactError::Other("Agent was not invoked".to_string()))?;
-        assert_eq!(text, "original input 中文🌊");
+        assert_eq!(
+            text.text_content().as_deref(),
+            Some("original input 中文🌊")
+        );
         assert_eq!(
             context.runtime.as_ref().and_then(|r| r.turn_id.as_deref()),
             Some(expected.as_str())
@@ -1435,17 +1482,19 @@ mod turn_identity_tests {
         fn system_prompt(&self) -> &str {
             ""
         }
-        fn execute<'a>(&'a self, _task: &'a str) -> BoxFuture<'a, Result<String>> {
-            Box::pin(async {
-                Err(ReactError::ExecutionNotSettled {
-                    run_id: "foreign-physical-run".to_string(),
-                    execution_id: Some("foreign-physical-attempt".to_string()),
-                })
-            })
-        }
-        fn execute_stream<'a>(
+        fn chat_stream_message_with_invocation_context<'a>(
             &'a self,
-            _task: &'a str,
+            message: Message,
+            cancel: CancellationToken,
+            invocation: AgentInvocationContext,
+        ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
+            self.execute_stream_message_with_invocation_context(message, cancel, invocation)
+        }
+        fn execute_stream_message_with_invocation_context<'a>(
+            &'a self,
+            _message: Message,
+            _cancel: CancellationToken,
+            _invocation: AgentInvocationContext,
         ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
             Box::pin(async {
                 Err(ReactError::ExecutionNotSettled {

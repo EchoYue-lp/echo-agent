@@ -1,5 +1,11 @@
 # echo-agent Documentation
 
+> 具名退役：当前源码移除 A2A／LSP 的实现、feature、公开出口和专属示例；
+> ACP、MCP、channels、Task/Subagent、通用工具和存储菜单继续保留。
+> 旧插件 `lsp.yaml` 仅保留用户原件；当前prepare不probe、读取、冻结、hash或缓存它，不纳入generation身份、不生成LSP专属诊断，也不启动服务。见[ADR0105](../adr/0105-current-config-and-plugin-inputs.md)。
+> 源码同步不代表删后构建、最终锁、SDK正式新Git来源、native或发布资格已通过。
+> 边界和恢复锚点见[ADR0090](../adr/0090-a2a-lsp-retirement-contract.md)。
+
 echo-agent is a composable Agent development framework written in Rust, providing a ReAct execution engine, tool system, dual-layer memory, context compression, human-in-the-loop, multi-Agent orchestration, Skill system, MCP protocol integration, and more.
 
 > **中文文档** → [docs/zh/README.md](../zh/README.md)
@@ -28,7 +34,7 @@ echo-agent is a composable Agent development framework written in Rust, providin
 
 | Doc                                                 | Module            | Key Concepts                                                                              |
 | --------------------------------------------------- | ----------------- | ----------------------------------------------------------------------------------------- |
-| [01 - ReAct Agent](./01-react-agent.md)             | Core engine       | Thought→Action→Observation, CoT, parallel tool calls, callbacks                           |
+| [01 - ReAct Agent](./01-react-agent.md)             | Core engine       | Thought→Action→Observation、原生消息、并行工具调用、回调                           |
 | [02 - Tool System](./02-tools.md)                   | Tools             | Tool trait, ToolManager, timeout/retry, concurrency limiting                              |
 | [03 - Memory System](./03-memory.md)                | Memory            | Store (long-term), RuntimeStateStore (runtime checkpoint), ConversationStore (transcript) |
 | [04 - Context Compression](./04-compression.md)     | Compression       | SlidingWindow, Summary, Hybrid pipeline, ContextManager                                   |
@@ -66,7 +72,7 @@ echo-agent is a composable Agent development framework written in Rust, providin
 | Doc                                                               | Module                                         | Key Concepts                                                                            |
 | ----------------------------------------------------------------- | ---------------------------------------------- | --------------------------------------------------------------------------------------- |
 | [30 - ReAct Safety](./30-react-safety.md)                         | Loop Detection / Adaptive Compression          | Loop detection, 5-level adaptive compression, Git checkpoint                            |
-| [31 - LSP Integration](./31-lsp-integration.md)                   | LSP                                            | Language Server Protocol, code navigation, diagnostics, rust-analyzer                   |
+| [31 - LSP退役与历史恢复](./31-lsp-integration.md)                   | 已退役能力 | 源码撤销边界、旧插件声明诊断与历史恢复 |
 | [32 - Plugin System](./32-plugin-system.md)                       | Plugin                                         | PluginManifest, PluginRegistry, PluginScope, lifecycle management                       |
 | [33 - Headless Mode](./33-headless-mode.md)                       | Headless                                       | Non-interactive execution, CI/CD integration, JSON output, exit_code                    |
 | [34 - Git Isolation](./34-git-isolation.md)                       | Git Worktree / Checkpoint                      | Parallel subagent isolation, worktree management, file operation rollback               |
@@ -218,7 +224,6 @@ text/image/audio/video input capabilities.
 | Subagent orchestration        | `enable_subagent`                                       | `false`    |
 | Long-term memory (Store)      | `enable_memory`                                         | `false`    |
 | Human-in-the-loop             | `enable_human_in_loop`                                  | `false`    |
-| Chain-of-Thought prompt       | `enable_cot`                                            | `true`     |
 | Context compression           | via `set_compressor()`                                  | none       |
 | Thread persistence / resume   | `conversation_id` + `state_store` (`RuntimeStateStore`) | none       |
 | Transcript/history projection | `conversation_id` + `ConversationStore`                 | none       |
@@ -250,7 +255,6 @@ See `echo-agent-learning/examples/README.md` for the full classification and upk
 | `echo-agent-learning/examples/demo18_semantic_memory.rs`      | Store semantic search (EmbeddingStore / vector retrieval)                                             |
 | `echo-agent-learning/examples/demo19_guard.rs`                | Guard system (rule / LLM content filtering)                                                           |
 | `echo-agent-learning/examples/demo20_audit.rs`                | Audit logging                                                                                         |
-| `echo-agent-learning/examples/demo23_a2a.rs`                  | A2A protocol                                                                                          |
 | `echo-agent-learning/tests/example_contracts/demo24_topology.rs`             | Multi-agent topology visualization                                                                    |
 | `echo-agent-learning/examples/demo25_macros.rs`               | Macro system showcase                                                                                 |
 | `echo-agent-learning/examples/demo26_provider_factory.rs`     | Dynamic LLM factory                                                                                   |

@@ -59,6 +59,14 @@ pub(crate) async fn run_compact(
     let projections = if let Some(projector) = &snap.pre_model_context_projector {
         match projector.project(&projection_context).await {
             Ok(projections) => projections,
+            Err(error) if projector.is_required() => {
+                let reason = error.to_string();
+                let terminal = super::required_context_failure_event(snap, error)?;
+                super::finalize::settle_terminal_projection(snap, context, Some(reason), tx)
+                    .await?;
+                yield_event_or!(tx, terminal, CompactOutcome::Abandoned);
+                return Ok(CompactOutcome::Failed);
+            }
             Err(error) => {
                 tracing::warn!(error = %error, "Pre-model context projection failed");
                 Vec::new()
@@ -181,6 +189,7 @@ mod tests {
             context.push(Message::user("old user".to_string()));
             context.push(Message::assistant_with_tools(vec![
                 crate::llm::types::ToolCall {
+                    provider_source: None,
                     id: "auto-horizon-call".to_string(),
                     call_type: "function".to_string(),
                     function: crate::llm::types::FunctionCall {
@@ -272,10 +281,10 @@ mod tests {
                 context.iteration
             );
             Box::pin(async move {
-                Ok(vec![ContextProjection {
-                    marker: "<changing_projection>".to_string(),
-                    message: Some(Message::user(content)),
-                }])
+                Ok(vec![ContextProjection::replacing(
+                    "<changing_projection>",
+                    Some(Message::user(content)),
+                )])
             })
         }
     }
@@ -292,10 +301,10 @@ mod tests {
             let call = self.calls.fetch_add(1, Ordering::SeqCst);
             Box::pin(async move {
                 if call == 0 {
-                    Ok(vec![ContextProjection {
-                        marker: "failure-test".to_string(),
-                        message: Some(Message::user("projection before failure".to_string())),
-                    }])
+                    Ok(vec![ContextProjection::replacing(
+                        "failure-test",
+                        Some(Message::user("projection before failure".to_string())),
+                    )])
                 } else {
                     Err(crate::error::ReactError::Other(
                         "projection unavailable".to_string(),
@@ -376,9 +385,15 @@ mod tests {
         agent.set_compressor(SlidingWindowCompressor::new(1)).await;
         let store = Arc::new(crate::trace::InMemoryRunStore::new());
         agent.set_run_store(store.clone());
-        let legacy = agent.capture_legacy_external_context();
+
         let trace_run_id = agent
-            .start_legacy_trace_run("compress", &legacy)
+            .start_scoped_trace_run(
+                "compress",
+                None,
+                agent.config().conversation_id.as_deref(),
+                None,
+                None,
+            )
             .await
             .ok_or_else(|| crate::error::ReactError::Other("trace run missing".to_string()))?;
         {
@@ -387,7 +402,8 @@ mod tests {
             context.push(Message::assistant("second message ".repeat(500)));
             context.push(Message::user("continue".to_string()));
         }
-        let snap = AgentRunSnapshot::from_agent(&agent);
+        let mut snap = AgentRunSnapshot::from_agent(&agent);
+        snap.trace_run_id = Some(trace_run_id.clone());
         let (tx, mut rx) = mpsc::channel::<Result<AgentEvent>>(8);
 
         let outcome = run_compact(&snap, &agent.memory.context, &tx, 0).await?;
@@ -514,6 +530,89 @@ mod tests {
         Ok(())
     }
 
+    struct RequiredFailureProjection(FailsAfterFirstProjection);
+
+    impl PreModelContextProjector for RequiredFailureProjection {
+        fn is_required(&self) -> bool {
+            true
+        }
+        fn project<'a>(
+            &'a self,
+            context: &'a ProjectionContext,
+        ) -> BoxFuture<'a, Result<Vec<ContextProjection>>> {
+            self.0.project(context)
+        }
+    }
+
+    #[test]
+    fn required_context_failure_keeps_cancel_and_unsettled_classification() -> Result<()> {
+        let agent = ReactAgent::new(AgentConfig::new("test-model", "agent", "sys"));
+        let mut snap = AgentRunSnapshot::from_agent(&agent);
+        let cancel = crate::agent::CancellationToken::new();
+        cancel.cancel();
+        snap.cancel_token = Some(cancel);
+        let cancelled = super::super::required_context_failure_event(
+            &snap,
+            crate::error::ReactError::Other("unavailable".to_owned()),
+        )
+        .err()
+        .ok_or_else(|| crate::error::ReactError::Other("cancel was overwritten".to_owned()))?;
+        assert_eq!(
+            crate::error::AgentFailure::try_from(&cancelled)?.terminal_kind,
+            crate::error::AgentTerminalKind::Cancelled
+        );
+        snap.cancel_token = None;
+        let unknown = super::super::required_context_failure_event(
+            &snap,
+            crate::error::ReactError::ExecutionNotSettled {
+                run_id: "physical-owner".to_owned(),
+                execution_id: Some("attempt".to_owned()),
+            },
+        );
+        assert!(
+            matches!(unknown, Err(crate::error::ReactError::ExecutionNotSettled { run_id, .. }) if run_id == "physical-owner")
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn run_compact_stops_before_model_when_required_projection_fails() -> Result<()> {
+        let agent = ReactAgent::new(AgentConfig::new("test-model", "agent", "sys"));
+        agent.set_pre_model_context_projector(Some(Arc::new(RequiredFailureProjection(
+            FailsAfterFirstProjection {
+                calls: AtomicUsize::new(0),
+            },
+        ))));
+        let snap = AgentRunSnapshot::from_agent(&agent);
+        let (tx, mut rx) = mpsc::channel::<Result<AgentEvent>>(8);
+        let _ = run_compact(&snap, &agent.memory.context, &tx, 0).await?;
+        let result = run_compact(&snap, &agent.memory.context, &tx, 1).await?;
+        assert!(matches!(result, CompactOutcome::Failed));
+        let event = rx.recv().await.ok_or_else(|| {
+            crate::error::ReactError::Other("required failure event missing".to_string())
+        })??;
+        assert!(
+            matches!(event, AgentEvent::Error { failure, .. } if failure.code == "required_context_unavailable")
+        );
+        assert!(
+            agent
+                .memory
+                .context
+                .lock()
+                .await
+                .messages()
+                .iter()
+                .any(|message| {
+                    message
+                        .content
+                        .as_text_ref()
+                        .is_some_and(|text| text.contains("projection before failure"))
+                }),
+            "必要投影失败不能清掉旧上下文后继续执行"
+        );
+        Ok(())
+    }
+
     #[tokio::test]
     async fn run_compact_clears_projection_after_provider_failure() -> Result<()> {
         let agent = ReactAgent::new(AgentConfig::new("test-model", "agent", "sys"));
@@ -618,6 +717,30 @@ mod stage4_e1_tests {
                 "message {i} with enough words to count"
             )));
         }
+    }
+
+    #[tokio::test]
+    async fn implicit_temperature_is_absent_from_pre_compaction_flush() -> Result<()> {
+        let llm = Arc::new(MockLlmClient::new().with_response("[]"));
+        let mut agent = ReactAgentBuilder::new()
+            .llm_client(llm.clone())
+            .system_prompt("test")
+            .token_limit(1)
+            .build()?;
+        let dir = tempfile::tempdir()?;
+        let layer = Arc::new(MemoryLayerManager::new(
+            dir.path().to_path_buf(),
+            Arc::new(InMemoryStore::new()),
+            Box::new(NullChangeLog),
+        ));
+        agent.install_memory_layer_manager(layer)?;
+        push_messages(&agent, 8).await;
+        let snapshot = AgentRunSnapshot::from_agent(&agent);
+        snapshot
+            .pre_compaction_flush(&agent.memory.context, 0)
+            .await;
+        assert_eq!(llm.all_temperatures(), vec![None]);
+        Ok(())
     }
 
     /// When compression is imminent (low token_limit + messages), the flush

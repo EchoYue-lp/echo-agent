@@ -147,12 +147,12 @@ does not create another task graph or execution state machine.
 
 Committed scheduler occurrences use the framework `DeliveryLedger` for durable
 claim, attempt, owner-loss recovery, and terminal settlement. On startup the
-runner drains the pending FIFO before its first periodic tick. A callback that
-was admitted but not durably settled is recorded as `OutcomeUnknown` and
-retried with the same occurrence ID and a new attempt ID. A callback that
+runner drains the pending FIFO before its first periodic tick. Legacy unprotected callbacks whose owner disappeared retain their original
+`OutcomeUnknown` recovery path. A protected `PhysicalSettlementV1` effect is
+not automatically replayed merely because its observer disappeared. A callback that
 returns an error has a known `Failed` settlement and is not retried by the
-generic scheduler. Dropping or aborting the callback owner in a live process
-also reconciles through `OutcomeUnknown` on the next drain.
+generic scheduler. Physical completion and an observer returning `ExecutionNotSettled` remain
+different facts. This management API adds no crash-retry policy.
 
 `CronTaskStore` assigns an immutable `definition_id` on every add and persists
 a monotonic `control_revision` for status changes. An exact task clone re-added
@@ -175,7 +175,34 @@ filename. A Store-backed `CronTaskStore` must call `with_path()` with a stable,
 backend-specific anchor before constructing the runner; the Store trait has no
 portable backend identity that the framework can safely guess.
 
-This is at-least-once callback delivery, not exactly-once effect execution. A
-crash after an effect succeeds but before settlement can run the callback
-again. Cron polling itself also remains approximate: schedules missed while the
-runner was offline are not replayed without an explicit future misfire policy.
+Legacy unprotected history keeps at-least-once callback delivery: a crash after
+an effect succeeds but before settlement can run that legacy callback again.
+Current protected `EffectStarted` occurrences are not automatically replayed
+when their physical settlement is unknown. Neither path promises exactly-once
+external effects. Cron polling itself also remains approximate: schedules missed
+while the runner was offline are not replayed without an explicit future misfire
+policy.
+
+### Editing and observing an occurrence
+
+`edit_task(expected, CronTaskEdit { name, cron_expr, prompt })` uses the original
+store/control owner. It preserves ID, creation and the latest status; a changed
+definition gets a new generation and checked control revision, while a no-op
+does not write. A stale definition conflicts instead of copying stale status.
+An already-started callback finishes with its old snapshot; replaced/deleted
+summary projection is a no-op, while actual persistence errors remain errors.
+
+`run_once_with_receipt(id)` follows the same original path as `run_once`. Its
+receipt identifies occurrence and attempt and carries the raw callback string
+and original terminal journal receipt. Typed failures distinguish callback,
+physical settlement, projection and commit boundaries and preserve known
+identity. An unknown observation is not permission to run the task again.
+
+`read_occurrence_history(cursor, limit)` reads typed original journal events;
+`None` selects the 128-event default and explicit limits are 1..=512. A cursor
+fixes journal generation, retained floor and snapshot upper sequence. Reads
+never claim, replay a callback or create a TaskRun. Continue loading pages
+explicitly; missing pages and hot-retention eviction do not mean completion.
+A poisoned file journal refuses trusted history until original verified reopen.
+Application run/artifact links must come from the application's actual owner,
+not from parsing callback text. See [ADR 0093](../adr/0093-cron-management-receipts.md) for the exact failure boundaries.

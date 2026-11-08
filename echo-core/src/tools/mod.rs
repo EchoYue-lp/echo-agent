@@ -3,9 +3,16 @@
 pub mod artifact;
 pub mod cell;
 pub mod control;
+pub mod filesystem;
+pub mod native_execution;
 pub mod pagination;
 pub mod permission;
+pub mod search;
 pub mod skill;
+
+pub use native_execution::{NativeExecutionAdmissionError, NativeExecutionResourceAdmission};
+
+pub use search::{ContentSearchOutcome, ContentSearchProvider, ContentSearchRequest};
 
 use crate::error::{ReactError, Result, SandboxError, ToolError};
 use crate::sandbox::SandboxExecutor;
@@ -175,12 +182,20 @@ impl ToolFailure {
                 ) {
                     failure.category = ToolFailureCategory::PartialSideEffect;
                 }
-                return failure.with_side_effect(ToolSideEffect::Possible);
+                let side_effect = if failure.side_effect == ToolSideEffect::Confirmed {
+                    ToolSideEffect::Confirmed
+                } else {
+                    ToolSideEffect::Possible
+                };
+                return failure.with_side_effect(side_effect);
             }
             failure
         };
         match error {
             ReactError::Tool(tool_error) => match tool_error.as_ref() {
+                ToolError::RemoteFailure { failure, .. } => {
+                    possible_side_effect(failure.as_ref().clone())
+                }
                 ToolError::MissingParameter(_)
                 | ToolError::InvalidParameter { .. }
                 | ToolError::InvalidPath { .. }
@@ -198,6 +213,14 @@ impl ToolFailure {
                     possible_side_effect(Self::new(ToolFailureCategory::Permanent))
                 }
             },
+            ReactError::Agent(agent_error)
+                if matches!(
+                    agent_error.as_ref(),
+                    crate::error::AgentError::Cancelled(_) | crate::error::AgentError::Interrupted
+                ) =>
+            {
+                possible_side_effect(Self::new(ToolFailureCategory::Cancelled))
+            }
             ReactError::Sandbox(sandbox_error) => match sandbox_error.as_ref() {
                 SandboxError::Unavailable(_) | SandboxError::StartFailed(_) => {
                     Self::new(ToolFailureCategory::Unavailable)
@@ -939,6 +962,26 @@ pub trait Tool: Send + Sync {
     fn required_input_modalities_owned(&self) -> Vec<crate::llm::ModelInputModality> {
         self.required_input_modalities().to_vec()
     }
+    /// 为read-before-edit提供本工具的真实文件来源与路径；只能在原blocking边界调用。
+    /// parameters/ctx为该次最终调用值，不得从host同名路径或其它工具代次猜目标。
+    /// 读工具接到已确认FileRead路径时仅绑定原source，不能事后重写该事实。
+    /// 缺能力必须明确Unsupported；普通执行与未启用的guard不因此增加权限闸。
+    fn resolve_file_tracking_path(
+        &self,
+        _path: &str,
+        _parameters: &ToolParameters,
+        _ctx: &ToolContext,
+    ) -> Result<(
+        std::sync::Arc<dyn filesystem::FileSystem>,
+        std::path::PathBuf,
+    )> {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "tool does not provide bound read-before-edit target facts",
+        )
+        .into())
+    }
+
     /// Execute the tool with untyped JSON parameters.
     ///
     /// **Default implementation** delegates to [`Self::execute_with_context`]
@@ -1508,7 +1551,7 @@ impl std::fmt::Debug for ExternalRunContext {
 
 /// 运行时上下文，工具执行时由 ExecuteStage 注入。
 ///
-/// 所有字段均为 `Option`，`None` = 回退默认行为（向后兼容老工具）。
+/// 可选字段的 `None` 保留原行为；能力上界只收窄，资源 guard 继续持有原生命周期。
 /// 工具 override `Tool::execute_with_context` 时可读取这些字段。
 ///
 /// `cancel` / `trace_sink` 由应用层经 [`ExternalRunContext`] 注入 subagent，
@@ -1550,12 +1593,16 @@ pub struct ToolContext {
     pub output_artifacts: Option<artifact::ToolOutputArtifactConfig>,
     /// Invocation-scoped schema visibility shared with `tool_search`.
     pub tool_visibility: Option<std::sync::Arc<ToolVisibilityState>>,
+    /// 原执行快照已经求值的能力上界；后代只能继续收窄。
+    pub tool_access: Option<ToolAccess>,
     /// Application-resolved runtime for a persisted script execution.
     ///
     /// This value is intentionally absent from model-visible tool parameters.
     /// `run_code` applies it only when `script_path` is used and its normalized
     /// language matches the tool call.
     pub script_execution_profile: Option<std::sync::Arc<ScriptExecutionProfile>>,
+    /// 可选原生资源准入能力。这里只传引用，已获取 guard 只属于单次物理 command。
+    pub native_execution_admission: Option<Arc<dyn NativeExecutionResourceAdmission>>,
     /// 跨 spawn 安全的取消令牌（值传递，非 task_local）。
     pub cancel: Option<std::sync::Arc<tokio_util::sync::CancellationToken>>,
     /// 跨 spawn 安全的 trace 回传（值传递）。
@@ -1593,6 +1640,14 @@ impl std::fmt::Debug for ToolContext {
             .field("effect_sink", &self.effect_sink.as_ref().map(|_| "<sink>"))
             .field("has_active_message", &self.active_message.is_some())
             .field("output_artifacts", &self.output_artifacts)
+            .field("tool_access", &self.tool_access)
+            .field(
+                "native_execution_admission",
+                &self
+                    .native_execution_admission
+                    .as_ref()
+                    .map(|_| "<provider>"),
+            )
             .field(
                 "visible_tool_count",
                 &self
@@ -1933,7 +1988,9 @@ mod tool_context_tests {
             effect_sink: None,
             output_artifacts: None,
             tool_visibility: None,
+            tool_access: None,
             script_execution_profile: None,
+            native_execution_admission: None,
             cancel: None,
             trace_sink: None,
             delegation_policy: None,
@@ -2027,6 +2084,61 @@ mod tool_context_tests {
         assert_eq!(failure.side_effect, ToolSideEffect::Possible);
         assert_eq!(failure.recovery, ToolRecoveryAction::VerifyThenRetry);
         assert!(!failure.allows_automatic_retry());
+    }
+}
+
+#[cfg(test)]
+mod remote_failure_tests {
+    use super::*;
+
+    #[test]
+    fn remote_failure_preserves_facts_and_only_narrows_effect_recovery() {
+        let expected = ToolFailure::new(ToolFailureCategory::Transient)
+            .retryable()
+            .with_retry_after(1_234)
+            .with_postcondition("read response");
+        let error = ReactError::from(ToolError::RemoteFailure {
+            tool: "web_search".to_string(),
+            message: "rate limited".to_string(),
+            http_status: Some(429),
+            failure: Box::new(expected.clone()),
+        });
+        assert_eq!(ToolFailure::from_error(&error, false), expected);
+        let narrowed = ToolFailure::from_error(&error, true);
+        assert_eq!(narrowed.side_effect, ToolSideEffect::Possible);
+        assert_eq!(narrowed.retry_after_ms, Some(1_234));
+        assert!(!narrowed.allows_automatic_retry());
+
+        let confirmed = ReactError::from(ToolError::RemoteFailure {
+            tool: "remote_write".to_string(),
+            message: "response lost after commit".to_string(),
+            http_status: None,
+            failure: Box::new(expected.with_side_effect(ToolSideEffect::Confirmed)),
+        });
+        let narrowed = ToolFailure::from_error(&confirmed, true);
+        assert_eq!(narrowed.side_effect, ToolSideEffect::Confirmed);
+        assert!(!narrowed.allows_automatic_retry());
+    }
+
+    #[test]
+    fn agent_cancellation_keeps_cancelled_category_and_legacy_errors_stay_permanent() {
+        for error in [
+            ReactError::from(crate::error::AgentError::Cancelled("stopped".to_string())),
+            ReactError::from(crate::error::AgentError::Interrupted),
+        ] {
+            let failure = ToolFailure::from_error(&error, false);
+            assert_eq!(failure.category, ToolFailureCategory::Cancelled);
+            assert_eq!(failure.recovery, ToolRecoveryAction::Stop);
+            assert!(!failure.allows_automatic_retry());
+        }
+        let legacy = ReactError::from(ToolError::ExecutionFailed {
+            tool: "web_search".to_string(),
+            message: "HTTP429 words are not a typed cause".to_string(),
+        });
+        assert_eq!(
+            ToolFailure::from_error(&legacy, false).category,
+            ToolFailureCategory::Permanent
+        );
     }
 }
 

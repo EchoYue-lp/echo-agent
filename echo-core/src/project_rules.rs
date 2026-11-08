@@ -1,5 +1,7 @@
 //! Project-scoped instruction discovery with explicit repository boundaries.
 
+use crate::error::{ReactError, Result};
+use crate::tools::filesystem::FileSystem;
 use std::path::{Path, PathBuf};
 
 const NATIVE_FILES: &[(&str, &str)] = &[
@@ -86,21 +88,40 @@ impl InstructionResolver {
     }
 
     pub fn resolve(&self) -> ResolvedInstructions {
-        let working_dir = canonical_or_original(&self.working_dir);
-        let project_root = self
+        // The existing local convenience API keeps its original best-effort behavior.
+        self.resolve_from(None).unwrap_or_default()
+    }
+
+    /// Resolve the same precedence chain in one provider namespace. Call from
+    /// the caller's blocking preparation boundary; transport failures are errors,
+    /// not missing instructions and never local same-name fallbacks.
+    pub fn resolve_with_file_system(
+        &self,
+        file_system: &dyn FileSystem,
+    ) -> Result<ResolvedInstructions> {
+        self.resolve_from(Some(file_system))
+    }
+
+    fn resolve_from(&self, file_system: Option<&dyn FileSystem>) -> Result<ResolvedInstructions> {
+        let working_dir = canonical_or_original(&self.working_dir, file_system)?;
+        let explicit_root = self
             .explicit_project_root
             .as_ref()
-            .map(|root| canonical_or_original(root))
-            .filter(|root| working_dir.starts_with(root))
-            .or_else(|| find_git_root(&working_dir));
-        self.resolve_at_root(working_dir, project_root)
+            .map(|root| canonical_or_original(root, file_system))
+            .transpose()?;
+        let project_root = match explicit_root.filter(|root| working_dir.starts_with(root)) {
+            Some(root) => Some(root),
+            None => find_git_root(&working_dir, file_system)?,
+        };
+        self.resolve_at_root(working_dir, project_root, file_system)
     }
 
     fn resolve_at_root(
         &self,
         working_dir: PathBuf,
         project_root: Option<PathBuf>,
-    ) -> ResolvedInstructions {
+        file_system: Option<&dyn FileSystem>,
+    ) -> Result<ResolvedInstructions> {
         let scan_root = project_root.clone().unwrap_or_else(|| working_dir.clone());
         let directories = path_from_root_to_working_dir(&scan_root, &working_dir);
 
@@ -108,7 +129,7 @@ impl InstructionResolver {
         let mut blocks = Vec::new();
         for directory in directories {
             let Some((path, kind, content)) =
-                load_one_directory(&directory, &scan_root, self.file_set)
+                load_one_directory(&directory, &scan_root, self.file_set, file_system)?
             else {
                 continue;
             };
@@ -125,23 +146,42 @@ impl InstructionResolver {
             });
         }
 
-        ResolvedInstructions {
+        Ok(ResolvedInstructions {
             content: blocks.join("\n\n"),
             sources,
             project_root,
-        }
+        })
     }
 }
 
-fn canonical_or_original(path: &Path) -> PathBuf {
-    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+fn canonical_or_original(path: &Path, file_system: Option<&dyn FileSystem>) -> Result<PathBuf> {
+    let Some(file_system) = file_system else {
+        return Ok(path.canonicalize().unwrap_or_else(|_| path.to_path_buf()));
+    };
+    match file_system.canonicalize(path) {
+        Ok(path) => Ok(path),
+        Err(ReactError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+            Ok(path.to_path_buf())
+        }
+        Err(error) => Err(error),
+    }
 }
 
-fn find_git_root(working_dir: &Path) -> Option<PathBuf> {
-    working_dir
-        .ancestors()
-        .find(|directory| directory.join(".git").exists())
-        .map(Path::to_path_buf)
+fn find_git_root(
+    working_dir: &Path,
+    file_system: Option<&dyn FileSystem>,
+) -> Result<Option<PathBuf>> {
+    for directory in working_dir.ancestors() {
+        let marker = directory.join(".git");
+        let exists = match file_system {
+            Some(file_system) => file_system.exists(&marker)?,
+            None => marker.exists(),
+        };
+        if exists {
+            return Ok(Some(directory.to_path_buf()));
+        }
+    }
+    Ok(None)
 }
 
 fn path_from_root_to_working_dir(root: &Path, working_dir: &Path) -> Vec<PathBuf> {
@@ -161,26 +201,55 @@ fn load_one_directory(
     directory: &Path,
     project_root: &Path,
     file_set: InstructionFileSet,
-) -> Option<(PathBuf, &'static str, String)> {
+    file_system: Option<&dyn FileSystem>,
+) -> Result<Option<(PathBuf, &'static str, String)>> {
     let candidates: Box<dyn Iterator<Item = &(&str, &str)> + '_> = match file_set {
         InstructionFileSet::All => Box::new(NATIVE_FILES.iter().chain(COMPATIBLE_FILES.iter())),
         InstructionFileSet::AgentsOnly => Box::new(AGENTS_FILES.iter()),
     };
     for (relative, kind) in candidates {
         let candidate = directory.join(relative);
-        let canonical = match candidate.canonicalize() {
-            Ok(path) => path,
-            Err(_) => continue,
+        let canonical = match file_system {
+            Some(file_system) => match file_system.canonicalize(&candidate) {
+                Ok(path) => path,
+                Err(ReactError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+                    continue;
+                }
+                Err(error) => return Err(error),
+            },
+            None => match candidate.canonicalize() {
+                Ok(path) => path,
+                Err(_) => continue,
+            },
         };
-        if !canonical.starts_with(project_root) || !canonical.is_file() {
+        let is_file = match file_system {
+            Some(file_system) => file_system.is_file(&canonical)?,
+            None => canonical.is_file(),
+        };
+        if !canonical.starts_with(project_root) || !is_file {
             continue;
         }
-        match std::fs::read_to_string(&canonical) {
-            Ok(content) if !content.trim().is_empty() => return Some((canonical, kind, content)),
-            _ => continue,
+        let content = match file_system {
+            Some(file_system) => match file_system.read_to_string(&canonical) {
+                Ok(content) => content,
+                Err(ReactError::Io(error))
+                    if error.kind() == std::io::ErrorKind::NotFound
+                        || error.kind() == std::io::ErrorKind::InvalidData =>
+                {
+                    continue;
+                }
+                Err(error) => return Err(error),
+            },
+            None => match std::fs::read_to_string(&canonical) {
+                Ok(content) => content,
+                Err(_) => continue,
+            },
+        };
+        if !content.trim().is_empty() {
+            return Ok(Some((canonical, kind, content)));
         }
     }
-    None
+    Ok(None)
 }
 
 /// Backward-compatible convenience API returning the highest-precedence source
@@ -229,6 +298,7 @@ pub fn inject_rules_with_root(
 mod tests {
     use super::*;
     use std::fs;
+    use std::result::Result;
 
     struct TestDir(PathBuf);
 
@@ -272,12 +342,25 @@ mod tests {
         write(&child.join("AGENTS.override.md"), "leaf override")?;
 
         let resolved = InstructionResolver::new(&child).resolve();
-        let canonical_root = canonical_or_original(&root);
+        let canonical_root = canonical_or_original(&root, None)?;
         assert_eq!(
             resolved.project_root.as_deref(),
             Some(canonical_root.as_path())
         );
         assert_eq!(resolved.sources.len(), 3);
+        assert_eq!(
+            resolved
+                .sources
+                .iter()
+                .map(|source| (source.path.clone(), source.precedence))
+                .collect::<Vec<_>>(),
+            vec![
+                (canonical_root.join(".echo-agent/AGENT.md"), 0),
+                (canonical_root.join("src/AGENTS.md"), 1),
+                (canonical_root.join("src/module/AGENTS.override.md"), 2),
+            ],
+            "真实discovery必须停在最近fixture边界，且root到leaf每层只取一个文件",
+        );
         assert_eq!(
             resolved.sources.first().map(|source| source.kind.as_str()),
             Some("echo_agent")
@@ -324,12 +407,16 @@ mod tests {
         write(&parent.join("AGENTS.md"), "outside")?;
         write(&child.join("CLAUDE.md"), "local")?;
 
-        // TMPDIR 可位于真实仓库中；直接验证 Git 探测返回 None 后的同一解析路径，
-        // 不依赖测试宿主祖先目录恰好没有 .git，也不改进程全局 cwd/env。
-        let resolved =
-            InstructionResolver::new(&child).resolve_at_root(canonical_or_original(&child), None);
+        // TMPDIR可位于真实仓库中；直接验证Git探测返回None后的同一解析路径，
+        // 不依赖测试宿主祖先目录恰好没有.git，也不改进程全局cwd/env。
+        let resolved = InstructionResolver::new(&child).resolve_at_root(
+            canonical_or_original(&child, None)?,
+            None,
+            None,
+        )?;
+        // 此单测只覆盖discovery无根后的解析分支；实际祖先边界由相邻public resolver用例验证。
         assert_eq!(resolved.project_root, None);
-        let canonical_child = canonical_or_original(&child);
+        let canonical_child = canonical_or_original(&child, None)?;
         assert_eq!(
             resolved.sources,
             vec![InstructionSource {
@@ -337,10 +424,70 @@ mod tests {
                 kind: "claude".to_string(),
                 precedence: 0,
             }],
-            "无根时只读 cwd，不准把 parent 或宿主仓库指令当作本项目来源",
+            "无根时只读cwd，不准把parent或宿主仓库指令当作本项目来源",
         );
         assert!(resolved.content.contains("local"));
         assert!(!resolved.content.contains("outside"));
+        Ok(())
+    }
+
+    #[test]
+    fn nearest_git_marker_excludes_outer_instruction_chain()
+    -> Result<(), Box<dyn std::error::Error>> {
+        // 本resolver既有合同识别.git目录/文件边界，不校验Git对象数据库；
+        // 两种标记都必须在最近边界停下，不能穿透到TMPDIR祖先中的外层仓库。
+        for gitfile in [false, true] {
+            let temp = TestDir::new()?;
+            let outer = temp.path().join("outer");
+            let inner = outer.join("nested/inner");
+            let child = inner.join("src/module");
+            fs::create_dir_all(outer.join(".git"))?;
+            fs::create_dir_all(&child)?;
+            if gitfile {
+                write(&inner.join(".git"), "gitdir: ../../metadata/inner")?;
+            } else {
+                fs::create_dir_all(inner.join(".git"))?;
+            }
+            write(
+                &outer.join("AGENTS.md"),
+                "outer instructions must be excluded",
+            )?;
+            write(
+                &outer.join("nested/CLAUDE.md"),
+                "intermediate instructions must be excluded",
+            )?;
+            write(&inner.join("AGENTS.md"), "inner instructions")?;
+            write(&child.join("AGENTS.override.md"), "leaf instructions")?;
+
+            let resolved = InstructionResolver::new(&child).resolve();
+            let canonical_inner = canonical_or_original(&inner, None)?;
+            assert_eq!(
+                resolved.project_root.as_deref(),
+                Some(canonical_inner.as_path())
+            );
+            assert_eq!(
+                resolved
+                    .sources
+                    .iter()
+                    .map(|source| (source.path.clone(), source.precedence))
+                    .collect::<Vec<_>>(),
+                vec![
+                    (canonical_inner.join("AGENTS.md"), 0),
+                    (canonical_inner.join("src/module/AGENTS.override.md"), 1)
+                ],
+            );
+            let inner_position = resolved
+                .content
+                .find("inner instructions")
+                .ok_or_else(|| std::io::Error::other("inner instruction block missing"))?;
+            let leaf_position = resolved
+                .content
+                .find("leaf instructions")
+                .ok_or_else(|| std::io::Error::other("leaf instruction block missing"))?;
+            assert!(inner_position < leaf_position);
+            assert!(!resolved.content.contains("outer instructions"));
+            assert!(!resolved.content.contains("intermediate instructions"));
+        }
         Ok(())
     }
 
@@ -389,7 +536,7 @@ mod tests {
         write(&root.join("AGENTS.md"), "worktree rules")?;
 
         let resolved = InstructionResolver::new(&child).resolve();
-        let canonical_root = canonical_or_original(&root);
+        let canonical_root = canonical_or_original(&root, None)?;
         assert_eq!(
             resolved.project_root.as_deref(),
             Some(canonical_root.as_path())
@@ -405,10 +552,16 @@ mod tests {
         let child = root.join("src");
         fs::create_dir_all(root.join(".git"))?;
         fs::create_dir_all(&child)?;
-        write(&root.join(".echo-agent/AGENT.md"), "native")?;
-        write(&root.join("CLAUDE.md"), "claude")?;
-        write(&root.join("AGENTS.md"), "root agents")?;
-        write(&child.join("AGENTS.override.md"), "leaf override")?;
+        write(
+            &root.join(".echo-agent/AGENT.md"),
+            "EXCLUDED_NATIVE_PAYLOAD",
+        )?;
+        write(&root.join("CLAUDE.md"), "EXCLUDED_CLAUDE_PAYLOAD")?;
+        write(&root.join("AGENTS.md"), "AGENTS_ONLY_ROOT_PAYLOAD")?;
+        write(
+            &child.join("AGENTS.override.md"),
+            "AGENTS_ONLY_LEAF_PAYLOAD",
+        )?;
 
         let resolved = InstructionResolver::new(&child)
             .project_root(&root)
@@ -416,10 +569,31 @@ mod tests {
             .resolve();
 
         assert_eq!(resolved.sources.len(), 2);
-        assert!(resolved.content.contains("root agents"));
-        assert!(resolved.content.contains("leaf override"));
-        assert!(!resolved.content.contains("native"));
-        assert!(!resolved.content.contains("claude"));
+        let canonical_root = canonical_or_original(&root, None)?;
+        assert_eq!(
+            resolved.project_root.as_deref(),
+            Some(canonical_root.as_path())
+        );
+        assert_eq!(
+            resolved.sources.as_slice(),
+            &[
+                InstructionSource {
+                    path: canonical_root.join("AGENTS.md"),
+                    kind: "agents".to_string(),
+                    precedence: 0,
+                },
+                InstructionSource {
+                    path: canonical_root.join("src/AGENTS.override.md"),
+                    kind: "agents_override".to_string(),
+                    precedence: 1,
+                },
+            ]
+        );
+        // 注释保留真实源路径；排除判断针对夹具正文，避免路径中的同名单词误命中。
+        assert!(resolved.content.contains("AGENTS_ONLY_ROOT_PAYLOAD"));
+        assert!(resolved.content.contains("AGENTS_ONLY_LEAF_PAYLOAD"));
+        assert!(!resolved.content.contains("EXCLUDED_NATIVE_PAYLOAD"));
+        assert!(!resolved.content.contains("EXCLUDED_CLAUDE_PAYLOAD"));
         Ok(())
     }
 }

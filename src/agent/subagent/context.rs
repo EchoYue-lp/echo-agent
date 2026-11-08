@@ -123,8 +123,11 @@ pub struct SubagentContext {
     // ── Scoped Context Fields (Step 6) ──────────────────────────────────────
     /// Parent's overall goal (for context)
     pub parent_goal: Option<String>,
-    /// Allowed tools for this subagent (overrides inheritance)
+    /// Nonempty hard tool upper bound for this invocation and its descendants.
+    /// `None` and `Some([])` retain the historical no-additional-whitelist meaning.
     pub allowed_tools: Option<Vec<String>>,
+    /// 祖先调用的工具能力上界，与历史/Goal 是否继承无关。
+    pub tool_access: Option<echo_core::tools::ToolAccess>,
 }
 
 impl std::fmt::Debug for SubagentContext {
@@ -135,6 +138,7 @@ impl std::fmt::Debug for SubagentContext {
             .field("store", &self.store.as_ref().map(|_| "Store { .. }"))
             .field("parent_goal", &self.parent_goal)
             .field("allowed_tools", &self.allowed_tools)
+            .field("tool_access", &self.tool_access)
             .finish()
     }
 }
@@ -149,6 +153,7 @@ impl SubagentContext {
             // Scoped context fields
             parent_goal: None,
             allowed_tools: None,
+            tool_access: None,
         }
     }
 
@@ -199,6 +204,7 @@ impl SubagentContext {
             // inherited conversation history, so Fresh subagents receive it.
             parent_goal,
             allowed_tools: None,
+            tool_access: None,
         }
     }
 
@@ -209,6 +215,36 @@ impl SubagentContext {
             || self.store.is_some()
             || self.parent_goal.is_some()
             || self.allowed_tools.is_some()
+            || self.tool_access.is_some()
+    }
+
+    /// Carry a known parent hard scope independently of transcript inheritance.
+    /// Never encode an empty hard intersection as the legacy unrestricted value.
+    pub(crate) fn inherit_tool_scope(&mut self, inherited: &[String]) -> Result<(), String> {
+        if inherited.is_empty() {
+            return Err("Subagent inherited tool scope is empty".to_string());
+        }
+        let mut tools = match self
+            .allowed_tools
+            .as_deref()
+            .filter(|tools| !tools.is_empty())
+        {
+            Some(current) => inherited
+                .iter()
+                .filter(|name| current.contains(name))
+                .cloned()
+                .collect::<Vec<_>>(),
+            None => inherited.to_vec(),
+        };
+        if tools.is_empty() {
+            return Err("Subagent tool scopes have no common permitted tool".to_string());
+        }
+        tools.sort();
+        tools.dedup();
+        self.tool_definitions
+            .retain(|tool| tools.contains(&tool.function.name));
+        self.allowed_tools = Some(tools);
+        Ok(())
     }
 }
 
@@ -233,6 +269,39 @@ mod tests {
     use super::*;
 
     #[test]
+    fn access_only_context_survives_fresh_inheritance() {
+        let context = SubagentContext {
+            tool_access: Some(echo_core::tools::ToolAccess::ReadOnly),
+            ..SubagentContext::empty()
+        };
+        assert!(context.has_content());
+        assert!(context.messages.is_empty());
+        assert!(context.parent_goal.is_none());
+        assert_eq!(
+            context.clone().tool_access,
+            Some(echo_core::tools::ToolAccess::ReadOnly)
+        );
+    }
+
+    #[test]
+    fn inherited_tool_scope_is_monotonic_and_empty_intersection_rejects() -> Result<(), String> {
+        let mut context = SubagentContext::empty();
+        context.allowed_tools = Some(Vec::new());
+        context.inherit_tool_scope(&["read_file".into(), "agent_tool".into()])?;
+        assert_eq!(
+            context.allowed_tools,
+            Some(vec!["agent_tool".into(), "read_file".into()])
+        );
+        context.inherit_tool_scope(&["read_file".into()])?;
+        let before = context.allowed_tools.clone();
+        assert!(context.inherit_tool_scope(&["write_file".into()]).is_err());
+        assert_eq!(context.allowed_tools, before);
+        assert!(context.inherit_tool_scope(&[]).is_err());
+        assert_eq!(context.allowed_tools, before);
+        Ok(())
+    }
+
+    #[test]
     fn test_sync_default_no_inheritance() {
         let inh = ContextInheritance::sync_default();
         assert!(inh.inherit_history.is_none());
@@ -255,6 +324,7 @@ mod tests {
                 name: "search".into(),
                 description: "Search".into(),
                 parameters: serde_json::json!({}),
+                strict: None,
             },
         }];
         let msgs = vec![Message::user("hello".to_string())];
@@ -268,16 +338,29 @@ mod tests {
     }
 
     #[test]
-    fn from_parent_ignores_runtime_context_and_projection_messages() {
+    fn from_parent_ignores_runtime_context_and_projection_messages() -> Result<(), serde_json::Error>
+    {
         let mut projected = crate::compression::ContextManager::builder(4096).build();
         projected.push(Message::user("用户请求：核对并发问题 🧭".to_string()));
-        projected.apply_projections(&[crate::compression::ContextProjection {
-            marker: "test:turn-contract".to_string(),
-            message: Some(Message::user("English runtime contract".to_string())),
-        }]);
+        projected.apply_projections(&[crate::compression::ContextProjection::replacing(
+            "test:turn-contract",
+            Some(Message::user("English runtime contract".to_string())),
+        )]);
         projected.push(Message::user(
             "[runtime_context:task-runtime]\ninternal state".to_string(),
         ));
+
+        // 已发布 v1 只有 marker 头；新 Tail 双版本与旧信封均不是用户意图。
+        projected.push(Message::user(
+            "<echo-agent-context-projection-v1>\nmarker=\"legacy-runtime\"\nlegacy state".into(),
+        ));
+        for version in ["parent-v1", "parent-v2"] {
+            projected.apply_projections(&[crate::compression::ContextProjection::versioned(
+                "test:runtime-facts",
+                version,
+                Some(Message::user(format!("parent-only runtime {version}"))),
+            )]);
+        }
 
         let ctx = SubagentContext::from_parent(
             &[],
@@ -292,6 +375,58 @@ mod tests {
         );
         assert!(ctx.messages.is_empty());
         assert!(ctx.store.is_none());
+
+        let before = projected.messages().to_vec();
+        let fork = SubagentContext::from_parent(
+            &[],
+            projected.messages(),
+            None,
+            &ContextInheritance {
+                inherit_history: Some(0),
+                ..ContextInheritance::fork_default()
+            },
+        );
+        assert_eq!(fork.parent_goal.as_deref(), ctx.parent_goal.as_deref());
+        // 原 prompt compiler 在生成子提示词前过滤继承快照；from_parent 只搬运快照。
+        let inherited = crate::agent::subagent::filter_history(&fork.messages, None);
+        assert_eq!(inherited.len(), 1);
+        assert_eq!(
+            inherited
+                .first()
+                .and_then(|message| message.content.as_text_ref()),
+            Some("用户请求：核对并发问题 🧭"),
+        );
+        let mut child = crate::compression::ContextManager::builder(4096).build();
+        for message in inherited {
+            child.push(message);
+        }
+        // 故意复用父层最新 marker/version，证明子层不会继承父层去重状态。
+        let facts = crate::compression::ContextProjection::versioned(
+            "test:runtime-facts",
+            "parent-v2",
+            Some(Message::user("child-only runtime".into())),
+        );
+        child.apply_projections(std::slice::from_ref(&facts));
+        let child_count = child.messages().len();
+        child.apply_projections(std::slice::from_ref(&facts));
+        assert_eq!(child.messages().len(), child_count);
+        assert!(child.messages().iter().any(|message| {
+            message
+                .content
+                .as_text_ref()
+                .is_some_and(|text| text.contains("child-only runtime"))
+        }));
+        assert!(!child.messages().iter().any(|message| {
+            message
+                .content
+                .as_text_ref()
+                .is_some_and(|text| text.contains("parent-only runtime"))
+        }));
+        assert_eq!(
+            serde_json::to_value(projected.messages())?,
+            serde_json::to_value(&before)?,
+        );
+        Ok(())
     }
 
     #[test]
@@ -360,6 +495,7 @@ mod tests {
                     name: "search".into(),
                     description: "Search".into(),
                     parameters: serde_json::json!({}),
+                    strict: None,
                 },
             },
             ToolDefinition {
@@ -368,6 +504,7 @@ mod tests {
                     name: "read".into(),
                     description: "Read".into(),
                     parameters: serde_json::json!({}),
+                    strict: None,
                 },
             },
         ];

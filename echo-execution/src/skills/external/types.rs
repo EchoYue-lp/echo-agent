@@ -283,14 +283,13 @@ impl SkillDescriptor {
     }
 }
 
-/// Framework control tools remain available while a skill narrows its domain
-/// tool surface. Without these, a restricted skill could hide finalization,
-/// further discovery, resource loading, or an explicit user question.
+/// Framework lifecycle tools remain available while a skill narrows its domain
+/// tool surface. Without these, a restricted skill could hide discovery,
+/// resource loading, or an explicit user question.
 pub fn is_skill_control_tool(tool_name: &str) -> bool {
     matches!(
         tool_name,
-        "final_answer"
-            | "tool_search"
+        "tool_search"
             | "activate_skill"
             | "read_skill_resource"
             | "run_skill_script"
@@ -886,7 +885,6 @@ Body"#;
         assert!(d.permits_tool("read_skill_resource"));
         assert!(d.permits_tool("Bash(git:status)"));
         assert!(d.permits_tool("run_skill_script"));
-        assert!(d.permits_tool("final_answer"));
         assert!(!d.permits_tool("write_file"));
     }
 }

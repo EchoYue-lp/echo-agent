@@ -37,7 +37,7 @@ use chrono::{DateTime, Utc};
 use futures::future::BoxFuture;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 
 // ── Node and Edge Types ───────────────────────────────────────────────────────
 
@@ -464,6 +464,8 @@ pub struct TopologyStats {
 /// ```
 pub struct TopologyCallback {
     tracker: Arc<TopologyTracker>,
+    // 只关联可视化投影；不持有执行句柄、取消权或工具结果权威。
+    active_calls: Mutex<HashMap<(String, String, String), usize>>,
 }
 
 impl TopologyCallback {
@@ -481,18 +483,50 @@ impl TopologyCallback {
     /// let callback = TopologyCallback::new(tracker.clone());
     /// ```
     pub fn new(tracker: Arc<TopologyTracker>) -> Self {
-        Self { tracker }
+        Self {
+            tracker,
+            active_calls: Mutex::new(HashMap::new()),
+        }
+    }
+
+    fn take_started_call(&self, agent: &str, call_id: &str, tool: &str) -> bool {
+        let key = (agent.to_string(), call_id.to_string(), tool.to_string());
+        let mut active = self
+            .active_calls
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let Some(count) = active.get_mut(&key) else {
+            return false;
+        };
+        *count = count.saturating_sub(1);
+        if *count == 0 {
+            active.remove(&key);
+        }
+        true
     }
 }
 
 impl AgentCallback for TopologyCallback {
-    fn on_tool_start<'a>(
+    fn on_tool_start_with_id<'a>(
         &'a self,
         agent: &'a str,
+        call_id: &'a str,
         tool: &'a str,
         _args: &'a serde_json::Value,
     ) -> BoxFuture<'a, ()> {
         Box::pin(async move {
+            {
+                // 同名Agent实例／重试可以复用provider call_id，每次真实start独立计数。
+                // pipeline对每次调用只发一种terminal；投影不拥有跨Run执行身份或去重权。
+                let mut active = self
+                    .active_calls
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner());
+                let count = active
+                    .entry((agent.to_string(), call_id.to_string(), tool.to_string()))
+                    .or_default();
+                *count = count.saturating_add(1);
+            }
             self.tracker
                 .add_node(TopologyNode::new(agent, NodeType::Agent));
             self.tracker
@@ -501,23 +535,38 @@ impl AgentCallback for TopologyCallback {
         })
     }
 
-    fn on_tool_end<'a>(
-        &'a self,
-        _agent: &'a str,
-        _tool: &'a str,
-        _result: &'a str,
-    ) -> BoxFuture<'a, ()> {
-        Box::pin(async {})
-    }
-
-    fn on_tool_error<'a>(
+    fn on_tool_end_with_id<'a>(
         &'a self,
         agent: &'a str,
+        call_id: &'a str,
+        tool: &'a str,
+        _result: &'a str,
+    ) -> BoxFuture<'a, ()> {
+        Box::pin(async move {
+            self.take_started_call(agent, call_id, tool);
+        })
+    }
+
+    fn on_tool_error_with_id<'a>(
+        &'a self,
+        agent: &'a str,
+        call_id: &'a str,
         tool: &'a str,
         _err: &'a ReactError,
     ) -> BoxFuture<'a, ()> {
         Box::pin(async move {
-            self.tracker.record_call(agent, tool, "call failed");
+            if self.take_started_call(agent, call_id, tool) {
+                // start 已累计该调用；失败只更新同一条边的结果，不能再次增加权重。
+                if let Ok(mut edges) = self.tracker.edges.write()
+                    && let Some(edge) = edges.get_mut(&(agent.to_string(), tool.to_string()))
+                {
+                    edge.label = Some("call failed".to_string());
+                    edge.last_called = Utc::now();
+                }
+            } else {
+                // runtime 可在 start 前通知 interruption，仍保留这次真实尝试。
+                self.tracker.record_call(agent, tool, "call failed");
+            }
         })
     }
 }
@@ -525,6 +574,103 @@ impl AgentCallback for TopologyCallback {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // 同名并发调用按原始 ID 关联；失败或 interruption 不能重复累计 start。
+    #[tokio::test]
+    async fn callback_terminal_keeps_one_call_per_original_id() {
+        for interrupted in [false, true] {
+            let tracker = Arc::new(TopologyTracker::new());
+            let callback = TopologyCallback::new(tracker.clone());
+            let args = serde_json::json!({});
+            callback
+                .on_tool_start_with_id("agent", "call-a", "shell", &args)
+                .await;
+            callback
+                .on_tool_start_with_id("agent", "call-b", "shell", &args)
+                .await;
+            assert_eq!(tracker.stats().total_calls, 2);
+            let error = ReactError::Other("failed original attempt".to_string());
+            if interrupted {
+                callback
+                    .on_tool_interrupted_with_id("agent", "call-a", "shell", &args, &error)
+                    .await;
+            } else {
+                callback
+                    .on_tool_error_with_id("agent", "call-a", "shell", &error)
+                    .await;
+            }
+            assert_eq!(tracker.stats().total_calls, 2);
+            assert!(tracker.edges().first().is_some_and(|edge| {
+                edge.call_count == 2 && edge.label.as_deref() == Some("call failed")
+            }));
+            {
+                let active = callback
+                    .active_calls
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner());
+                assert!(!active.contains_key(&(
+                    "agent".to_string(),
+                    "call-a".to_string(),
+                    "shell".to_string(),
+                )));
+                assert!(active.contains_key(&(
+                    "agent".to_string(),
+                    "call-b".to_string(),
+                    "shell".to_string(),
+                )));
+            }
+            callback
+                .on_tool_end_with_id("agent", "call-b", "shell", "done")
+                .await;
+            assert_eq!(tracker.stats().total_calls, 2);
+            assert!(
+                callback
+                    .active_calls
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .is_empty()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn callback_reused_provider_id_preserves_each_attempt_and_terminal() {
+        let tracker = Arc::new(TopologyTracker::new());
+        let callback = Arc::new(TopologyCallback::new(tracker.clone()));
+        let args = serde_json::json!({});
+        let first = callback.clone();
+        let second = callback.clone();
+        futures::join!(
+            first.on_tool_start_with_id("agent", "call-0", "shell", &args),
+            second.on_tool_start_with_id("agent", "call-0", "shell", &args),
+        );
+        assert_eq!(tracker.stats().total_calls, 2);
+        let error = ReactError::Other("first independent attempt failed".to_string());
+        first
+            .on_tool_error_with_id("agent", "call-0", "shell", &error)
+            .await;
+        assert_eq!(tracker.stats().total_calls, 2);
+        assert_eq!(
+            callback
+                .active_calls
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .get(&("agent".into(), "call-0".into(), "shell".into()))
+                .copied(),
+            Some(1)
+        );
+        second
+            .on_tool_end_with_id("agent", "call-0", "shell", "done")
+            .await;
+        assert_eq!(tracker.stats().total_calls, 2);
+        assert!(
+            callback
+                .active_calls
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .is_empty()
+        );
+    }
 
     #[test]
     fn test_topology_tracker_basic() {

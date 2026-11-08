@@ -804,11 +804,11 @@ pub(crate) fn validate_session_paths(request: &NewSessionRequest) -> Result<()> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent::AgentEvent;
-    use futures::stream::{self, BoxStream, StreamExt};
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::Duration;
 
+    // 这些 fixture 只参与 Session close；执行入口沿当前 trait 默认明确拒绝，
+    // 不为未调用的文本入口保留 FinalAnswer-only 自动成功。
     struct CloseProbeAgent {
         hang: bool,
         close_started: Arc<AtomicBool>,
@@ -848,20 +848,6 @@ mod tests {
                 }
             })
         }
-
-        fn execute<'a>(&'a self, task: &'a str) -> BoxFuture<'a, Result<String>> {
-            Box::pin(async move { Ok(task.to_string()) })
-        }
-
-        fn execute_stream<'a>(
-            &'a self,
-            task: &'a str,
-        ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
-            let answer = task.to_string();
-            Box::pin(
-                async move { Ok(stream::iter(vec![Ok(AgentEvent::FinalAnswer(answer))]).boxed()) },
-            )
-        }
     }
 
     impl Agent for RetryCloseProbeAgent {
@@ -898,20 +884,6 @@ mod tests {
                 }
             })
         }
-
-        fn execute<'a>(&'a self, task: &'a str) -> BoxFuture<'a, Result<String>> {
-            Box::pin(async move { Ok(task.to_string()) })
-        }
-
-        fn execute_stream<'a>(
-            &'a self,
-            task: &'a str,
-        ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
-            let answer = task.to_string();
-            Box::pin(
-                async move { Ok(stream::iter(vec![Ok(AgentEvent::FinalAnswer(answer))]).boxed()) },
-            )
-        }
     }
 
     impl Agent for ControlledCloseProbeAgent {
@@ -937,20 +909,6 @@ mod tests {
                 Ok(())
             })
         }
-
-        fn execute<'a>(&'a self, task: &'a str) -> BoxFuture<'a, Result<String>> {
-            Box::pin(async move { Ok(task.to_string()) })
-        }
-
-        fn execute_stream<'a>(
-            &'a self,
-            task: &'a str,
-        ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
-            let answer = task.to_string();
-            Box::pin(
-                async move { Ok(stream::iter(vec![Ok(AgentEvent::FinalAnswer(answer))]).boxed()) },
-            )
-        }
     }
 
     type ClosePhysicalJoin =
@@ -975,18 +933,6 @@ mod tests {
         }
         fn system_prompt(&self) -> &str {
             "test"
-        }
-        fn execute<'a>(&'a self, task: &'a str) -> BoxFuture<'a, Result<String>> {
-            Box::pin(async move { Ok(task.to_string()) })
-        }
-        fn execute_stream<'a>(
-            &'a self,
-            task: &'a str,
-        ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
-            let answer = task.to_string();
-            Box::pin(
-                async move { Ok(stream::iter(vec![Ok(AgentEvent::FinalAnswer(answer))]).boxed()) },
-            )
         }
         fn close<'a>(&'a self) -> BoxFuture<'a, Result<()>> {
             use futures::FutureExt;

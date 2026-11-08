@@ -294,7 +294,7 @@ async fn main() -> Result<()> {
             ),
             PermissionRule::allow(
                 RuleMatcher::Pattern {
-                    pattern: "final_answer".to_string(),
+                    pattern: "task_list".to_string(),
                 },
                 RuleSource::Session,
             ),
@@ -489,10 +489,14 @@ async fn stream_chat(agent: &mut ReactAgent, message: &str) -> Result<ChatRunSum
 
     while let Some(event) = stream.next().await {
         match event? {
-            AgentEvent::Token(token) => {
-                summary.final_answer.push_str(&token);
-                print!("{}", token);
+            AgentEvent::AssistantMessage { block } => {
+                print!("[消息块 {:?}] {}", block.phase, block.delta);
                 std::io::stdout().flush().ok();
+            }
+            AgentEvent::FinalAnswer(answer) => {
+                // 确认事件只更新最终结果，不由Token/消息块猜测执行结束。
+                println!("\n[最终确认] {}", answer);
+                summary.final_answer = answer;
             }
             AgentEvent::ToolCall { invocation, .. } => {
                 let name = invocation.name;
@@ -508,9 +512,6 @@ async fn stream_chat(agent: &mut ReactAgent, message: &str) -> Result<ChatRunSum
                     println!("   ✓ 结果: {}", preview);
                 }
                 std::io::stdout().flush().ok();
-            }
-            AgentEvent::FinalAnswer(_) => {
-                println!();
             }
             _ => {}
         }
@@ -569,7 +570,7 @@ const CUSTOMER_SERVICE_PROMPT: &str = r#"你是一个专业、友好的电商客
 2. 使用 recall/search_memory 工具查找相关记忆和政策
 3. 使用业务工具（query_order, process_refund, check_inventory, create_ticket）解决问题
 4. 对于复杂问题，使用 task_create 一次性提交完整任务图，并用 task_update 更新
-5. 完成后使用 final_answer 给出最终答复
+5. 完成后以原生正文给出最终答复
 
 【服务原则】
 - 保持礼貌和专业

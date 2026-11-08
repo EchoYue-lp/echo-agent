@@ -9,7 +9,7 @@
 use super::utils::{percent_decode, truncate_chars, urlencode};
 use super::{SearchProvider, SearchResult};
 use async_trait::async_trait;
-use echo_core::error::{Result, ToolError};
+use echo_core::error::Result;
 use reqwest::Client;
 use scraper::{Html, Selector};
 use serde::Deserialize;
@@ -75,10 +75,28 @@ impl SearchProvider for DuckDuckGoProvider {
     }
 
     async fn search(&self, query: &str, max_results: usize) -> Result<Vec<SearchResult>> {
+        self.search_endpoints(
+            query,
+            max_results,
+            "https://html.duckduckgo.com/html/",
+            "https://api.duckduckgo.com/",
+        )
+        .await
+    }
+}
+
+impl DuckDuckGoProvider {
+    async fn search_endpoints(
+        &self,
+        query: &str,
+        max_results: usize,
+        html_endpoint: &str,
+        api_endpoint: &str,
+    ) -> Result<Vec<SearchResult>> {
         let encoded_query = urlencode(query);
 
         // Strategy 1: HTML search
-        let url = format!("https://html.duckduckgo.com/html/?q={}", encoded_query);
+        let url = format!("{html_endpoint}?q={encoded_query}");
         let response = self
             .client
             .get(&url)
@@ -86,33 +104,24 @@ impl SearchProvider for DuckDuckGoProvider {
             .header("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.8")
             .send()
             .await
-            .map_err(|e| ToolError::ExecutionFailed {
-                tool: "web_search".into(),
-                message: format!("DuckDuckGo request failed: {}", e),
-            })?;
+            .map_err(|error| crate::http_body::request_error("web_search", error, None))?;
 
         if !response.status().is_success() {
-            return Err(ToolError::ExecutionFailed {
-                tool: "web_search".into(),
-                message: format!("DuckDuckGo returned error status: {}", response.status()),
-            }
-            .into());
+            return Err(crate::http_body::response_error("web_search", &response));
         }
 
+        let status = response.status().as_u16();
         let html = response
             .text()
             .await
-            .map_err(|e| ToolError::ExecutionFailed {
-                tool: "web_search".into(),
-                message: format!("Failed to read response body: {}", e),
-            })?;
+            .map_err(|error| crate::http_body::request_error("web_search", error, Some(status)))?;
 
         // Detect CAPTCHA / anti-scraping page
         if html.contains("anomaly-modal") || html.contains("bots use DuckDuckGo") {
             warn!(
                 "DuckDuckGo HTML search blocked by anti-scraping, falling back to Instant Answer API"
             );
-            return self.search_via_api(query, max_results).await;
+            return self.search_via_api(query, max_results, api_endpoint).await;
         }
 
         // Attempt to parse HTML search results
@@ -123,7 +132,7 @@ impl SearchProvider for DuckDuckGoProvider {
 
         // HTML parsing returned no results, falling back to API
         warn!("DuckDuckGo HTML parsing returned no results, falling back to Instant Answer API");
-        self.search_via_api(query, max_results).await
+        self.search_via_api(query, max_results, api_endpoint).await
     }
 }
 
@@ -134,38 +143,30 @@ impl DuckDuckGoProvider {
     ///
     /// Returns the abstract (Abstract) and related topics (RelatedTopics).
     /// Less comprehensive than full search, but stable and reliable, unaffected by anti-scraping.
-    async fn search_via_api(&self, query: &str, max_results: usize) -> Result<Vec<SearchResult>> {
-        let url = format!(
-            "https://api.duckduckgo.com/?q={}&format=json&no_html=1",
-            urlencode(query)
-        );
+    async fn search_via_api(
+        &self,
+        query: &str,
+        max_results: usize,
+        endpoint: &str,
+    ) -> Result<Vec<SearchResult>> {
+        let url = format!("{}?q={}&format=json&no_html=1", endpoint, urlencode(query));
 
-        let response =
-            self.client
-                .get(&url)
-                .send()
-                .await
-                .map_err(|e| ToolError::ExecutionFailed {
-                    tool: "web_search".into(),
-                    message: format!("DuckDuckGo API request failed: {}", e),
-                })?;
+        let response = self
+            .client
+            .get(&url)
+            .send()
+            .await
+            .map_err(|error| crate::http_body::request_error("web_search", error, None))?;
 
         if !response.status().is_success() {
-            return Err(ToolError::ExecutionFailed {
-                tool: "web_search".into(),
-                message: format!("DuckDuckGo API returned error: {}", response.status()),
-            }
-            .into());
+            return Err(crate::http_body::response_error("web_search", &response));
         }
 
-        let api_resp: DdgApiResponse =
-            response
-                .json()
-                .await
-                .map_err(|e| ToolError::ExecutionFailed {
-                    tool: "web_search".into(),
-                    message: format!("DuckDuckGo API response parsing failed: {}", e),
-                })?;
+        let status = response.status().as_u16();
+        let api_resp: DdgApiResponse = response
+            .json()
+            .await
+            .map_err(|error| crate::http_body::request_error("web_search", error, Some(status)))?;
 
         let mut results = Vec::new();
 
@@ -295,6 +296,94 @@ fn extract_snippet(element: &scraper::ElementRef, snippet_selectors: &[&str]) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn actual_html_strategy_fallback_is_not_failure_retry() -> Result<()> {
+        use crate::http_body::test_http::{client, response, server};
+        use echo_core::tools::{ToolFailure, ToolFailureCategory};
+        for html in ["anomaly-modal", "<html>No results</html>"] {
+            let api = r#"{"AbstractText":"结果🙂","AbstractURL":"https://example.test/","Heading":"Title","RelatedTopics":[]}"#;
+            let (endpoint, serving) =
+                server(vec![response(200, "", html), response(200, "", api)])?;
+            let results = DuckDuckGoProvider { client: client()? }
+                .search_endpoints(
+                    "中文 query",
+                    5,
+                    &format!("{endpoint}/html/"),
+                    &format!("{endpoint}/api/"),
+                )
+                .await?;
+            assert_eq!(results.len(), 1);
+            let requests = serving.join().map_err(|_| {
+                echo_core::error::ReactError::Other("HTTP fixture panicked".to_string())
+            })??;
+            assert_eq!(requests.len(), 2);
+            assert!(
+                requests
+                    .first()
+                    .is_some_and(|request| request.path.starts_with("/html/?q="))
+            );
+            assert!(
+                requests
+                    .get(1)
+                    .is_some_and(|request| request.path.starts_with("/api/?q="))
+            );
+        }
+        let (endpoint, serving) = server(vec![response(401, "", "secret")])?;
+        let error = DuckDuckGoProvider { client: client()? }
+            .search_endpoints("query", 5, &endpoint, &endpoint)
+            .await
+            .err()
+            .ok_or_else(|| {
+                echo_core::error::ReactError::Other("HTTP401 returned success".to_string())
+            })?;
+        assert_eq!(
+            ToolFailure::from_error(&error, false).category,
+            ToolFailureCategory::Permanent
+        );
+        assert_eq!(
+            serving
+                .join()
+                .map_err(|_| echo_core::error::ReactError::Other(
+                    "HTTP fixture panicked".to_string()
+                ))??
+                .len(),
+            1
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn existing_html_results_keep_lossy_text_decoding_without_api_fallback() -> Result<()> {
+        use crate::http_body::test_http::{client, server};
+        let body = b"<div class=\"result\"><a class=\"result__a\" href=\"https://example.test/\">Rust</a><div class=\"result__snippet\">text\xff</div></div>";
+        let mut response = format!(
+            "HTTP/1.1 200 Fixture\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        )
+        .into_bytes();
+        response.extend_from_slice(body);
+        let (endpoint, serving) = server(vec![response])?;
+        let results = DuckDuckGoProvider { client: client()? }
+            .search_endpoints("query", 5, &endpoint, &endpoint)
+            .await?;
+        assert_eq!(results.len(), 1);
+        assert!(
+            results
+                .first()
+                .is_some_and(|result| result.snippet.contains('\u{fffd}'))
+        );
+        assert_eq!(
+            serving
+                .join()
+                .map_err(|_| echo_core::error::ReactError::Other(
+                    "HTTP fixture panicked".to_string()
+                ))??
+                .len(),
+            1
+        );
+        Ok(())
+    }
 
     #[test]
     fn test_extract_url_redirect() {

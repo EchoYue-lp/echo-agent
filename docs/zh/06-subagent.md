@@ -63,6 +63,46 @@ math_agent.execute("计算 7 * 8")
 
 ## 使用方式
 
+### 核准实际注册记录的宿主准入
+
+原 registry 支持可失败的宿主检查，在用户 factory、模型或后台子执行开始前核准
+真正待消费的 definition／executable 配对。它与返回 `()` 的生命周期观察 hook
+分开。在向调用方发布 registry 前配置：
+
+```rust,ignore
+#[async_trait::async_trait]
+impl SubagentRegistrationAdmission for HostAdmission {
+    async fn admit(
+        &self,
+        registration: &SubagentRegistration,
+        request: &DispatchRequest,
+    ) -> echo_agent::error::Result<()> {
+        self.check_actual_role(registration.definition(), request.runtime_context.as_ref())
+    }
+}
+registry.set_registration_admission(Some(Arc::new(host_admission))).await;
+```
+
+回调直接取得原 invocation 的 run context 和 resource guards。应用自行解释
+provider、内容版本与任务绑定，框架不从名字或 revision 推断持久版本。不配置策略时，
+仍允许原动态注册和普通 General 自扩展，不新增 GUI 权限或 HITL 闸。
+
+`resolve_registration(name)` 不构造 Agent。需要按 definition 决定路由时，
+将同一 handle 传入 `dispatch_registered` 或 `dispatch_background_registered`；
+它们仍核准宿主策略，并拒绝其它 registry／目标的 handle。原按名字派发入口也统一
+解析和核准一次。Sync、Fork、Teammate、Team 的实际成员以及重试／转派都消费自己
+真正选中的记录。后台首轮在 spawn／返回 handle 前核准，进入原 owner 后不重复
+核准这一轮；后继重试重新核准新记录。
+
+同名替换或移除只影响后续选择。在途调用继续使用原 factory／实例，不将结果填入
+替换记录的缓存。`revision()` 只作单 registry 内的诊断，
+`is_same_registration` 比较实际进程内记录；两者均不表示持久插件内容或版本。
+原 `get_agent`／`create_fresh_agent` 是原始构造接口，不能替代带准入的派发。
+详见 [ADR 0097](../adr/0097-subagent-registration-admission.md) 和可执行示例
+`demo50_subagent_communication`。
+
+### 组合并执行 Agent
+
 ```rust
 use echo_agent::prelude::*;
 use echo_agent::tools::others::math::{AddTool, MultiplyTool};
@@ -112,6 +152,60 @@ println!("{}", result);
 ---
 
 ## Subagent 执行流程
+
+### Invocation 工具范围
+
+非空 `SubagentContext.allowed_tools` 是实际 invocation 的硬上界，与 Fresh
+或对话历史继承无关。Sync、Fork、Teammate 和具体 Team member 同时在模型 schema
+与原工具执行 pipeline 中落实该范围。`None` 和 `Some([])` 继续表示没有附加白名单；
+非空上界在新角色中零匹配时，仍然禁用该角色全部工具。
+
+`agent_tool` 沿原 context 传递调用方 `ToolContext` 的硬 **available** 集合，
+不把共享注册表或较小的首轮 visible 集合当作祖先许可。后代只能收窄；更换角色、
+Fresh 模式或工具搜索激活都不能恢复祖先排除的工具。越界的缓存调用在创建 child
+前拒绝。没有这类 context 的独立 framework 调用保持原行为；层数配置与运行政策
+继续由应用负责，见 [ADR 0094](../adr/0094-subagent-tool-boundary-inheritance.md)。
+
+程序调用可在 `AgentInvocationContext.allowed_tools: Option<HashSet<String>>`
+携带同一个非空正向上界。Agent 取得原执行锁之后，才与当时的注册目录求交；排队
+期间新注册的工具不能扩大该 invocation。`visible_tools` 仅选择硬范围内首轮显示的
+schema；`allowed_tools` 缺省或空集合仍表示无附加白名单。穷尽 Rust invocation
+字面量需要补该可选字段，或使用 `..Default::default()`。
+
+每次具体 Subagent invocation 还携带请求中已确定的**目标 actor**委派 policy。
+Executor 只复制该值，不再次推进层数；真实派发边独占 `child_policy`。显式不能
+委派或已到上限的 actor，通过原 available/eligible 资格统一排除模型 schema、
+搜索和真实执行中的 `agent_tool`。`None` 保留框架原 fallback，具体层数政策由应用
+选择。独立 focused 批次已通过真实模型请求和 ToolContext 中的目标 policy 回归，
+包含通用 maximum 4 对照；该框架结果不代表应用 GUI 配置、run 恢复或完整 feature
+矩阵已经验收。
+
+接受显式 runtime context 并汇入两种 prompt-payload inner 的 text/message
+helper（含 exact-attempt 变体）同样保留
+`ExternalRunContext.delegation_policy` 已有的完整目标策略，包含可委派资格、当前层数
+和上限。该上下文描述目标 actor，不再调用 `child_policy`；显式 `depth` 参数必须与
+其中当前层数一致，冲突在派发前报错。没有完整 runtime policy 的独立旧调用保留
+原 `policy_from_depth` 行为，不借此更改框架默认上限或引入应用产品常量。
+
+### Run 与下一次尝试指导
+
+复用同一个 Agent/registry 的不同运行可以使用相同的 task ID 和 attempt。
+调用方应从既有 `SubagentCommandIdentity.attempt_identity()` 投影 exact attempt，
+保留 `run_id` 与 `control_scope_id`；`for_run` 以 Run 同时作为默认 control scope，
+显式嵌套运行仍可使用既有 `for_runtime_scope`。同一 scope/Run/task/attempt 的重复
+执行继续拒绝，完成后的有界去重记录不因开始新运行而清空。
+
+在未来 attempt 尚未有 execution ID 时，使用
+`SubagentExecutor::queue_guidance_scoped(scope, run, task, attempt, instruction)`
+把指导加入同一个原 control queue。准入只领取该 scope/Run/task/attempt 的指导一次；
+其它 Run、其它 control scope 和旧的无 scope 队列互不消费。scope、Run、task 不得为空，
+attempt 不得为零，指导不得为空。同一逻辑 attempt 已 active 或 settled 时拒绝追加。
+
+原 `queue_guidance(task, attempt, instruction)` 保持无 scope 的独立调用语义；它不猜测
+当前 Run，也不能给有 scope 的准入提供指导。两种入口共用原队列、锁与准入检查。
+revision、command 幂等及 durable journal 继续由调用方核验，活消息和 interrupt 仍定位
+真实 execution/attempt；排队成功不等于模型已消费或应用了指导。参见
+[ADR 0058](../adr/0058-task-claim-subagent-attempt-control.md)。
 
 所有路径都会先调用配置的 `SubagentPromptCompiler`：
 
@@ -228,3 +322,11 @@ dispatch 身份，使 consumer 能以准确地址持久化 gap。
 `SubagentEventReplay::gap` 会明确报告保留后缀不连续；高频 thinking/token
 delta 可能在 gap 后缺失，但保留的 lifecycle/tool 边界与 `terminal` 可用于恢复状态和最终输出。
 该能力是进程内恢复窗口，不是永久存储；应用仍负责自己的 durable projection。
+
+## 调用级只读委派
+
+只读 Agent 可以继续向声明为只读的 Subagent 委派。框架在原装配时使用受限 dispatcher，普通 dispatcher 的写能力声明不变。每次调用的 `tool_access` 使用现有 `ToolAccess`：同一目标声明的 ReadOnly 与任一上游 ReadOnly 都继续收窄后代；它与父工具正向上界共同作用，Fresh 或空历史也不会丢失。
+
+真实可用集由锁后快照计算，模型 schema、tool_search 和强制工具调用采用相同限制。只读角色若错误装有写工具，实际调用仍被阻止；同名工具替换、晚注册、Team 写成员、后台和子调用声明 Mutating 都不能提升能力。受限工具缺少有效 ToolContext/visibility 或工具硬交集为空时明确失败，不靠角色名、prompt 或全局把 agent_tool 标只读。
+
+自定义 Agent 若仅实现旧 execute/chat，默认 invocation 回退会拒绝新的 ReadOnly 请求，避免静默忽略约束；None 保留原行为。新增公开字段的完整 literal 需显式补值，SDK 不自动继承。泛用框架合法深度与 EKO 产品层数分别配置和验收。详细取舍见 [ADR0094](../adr/0094-subagent-tool-boundary-inheritance.md)。

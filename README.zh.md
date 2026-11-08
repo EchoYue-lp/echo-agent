@@ -18,6 +18,12 @@
 
 </div>
 
+> 具名退役：当前源码移除 A2A／LSP 的实现、feature、公开出口和专属示例；
+> ACP、MCP、channels、Task/Subagent、通用工具和存储菜单继续保留。
+> 旧插件 `lsp.yaml` 仅保留用户原件；当前prepare不probe、读取、冻结、hash或缓存它，不纳入generation身份、不生成LSP专属诊断，也不启动服务。见[ADR0105](docs/adr/0105-current-config-and-plugin-inputs.md)。
+> 源码同步不代表删后构建、最终锁、SDK正式新Git来源、native或发布资格已通过。
+> 边界和恢复锚点见[ADR0090](docs/adr/0090-a2a-lsp-retirement-contract.md)。
+
 ---
 
 ## 快速上手
@@ -147,7 +153,7 @@ echo-agent 提供跨越 8 个 crate 的 **67 个注册工具**。Prelude 只导�
 | **记忆系统** | `Store`（长期 KV）+ `RuntimeStateStore`（崩溃恢复）+ `ConversationStore`（会话历史） | `.with_memory_tools(store)` |
 | **上下文压缩** | 滑动窗口 / LLM 摘要 / 混合管道 | `SlidingWindowCompressor::new(4096)` |
 | **Token 预算** | 自动截断 + think 前触发压缩 | `.max_tool_output_tokens(2000)` |
-| **统一重试** | 一套策略覆盖 LLM、MCP、A2A、沙箱 | `with_retry(&policy, \|\| ...)` |
+| **统一重试** | 一套策略覆盖 LLM、MCP、沙箱 | `with_retry(&policy, \|\| ...)` |
 | **动态工具** | 对话中增 / 删 / 换工具 | `agent.remove_tool("old")` |
 | **流式输出** | 实时 `AgentEvent` 流（Token + 工具调用） | `agent.execute_stream(task).await?` |
 | **结构化输出** | LLM 输出 → Rust 类型（JSON Schema） | `agent.extract::<Contact>(text)` |
@@ -174,7 +180,6 @@ echo-agent 提供跨越 8 个 crate 的 **67 个注册工具**。Prelude 只导�
 |------|------|---------|
 | **ACP Agent** | 基于 `AgentTurnDriver` 的稳定 v1 Client-Agent adapter | `AcpAgentAdapter::new(factory)` |
 | **MCP 协议** | 接入任意 MCP 服务器（stdio/SSE/HTTP） | `mcp.connect(McpServerConfig::stdio(...))` |
-| **A2A 协议** | Agent Card 发布、跨框架协作 | `A2AServer::bind("0.0.0.0:3000")` |
 | **Skill 系统** | 渐进式披露：发现 → 激活 → 使用 | `agent.load_skill("web_research")` |
 | **IM 通道** | QQ Bot（WebSocket）+ 飞书（Webhook） | `ChannelManager::new()` |
 | **Web 工具** | 搜索 + 网页获取 | `WebSearchTool::auto()` |
@@ -210,9 +215,7 @@ echo-agent = { version = "0.2.0", default-features = false, features = ["mcp", "
 |---------|------|---------|
 | `full` | 启用下列全部 feature | — |
 | `acp` | 稳定 ACP v1 Agent adapter | `agent-client-protocol` |
-| `a2a` | Agent-to-Agent 协议 | `axum`, `jsonwebtoken` |
 | `mcp` | MCP 协议客户端 | — |
-| `lsp` | Language Server Protocol 集成 | — |
 | `sqlite` | SQLite 持久化状态 | `rusqlite` |
 | `telemetry` | OpenTelemetry 追踪与指标 | `opentelemetry` |
 | `human-loop` | 人工审批 | `tokio-tungstenite` |
@@ -273,7 +276,7 @@ echo-agent/
 - **多模态** — 文本、图片（base64 & URL）、文件附件混合消息
 - **IM 集成** — QQ Bot（WebSocket）& 飞书（Webhook）开箱即用
 - **声明式工作流** — 用 YAML/JSON 定义 Agent 图，无需写 Rust 代码
-- **统一重试** — 一套 `RetryPolicy` 覆盖所有外部调用（LLM、MCP、A2A、沙箱）
+- **统一重试** — 一套 `RetryPolicy` 覆盖所有外部调用（LLM、MCP、沙箱）
 - **零成本抽象** — 编译为原生代码，无运行时开销
 
 ---
@@ -284,7 +287,7 @@ echo-agent 围绕多个关键概念构建，支持灵活、生产级的 Agent �
 
 ### 1. ReAct 引擎 — Thought → Action → Observation 循环
 
-echo-agent 的基础是 ReAct（Reasoning + Acting）模式，内置 Chain-of-Thought 提示。Agent 逐步思考、决定调用哪个工具、观察结果，直到得出最终答案。
+echo-agent复用ReAct（Reasoning + Acting）主循环处理模型消息、工具调用与观察。Reasoning由明确的provider/model能力和调用配置决定；框架不默认注入强制分析提示。最终候选继续由既有校验、Stop、持久化与执行结算确认。
 
 ```rust
 let agent = ReactAgentBuilder::new()
@@ -300,10 +303,10 @@ let answer = agent.execute("42 * 1337 等于多少？").await?;
 // 最小化 — 无工具、无记忆，纯对话
 let agent = ReactAgentBuilder::simple("qwen3.7-max", "帮助用户")?;
 
-// 标准版 — 工具 + CoT 启用
+// 标准版 — 启用工具；原生reasoning取决于明确模型能力与配置
 let agent = ReactAgentBuilder::standard("qwen3.7-max", "assistant", "帮助用户")?;
 
-// 全功能 — 工具 + 记忆 + 任务 + CoT
+// 全功能 — 工具与记忆；原生reasoning不由预设强制开启
 let agent = ReactAgentBuilder::full_featured("qwen3.7-max", "assistant", "帮助用户")?;
 ```
 
@@ -329,7 +332,7 @@ async fn weather(city: String) -> Result<ToolResult> {
 ### 3. 记忆系统 — Store + RuntimeStateStore + ConversationStore
 
 - **Store**：长期键值存储，支持命名空间隔离（`InMemoryStore`、`FileStore`、`SqliteStore`）
-- **RuntimeStateStore**：ReAct 运行时检查点（消息 + 激活技能 + 阻塞原因），用于跨进程崩溃恢复（`SqliteRuntimeStateStore`）。公开的 `current_plan` 字段只保留旧 Store 记录的原样读写；ReactAgent 忽略历史值，并在新 safe point 写入 `None`。
+- **RuntimeStateStore**：ReAct 运行时检查点保存消息、激活技能、阻塞原因和工作目录，支持合法当前格式的恢复；计划与依赖图由 `TaskRevisionService` 的单一 TaskRun graph 持有，checkpoint 不保存计划副本。
 - **ConversationStore**：用户可见的对话历史投影，与 `RuntimeStateStore` 配对并在压缩或终态发布前原子结算
 
 直接 Store API 提供通用 KV 读写；Agent 的 Store 工具只召回已批准记忆。分层 typed memory 会把自动抽取和 remember 工具输出
@@ -376,7 +379,7 @@ agent.set_compressor(Box::new(SlidingWindowCompressor::new(4096)));
 
 ### 6. 统一重试策略 — 一套策略覆盖所有外部调用
 
-配置一次重试、超时和退避，应用于 LLM 调用、MCP 请求、A2A 通信和沙箱执行。
+配置一次重试、超时和退避，应用于 LLM 调用、MCP 请求、沙箱执行。
 
 ```rust
 let policy = RetryPolicy::new(3, Duration::from_millis(500))
@@ -473,20 +476,29 @@ let agent = ReactAgentBuilder::new()
 let result = agent.execute("为量子计算趋势研究创建任务图").await?;
 ```
 
-### 13. 流式输出 — 实时逐 Token 输出
+### 13. 当前原生流与完整结束
 
-实时接收 `AgentEvent` 流，包括 Token、工具调用和最终答案。
+`chat_stream/execute_stream` 保留流式事件能力；消费者使用当前 `AssistantMessage` /
+`ExecutionStatus` 及公共 `AgentOutputProjection`，runtime `FinalAnswer` 只确认批准正文。
+最终通知不能提前break；同一原source必须读取到物理EOF，处理原错误后才能finish并返回成功。
+推理、进度与正文分开，安全最终正文不漏、不双拼，不从普通String补造结算。
 
-```rust
-let mut stream = agent.execute_stream("解释量子纠缠").await?;
-while let Some(event) = stream.next().await {
-    match event? {
-        AgentEvent::Token(t) => print!("{t}"),
-        AgentEvent::FinalAnswer(a) => { println!("\n{a}"); break; }
-        _ => {}
-    }
-}
+完整消费代码统一维护在已纳Cargo example编译链的
+[demo17_chat](echo-agent-learning/examples/demo17_chat.rs)，避免README另写一套状态机。
+配置模型后可手动运行：
+
+```bash
+cargo run -p echo-agent-learning --example demo17_chat
 ```
+
+例子的默认main只选Part4比较；要实际观察流式输出，请在同文件main启用Part3的
+`demo_chat_stream()`。这里保留原默认行为，不自动增加模型调用次数。
+
+当前入门文档的同类片段纳入workspace-only learning crate的`no_run` rustdoc编译链，
+本地 `scripts/verify.sh` 显式执行 `cargo test -p echo-agent-learning --doc --all-features --locked`，
+CI learning 组按既有默认 feature 运行 `cargo test -p echo-agent-learning --doc --locked`；
+`--all-targets` 本身不运行 doctest。
+[原生协议说明](docs/zh/43-native-message-execution.md)解释结果、显示与物理结算的区别。
 
 ### 14. 结构化输出 — LLM 响应转 Rust 类型
 
@@ -607,8 +619,8 @@ manager.stop_all().await?;
 ```rust
 #[callback]
 impl MyCallback {
-    async fn on_tool_start(&self, _agent: &str, tool: &str, _args: &serde_json::Value) {
-        println!("[工具] {tool}");
+    async fn on_tool_start_with_id(&self, _agent: &str, call_id: &str, tool: &str, _args: &serde_json::Value) {
+        println!("[工具:{call_id}] {tool}");
     }
 }
 ```
@@ -620,7 +632,7 @@ impl MyCallback {
 ```rust
 use echo_agent::tools::web::{WebSearchTool, WebFetchTool};
 
-// 自动选择最佳提供商：Tavily > Brave > DuckDuckGo
+// 构造时选择：非空EXA_API_KEY优先Exa > Tavily > Brave > DuckDuckGo，失败不换引擎
 agent.add_tool(Box::new(WebSearchTool::auto()));
 agent.add_tool(Box::new(WebFetchTool::new()));
 ```
@@ -630,6 +642,7 @@ agent.add_tool(Box::new(WebFetchTool::new()));
 | DuckDuckGo | 免费 | 中等 | HTML 抓取，无需 API Key |
 | Brave | 免费 2k/月 | 高 | 官方 API |
 | Tavily | 付费（有免费额度） | 最高 | 为 Agent AI 优化 |
+| Exa | API 额度 | 搜索摘要 | `EXA_API_KEY`；highlights 映射为 snippet |
 
 ### 21. 自我审查 — 作为工具的质量评估
 
@@ -659,12 +672,29 @@ let result = agent.execute("撰写量子计算摘要，然后审查它").await?;
 
 ### 22. 快照与回滚 — 时光机调试
 
-```rust
-let snapshot_id = agent.snapshot()?;  // 捕获当前状态
-// ... 一些出问题的操作 ...
-agent.rollback(1)?;                   // 回退 1 步
-agent.rollback_to(&snapshot_id)?;     // 或回退到指定快照
+```rust,no_run
+use echo_agent::prelude::*;
+
+#[tokio::main]
+async fn main() -> echo_agent::error::Result<()> {
+    let agent = ReactAgentBuilder::new()
+        .model("qwen3.7-max")
+        .snapshot_policy(SnapshotPolicy::EveryIteration)
+        .build()?;
+    if let Some(snapshot_id) = agent.snapshot().await {
+        // ... 需要时恢复到捕获的快照；未找到时返回 None。
+        if let Some(restored) = agent.rollback_to(&snapshot_id).await {
+            println!("已恢复 {} 条消息", restored.messages.len());
+        }
+    }
+    if let Some(restored) = agent.rollback(1).await {
+        println!("已回退到快照 {}", restored.id);
+    }
+    Ok(())
+}
 ```
+
+这些异步 API 返回 `Option`；未启用快照管理或没有匹配快照时为 `None`。已有可编译示例见 [demo40_snapshot](echo-agent-learning/examples/demo40_snapshot.rs)，沿现有 examples 编译链验证，不另建文稿字符串镜像测试。
 
 ### 23. 熔断器 — LLM 不可用时自动快速失败
 
@@ -720,7 +750,6 @@ agent.set_circuit_breaker(cb_config);
 | 18 | [`demo18_semantic_memory`](echo-agent-learning/examples/demo18_semantic_memory.rs) | 语义记忆 |
 | 19 | [`demo19_guard`](echo-agent-learning/examples/demo19_guard.rs) | 护栏系统 |
 | 20 | [`demo20_audit`](echo-agent-learning/examples/demo20_audit.rs) | 审计日志 |
-| 23 | [`demo23_a2a`](echo-agent-learning/examples/demo23_a2a.rs) | A2A 协议 |
 | 24 | [`demo24_topology`](echo-agent-learning/tests/example_contracts/demo24_topology.rs) | 拓扑可视化 |
 | 25 | [`demo25_macros`](echo-agent-learning/examples/demo25_macros.rs) | 宏系统展示 |
 | 26 | [`demo26_provider_factory`](echo-agent-learning/examples/demo26_provider_factory.rs) | 动态 LLM 工厂 |
@@ -761,7 +790,7 @@ agent.set_circuit_breaker(cb_config);
 
 ## 兼容性
 
-支持任意 **OpenAI 兼容** API，以及原生 Anthropic、Ollama：
+直接适配的 wire 协议为 **OpenAI Chat Completions、OpenAI Responses 和 Anthropic Messages**。其它服务按其实际兼容端点和模型能力显式配置；协议、provider、完整端点与模型事实分别保留。
 
 | Provider | 接入地址 | 说明 |
 |----------|---------|------|
@@ -769,8 +798,11 @@ agent.set_circuit_breaker(cb_config);
 | Anthropic | `https://api.anthropic.com/v1` | 原生 Claude API |
 | DeepSeek | `https://api.deepseek.com/v1` | DeepSeek-V3/R1 |
 | 阿里云 Qwen | `https://dashscope.aliyuncs.com/compatible-mode/v1` | Qwen3-max, Qwen-plus |
-| Ollama（本地） | `http://localhost:11434` | 原生协议 |
+| Ollama（OpenAI兼容接入） | `http://localhost:11434/v1/` | 显式选择 Chat Completions；具体模型与字段支持须核对 |
 | LM Studio | `http://localhost:1234/v1` | 任意 GGUF 模型 |
+
+Ollama 原生聊天使用 `/api/chat` 与 NDJSON，OpenAI 兼容聊天使用 `/v1/chat/completions`；本表按后者接入。Thinking／`think` 参数是所选协议内的模型配置，不构成第四种 wire adapter，也不表示全部 OpenAI 功能均受支持。参见 [Ollama 官方兼容说明](https://docs.ollama.com/api/openai-compatibility) 与 [原生聊天接口](https://docs.ollama.com/api/chat)。
+
 
 ---
 

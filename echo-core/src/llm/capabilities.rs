@@ -182,7 +182,13 @@ impl ProviderCapabilities {
         match protocol {
             LlmApiProtocol::Anthropic => (normalized == "anthropic").then_some(Self::anthropic()),
             LlmApiProtocol::ChatCompletions => {
-                if normalized == "anthropic" {
+                if normalized == "deepseek" {
+                    // DeepSeek Chat 当前仅支持 json_object；此标志专指原生 JSON Schema。
+                    // 限制只归 Chat 默认事实，Responses text.format 与精确覆盖保持原语义。
+                    let mut capabilities = Self::openai_compatible();
+                    capabilities.structured_output = false;
+                    Some(capabilities)
+                } else if normalized == "anthropic" {
                     None
                 } else if normalized == "ollama" {
                     Some(Self::ollama())
@@ -1666,6 +1672,14 @@ pub fn resolve_thinking_profile(
         return ThinkingProfile::new(T::OpenaiReasoningEffort, GPT_56_LEVELS);
     }
 
+    // DeepSeek Chat官方具名模型的默认事实；后续ExactModel/CallerOverride仍按原优先级覆盖。
+    if provider == "deepseek"
+        && model == "deepseek-flash"
+        && api_protocol == LlmApiProtocol::ChatCompletions
+    {
+        return ThinkingProfile::new(T::DeepseekReasoningEffort, DEEPSEEK_V4_LEVELS);
+    }
+
     if model.starts_with("deepseek-v4") {
         if is_dashscope && api_protocol == LlmApiProtocol::ChatCompletions {
             return ThinkingProfile::new(T::EnableThinkingFlag, TOGGLE_LEVELS);
@@ -2495,6 +2509,45 @@ mod tests {
         let confidence = serde_json::from_str::<ModelFactConfidence>("255")
             .map_err(|error| error.to_string())?;
         assert_eq!(confidence.percent(), 100);
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod deepseek_schema_consumer_regression {
+    use super::*;
+    #[test]
+    fn chat_json_object_and_responses_schema_remain_distinct() -> Result<(), String> {
+        let chat = ProviderCapabilities::built_in_for_protocol(
+            "deepseek",
+            LlmApiProtocol::ChatCompletions,
+        )
+        .ok_or("missing Chat facts")?;
+        let responses =
+            ProviderCapabilities::built_in_for_protocol("deepseek", LlmApiProtocol::Responses)
+                .ok_or("missing Responses facts")?;
+        assert!(!chat.structured_output);
+        assert!(responses.structured_output);
+        let explicit = ModelProfileResolver::new()
+            .register_exact(
+                "deepseek",
+                "deepseek-flash",
+                ModelProfileOverride {
+                    supports_structured_output: Some(true),
+                    ..Default::default()
+                },
+            )
+            .resolve_for_protocol_at(
+                "deepseek",
+                "deepseek-flash",
+                LlmApiProtocol::ChatCompletions,
+                Some("https://api.deepseek.com/chat/completions"),
+                std::time::SystemTime::now(),
+            );
+        assert!(
+            explicit.profile.capabilities.structured_output,
+            "exact override precedence must remain unchanged"
+        );
         Ok(())
     }
 }

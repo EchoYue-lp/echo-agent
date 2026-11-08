@@ -281,6 +281,13 @@ impl ChannelSessionInstance {
     fn current_delivery_fence(&self) -> ChannelDeliveryFence {
         self.lock_delivery_fence().clone()
     }
+
+    /// Bind a response template to this exact session incarnation before
+    /// queueing it at the existing consumer. Cloning/updating the template
+    /// later preserves the fence; no delivery permit is held while queued.
+    pub fn bind_outbound(&self, message: OutboundMessage) -> OutboundMessage {
+        message.with_delivery_fence(self.current_delivery_fence())
+    }
 }
 
 impl SessionKey {
@@ -301,6 +308,18 @@ struct Session {
     handler: Arc<dyn MessageHandler>,
     instance: ChannelSessionInstance,
     generation: Arc<SessionGeneration>,
+    // Retain the factory-created owner even if its opt-in bind fails; close still owns it.
+    durable_binding_error: Option<&'static str>,
+}
+
+struct PreparedSession {
+    guard: OwnedMutexGuard<Session>,
+    reset: bool,
+    ended: Option<(
+        Arc<SessionGeneration>,
+        ChannelSessionInstance,
+        SessionEndReason,
+    )>,
 }
 
 struct SessionGeneration {
@@ -555,6 +574,8 @@ pub enum SessionEndReason {
     CommandReset,
     /// Replaced after timeout
     TimeoutReplaced,
+    /// The channel closed this retained session successfully
+    Shutdown,
 }
 
 /// Session management handler.
@@ -569,6 +590,8 @@ pub struct SessionHandler {
     admission_gate: StdMutex<()>,
     admission_open: AtomicBool,
     shutdown: CancellationToken,
+    durable_ingress: bool,
+    durable_service: StdMutex<Option<CancellationToken>>,
 }
 
 impl SessionHandler {
@@ -585,12 +608,44 @@ impl SessionHandler {
             admission_gate: StdMutex::new(()),
             admission_open: AtomicBool::new(true),
             shutdown: CancellationToken::new(),
+            durable_ingress: false,
+            durable_service: StdMutex::new(None),
         }
     }
 
     /// Create with default configuration
     pub fn with_defaults(factory: impl SessionFactory + 'static) -> Self {
         Self::new(SessionConfig::default(), factory)
+    }
+
+    /// Declare that this factory creates durable hosts. Each original inner
+    /// owner is bound once to its session child before business admission.
+    pub fn with_durable_ingress(mut self) -> Self {
+        self.durable_ingress = true;
+        self
+    }
+
+    fn durable_service_token(&self) -> echo_core::error::Result<CancellationToken> {
+        let service = self
+            .durable_service
+            .lock()
+            .map_err(|_| ReactError::Other("channel durable service lock poisoned".into()))?;
+        let token = service.as_ref().ok_or_else(|| {
+            ReactError::Other("channel durable service has not been bound".into())
+        })?;
+        if token.is_cancelled() || !self.admission_open.load(Ordering::Acquire) {
+            return Err(ReactError::Other(
+                "channel durable service is closed".into(),
+            ));
+        }
+        Ok(token.clone())
+    }
+
+    fn check_inner_binding(&self, session: &Session) -> echo_core::error::Result<()> {
+        if let Some(error) = session.durable_binding_error {
+            return Err(ReactError::Other(error.into()));
+        }
+        Ok(())
     }
 
     /// Set the session-end callback used for exact resource cleanup.
@@ -619,14 +674,32 @@ impl SessionHandler {
 
     fn create_session(&self, key: &SessionKey, previous_incarnation_id: Option<String>) -> Session {
         let instance = ChannelSessionInstance::from_key(key, previous_incarnation_id);
-        let handler = Arc::from(self.factory.create(&instance));
+        let handler: Arc<dyn MessageHandler> = Arc::from(self.factory.create(&instance));
+        let service = if self.durable_ingress {
+            self.durable_service_token()
+        } else {
+            Ok(self.shutdown.clone())
+        };
+        let cancellation = service
+            .as_ref()
+            .map(CancellationToken::child_token)
+            .unwrap_or_else(|_| self.shutdown.child_token());
+        let durable_binding_error = if self.durable_ingress {
+            match service {
+                Ok(_) => handler
+                    .bind_durable_ingress(cancellation.clone())
+                    .err()
+                    .map(|_| "inner handler does not support durable channel ingress ownership"),
+                Err(_) => Some("channel durable service is unavailable"),
+            }
+        } else {
+            None
+        };
         Session {
             handler,
             instance: instance.clone(),
-            generation: Arc::new(SessionGeneration::new(
-                instance,
-                self.shutdown.child_token(),
-            )),
+            generation: Arc::new(SessionGeneration::new(instance, cancellation)),
+            durable_binding_error,
         }
     }
 
@@ -749,7 +822,9 @@ impl SessionHandler {
             let Some(guard) = session.try_lock().ok() else {
                 continue;
             };
-            if !guard.generation.is_idle_and_expired(self.config.timeout) {
+            if guard.handler.has_pending_work()
+                || !guard.generation.is_idle_and_expired(self.config.timeout)
+            {
                 continue;
             }
             let ended_instance = guard.instance.clone();
@@ -773,8 +848,180 @@ impl SessionHandler {
     }
 }
 
+impl SessionHandler {
+    /// One setup/reset/expiry authority for scalar, streamed and durable calls.
+    async fn prepare_session(
+        &self,
+        msg: &InboundMessage,
+        caller: &CancellationToken,
+    ) -> echo_core::error::Result<PreparedSession> {
+        if caller.is_cancelled() {
+            return Err(ReactError::Other("channel invocation cancelled".into()));
+        }
+        if self.durable_ingress {
+            self.durable_service_token()?;
+        }
+        let key = SessionKey::from_message(msg)?;
+        self.prune_expired_except(&key, caller).await?;
+        let mut guard = self.lock_current_session(&key, caller).await?;
+        if caller.is_cancelled() {
+            return Err(ReactError::Other("channel invocation cancelled".into()));
+        }
+        self.check_inner_binding(&guard)?;
+        let reset = self.config.is_reset(&msg.text);
+        let expired = !guard.handler.has_pending_work()
+            && guard.generation.is_idle_and_expired(self.config.timeout);
+        let ended = if reset || expired {
+            let instance = guard.instance.clone();
+            let generation = Arc::clone(&guard.generation);
+            generation
+                .retire(reset && (self.durable_ingress || guard.handler.settles_on_cancel()))
+                .await;
+            guard.handler.close().await?;
+            let reason = if reset {
+                SessionEndReason::CommandReset
+            } else {
+                SessionEndReason::TimeoutReplaced
+            };
+            if let Err(error) =
+                self.replace_closed_session(&key, &mut guard, Some(instance.incarnation_id()))
+            {
+                drop(guard);
+                self.settle_session_end(&generation, instance, reason);
+                return Err(error);
+            }
+            Some((generation, instance, reason))
+        } else {
+            None
+        };
+        if let Err(error) = self.check_inner_binding(&guard) {
+            drop(guard);
+            self.settle_prepared_end(ended);
+            return Err(error);
+        }
+        if guard.generation.cancellation.is_cancelled() {
+            drop(guard);
+            self.settle_prepared_end(ended);
+            return Err(ReactError::Other("channel session is closing".into()));
+        }
+        Ok(PreparedSession {
+            guard,
+            reset,
+            ended,
+        })
+    }
+
+    fn settle_prepared_end(
+        &self,
+        ended: Option<(
+            Arc<SessionGeneration>,
+            ChannelSessionInstance,
+            SessionEndReason,
+        )>,
+    ) {
+        if let Some((generation, instance, reason)) = ended {
+            self.settle_session_end(&generation, instance, reason);
+        }
+    }
+
+    fn reset_message(&self, msg: &InboundMessage, guard: &Session) -> OutboundMessage {
+        OutboundMessage::new(
+            &msg.channel_id,
+            msg.reply_target(),
+            msg.chat_type,
+            &self.config.reset_reply,
+        )
+        .with_delivery_fence(guard.instance.current_delivery_fence())
+    }
+
+    async fn stream_invocation<'a>(
+        &'a self,
+        msg: InboundMessage,
+        caller: CancellationToken,
+    ) -> echo_core::error::Result<
+        futures::stream::BoxStream<'a, echo_core::error::Result<OutboundMessage>>,
+    > {
+        use futures::stream::StreamExt;
+        let PreparedSession {
+            guard,
+            reset,
+            ended,
+        } = self.prepare_session(&msg, &caller).await?;
+        if reset {
+            let reply = self.reset_message(&msg, &guard);
+            drop(guard);
+            self.settle_prepared_end(ended);
+            return Ok(futures::stream::once(async move { Ok(reply) }).boxed());
+        }
+        let handler = guard.handler.clone();
+        let settles_on_cancel = handler.settles_on_cancel();
+        let generation = Arc::clone(&guard.generation);
+        let delivery_fence = guard.instance.current_delivery_fence();
+        let cancellation = generation.cancellation.child_token();
+        let Some(stream_receipt) = generation.begin() else {
+            drop(guard);
+            self.settle_prepared_end(ended);
+            return Err(ReactError::Other(
+                "session active stream capacity exhausted".into(),
+            ));
+        };
+        drop(guard);
+        self.settle_prepared_end(ended);
+        let stream = async_stream::stream! {
+            let mut stream_receipt = Some(stream_receipt);
+            if settles_on_cancel && !stream_receipt.as_mut().is_some_and(SessionStreamReceipt::begin_driving) {
+                drop(stream_receipt.take());
+                return;
+            }
+            let setup = super::manager::drive_call(
+                handler.handle_stream_with_cancel(msg, cancellation.clone()),
+                &cancellation, &caller, settles_on_cancel,
+            ).await;
+            let mut inner = match setup {
+                Ok(stream) => stream,
+                Err(error) => {
+                    drop(stream_receipt.take());
+                    if cancellation.is_cancelled() { return; }
+                    yield Err(error);
+                    return;
+                }
+            };
+            loop {
+                let item = super::manager::drive_call(
+                    async { Ok(inner.next().await) }, &cancellation, &caller, settles_on_cancel,
+                ).await.unwrap_or(None);
+                let Some(item) = item else { break; };
+                match item {
+                    Ok(message) => {
+                        if cancellation.is_cancelled() { continue; }
+                        yield Ok(message.with_delivery_fence(delivery_fence.clone()));
+                    }
+                    Err(error) => {
+                        drop(inner);
+                        drop(stream_receipt.take());
+                        yield Err(error);
+                        return;
+                    }
+                }
+            }
+            drop(inner);
+            drop(stream_receipt.take());
+        };
+        Ok(stream.boxed())
+    }
+}
+
 #[async_trait]
 impl MessageHandler for SessionHandler {
+    fn has_pending_work(&self) -> bool {
+        self.sessions.iter().any(|entry| {
+            entry
+                .value()
+                .try_lock()
+                .map_or(true, |session| session.handler.has_pending_work())
+        })
+    }
+
     async fn handle(&self, msg: InboundMessage) -> echo_core::error::Result<OutboundMessage> {
         self.handle_with_cancel(msg, CancellationToken::new()).await
     }
@@ -790,55 +1037,19 @@ impl MessageHandler for SessionHandler {
         msg: InboundMessage,
         caller: CancellationToken,
     ) -> echo_core::error::Result<OutboundMessage> {
-        if caller.is_cancelled() {
-            return Err(ReactError::Other("channel invocation cancelled".into()));
-        }
-        let key = SessionKey::from_message(&msg)?;
-        self.prune_expired_except(&key, &caller).await?;
-        let mut guard = self.lock_current_session(&key, &caller).await?;
-        // A queued reset/expiry request can be cancelled while another call owns
-        // this sender lock. Recheck before mutating its canonical incarnation.
-        if caller.is_cancelled() {
-            return Err(ReactError::Other("channel invocation cancelled".into()));
-        }
-        if self.config.is_reset(&msg.text) {
-            let ended_instance = guard.instance.clone();
-            let ended_generation = Arc::clone(&guard.generation);
-            ended_generation
-                .retire(guard.handler.settles_on_cancel())
-                .await;
-            guard.handler.close().await?;
-            self.replace_closed_session(&key, &mut guard, Some(ended_instance.incarnation_id()))?;
-            let delivery_fence = guard.instance.current_delivery_fence();
+        let PreparedSession {
+            guard,
+            reset,
+            ended,
+        } = self.prepare_session(&msg, &caller).await?;
+        if reset {
+            let reply = self.reset_message(&msg, &guard);
             drop(guard);
-            self.settle_session_end(
-                &ended_generation,
-                ended_instance,
-                SessionEndReason::CommandReset,
-            );
-            return Ok(OutboundMessage::new(
-                &msg.channel_id,
-                msg.reply_target(),
-                msg.chat_type,
-                &self.config.reset_reply,
-            )
-            .with_delivery_fence(delivery_fence));
+            self.settle_prepared_end(ended);
+            return Ok(reply);
         }
-        if guard.generation.cancellation.is_cancelled() {
-            return Err(ReactError::Other("channel session is closing".to_string()));
-        }
-        if guard.generation.is_idle_and_expired(self.config.timeout) {
-            let ended_instance = guard.instance.clone();
-            let ended_generation = Arc::clone(&guard.generation);
-            ended_generation.retire(false).await;
-            guard.handler.close().await?;
-            self.replace_closed_session(&key, &mut guard, Some(ended_instance.incarnation_id()))?;
-            self.settle_session_end(
-                &ended_generation,
-                ended_instance,
-                SessionEndReason::TimeoutReplaced,
-            );
-        }
+        self.settle_prepared_end(ended);
+        // Scalar legacy calls retain the original sender mutex through the call.
         guard.generation.touch();
         let cancellation = guard.generation.cancellation.child_token();
         let result = super::manager::drive_call(
@@ -869,126 +1080,103 @@ impl MessageHandler for SessionHandler {
     ) -> echo_core::error::Result<
         futures::stream::BoxStream<'a, echo_core::error::Result<OutboundMessage>>,
     > {
-        if caller.is_cancelled() {
-            return Err(ReactError::Other("channel invocation cancelled".into()));
+        self.stream_invocation(msg, caller).await
+    }
+
+    fn bind_durable_ingress(
+        &self,
+        service_cancel: CancellationToken,
+    ) -> echo_core::error::Result<()> {
+        let _gate = self
+            .admission_gate
+            .lock()
+            .map_err(|_| ReactError::Other("channel session admission lock poisoned".into()))?;
+        if !self.durable_ingress {
+            return Err(ReactError::Other(
+                "session factory has not opted into durable ingress".into(),
+            ));
         }
-        use futures::stream::StreamExt;
-        let key = SessionKey::from_message(&msg)?;
-        self.prune_expired_except(&key, &caller).await?;
-        let mut guard = self.lock_current_session(&key, &caller).await?;
-        if caller.is_cancelled() {
-            return Err(ReactError::Other("channel invocation cancelled".into()));
+        if !self.admission_open.load(Ordering::Acquire)
+            || self.shutdown.is_cancelled()
+            || service_cancel.is_cancelled()
+            || !self.sessions.is_empty()
+        {
+            return Err(ReactError::Other(
+                "channel durable service cannot be rebound or revived".into(),
+            ));
         }
-        if self.config.is_reset(&msg.text) {
-            let ended_instance = guard.instance.clone();
-            let ended_generation = Arc::clone(&guard.generation);
-            ended_generation
-                .retire(guard.handler.settles_on_cancel())
-                .await;
-            guard.handler.close().await?;
-            self.replace_closed_session(&key, &mut guard, Some(ended_instance.incarnation_id()))?;
-            let delivery_fence = guard.instance.current_delivery_fence();
+        let mut service = self
+            .durable_service
+            .lock()
+            .map_err(|_| ReactError::Other("channel durable service lock poisoned".into()))?;
+        if service.is_some() {
+            return Err(ReactError::Other(
+                "channel durable service is already bound".into(),
+            ));
+        }
+        *service = Some(service_cancel);
+        Ok(())
+    }
+
+    async fn admit_with_ingress(
+        &self,
+        msg: InboundMessage,
+        caller: CancellationToken,
+        receipt: super::types::ChannelIngressReceipt,
+    ) -> echo_core::error::Result<()> {
+        if !self.durable_ingress {
+            return Err(ReactError::Other(
+                "session factory has not opted into durable ingress".into(),
+            ));
+        }
+        let PreparedSession {
+            guard,
+            reset,
+            ended,
+        } = self.prepare_session(&msg, &caller).await?;
+        let handler = Arc::clone(&guard.handler);
+        let cancellation = guard.generation.cancellation.child_token();
+        let Some(mut invocation) = guard.generation.begin() else {
             drop(guard);
-            self.settle_session_end(
-                &ended_generation,
-                ended_instance,
-                SessionEndReason::CommandReset,
-            );
-            let reply = OutboundMessage::new(
-                &msg.channel_id,
-                msg.reply_target(),
-                msg.chat_type,
-                &self.config.reset_reply,
-            )
-            .with_delivery_fence(delivery_fence);
-            return Ok(futures::stream::once(async move { Ok(reply) }).boxed());
-        }
-
-        if guard.generation.cancellation.is_cancelled() {
-            return Err(ReactError::Other("channel session is closing".to_string()));
-        }
-
-        let timeout_replaced = guard.generation.is_idle_and_expired(self.config.timeout);
-        let ended_instance = timeout_replaced.then(|| guard.instance.clone());
-        let ended_generation = timeout_replaced.then(|| Arc::clone(&guard.generation));
-        if timeout_replaced {
-            if let Some(generation) = ended_generation.as_ref() {
-                generation.retire(false).await;
-            }
-            guard.handler.close().await?;
-            self.replace_closed_session(
-                &key,
-                &mut guard,
-                ended_instance
-                    .as_ref()
-                    .map(ChannelSessionInstance::incarnation_id),
-            )?;
-        }
-        let handler = guard.handler.clone();
-        let settles_on_cancel = handler.settles_on_cancel();
-        let generation = Arc::clone(&guard.generation);
-        let delivery_fence = guard.instance.current_delivery_fence();
-        // Cancelling this child must not retire a sibling's SessionGeneration.
-        let cancellation = generation.cancellation.child_token();
-        let Some(stream_receipt) = generation.begin() else {
-            return Err(echo_core::error::ReactError::Other(
-                "session active stream capacity exhausted".to_string(),
+            self.settle_prepared_end(ended);
+            return Err(ReactError::Other(
+                "session active admission capacity exhausted".into(),
             ));
         };
-        drop(guard);
-        if let (Some(ended_instance), Some(ended_generation)) = (ended_instance, ended_generation) {
-            self.settle_session_end(
-                &ended_generation,
-                ended_instance,
-                SessionEndReason::TimeoutReplaced,
-            );
+        if !invocation.begin_driving() {
+            drop(guard);
+            self.settle_prepared_end(ended);
+            return Err(ReactError::Other(
+                "channel durable admission is closing".into(),
+            ));
         }
-
-        let stream = async_stream::stream! {
-            let mut stream_receipt = Some(stream_receipt);
-            if settles_on_cancel && !stream_receipt.as_mut().is_some_and(SessionStreamReceipt::begin_driving) {
-                drop(stream_receipt.take());
-                return;
-            }
-            let setup = super::manager::drive_call(
-                handler.handle_stream_with_cancel(msg, cancellation.clone()),
-                &cancellation, &caller, settles_on_cancel,
-            ).await;
-            let mut inner = match setup {
-                Ok(stream) => stream,
-                Err(error) => {
-                    drop(stream_receipt.take());
-                    if cancellation.is_cancelled() { return; }
-                    yield Err(error);
-                    return;
-                }
-            };
-            loop {
-                let item = super::manager::drive_call(
-                    async { Ok(inner.next().await) }, &cancellation, &caller, settles_on_cancel,
-                ).await.unwrap_or(None);
-                let Some(item) = item else {
-                    break;
-                };
-                match item {
-                    Ok(message) => {
-                        // The inner driven consumer must finish its real receipt,
-                        // while cancelled output can no longer be delivered.
-                        if cancellation.is_cancelled() { continue; }
-                        yield Ok(message.with_delivery_fence(delivery_fence.clone()));
-                    }
-                    Err(error) => {
-                        drop(inner);
-                        drop(stream_receipt.take());
-                        yield Err(error);
-                        return;
-                    }
-                }
-            }
-            drop(inner);
-            drop(stream_receipt.take());
-        };
-        Ok(stream.boxed())
+        let reset_reply = reset.then(|| {
+            self.reset_message(&msg, &guard)
+                .with_reply_to(msg.message_id.clone())
+        });
+        drop(guard);
+        self.settle_prepared_end(ended);
+        if let Some(reply) = reset_reply {
+            // Reset already settled its original owner. Delivery remains a
+            // separate real receipt through this same inner host's sender.
+            receipt.publish(super::types::ChannelIngressDisposition::ControlHandled);
+            return super::manager::drive_call(
+                handler.reply_with_cancel(reply, cancellation.clone()),
+                &cancellation,
+                &caller,
+                true,
+            )
+            .await;
+        }
+        // Opt-in admission is physically settled, independent of the legacy
+        // stream cancellation declaration. The original receipt retains it.
+        super::manager::drive_call(
+            handler.admit_with_ingress(msg, cancellation.clone(), receipt),
+            &cancellation,
+            &caller,
+            true,
+        )
+        .await
     }
 
     async fn reply(&self, _msg: OutboundMessage) -> echo_core::error::Result<()> {
@@ -1004,6 +1192,14 @@ impl MessageHandler for SessionHandler {
             })?;
             self.admission_open.store(false, Ordering::Release);
             self.shutdown.cancel();
+            if let Some(service) = self
+                .durable_service
+                .lock()
+                .map_err(|_| ReactError::Other("channel durable service lock poisoned".into()))?
+                .as_ref()
+            {
+                service.cancel();
+            }
             self.sessions
                 .iter()
                 .map(|entry| (entry.key().clone(), entry.value().clone()))
@@ -1022,8 +1218,23 @@ impl MessageHandler for SessionHandler {
             guard.generation.retire_all_streams().await;
             match guard.handler.close().await {
                 Ok(()) => {
-                    self.sessions
-                        .remove_if(&key, |_, current| Arc::ptr_eq(current, &session));
+                    // A successful close physically releases this incarnation.
+                    // Only the owner that removed its own map entry may publish
+                    // the end, so a concurrent replacement never loses its new
+                    // current incarnation or receives a duplicate settlement.
+                    let removed = self
+                        .sessions
+                        .remove_if(&key, |_, current| Arc::ptr_eq(current, &session))
+                        .is_some();
+                    if removed {
+                        let instance = guard.instance.clone();
+                        let generation = Arc::clone(&guard.generation);
+                        // Drop the session mutex and map reference before the
+                        // synchronous callback; no await separates removal from
+                        // the single end notification.
+                        drop(guard);
+                        self.settle_session_end(&generation, instance, SessionEndReason::Shutdown);
+                    }
                 }
                 Err(error) => failures.push(error.to_string()),
             }
@@ -2781,10 +2992,19 @@ mod tests {
         }
 
         let closes = Arc::new(AtomicUsize::new(0));
+        let ends = Arc::new(std::sync::Mutex::new(Vec::new()));
         let handler = SessionHandler::new(SessionConfig::default(), {
             let closes = Arc::clone(&closes);
             move |_instance: &ChannelSessionInstance| -> Box<dyn MessageHandler> {
                 Box::new(RetryCloseHandler(Arc::clone(&closes)))
+            }
+        })
+        .with_on_session_end({
+            let ends = Arc::clone(&ends);
+            move |info: SessionEndInfo| {
+                ends.lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .push((info.incarnation_id, info.reason));
             }
         });
         handler
@@ -2794,12 +3014,138 @@ mod tests {
         if handler.close().await.is_ok() || handler.active_sessions() != 1 {
             return Err("failed close lost the session Agent owner".to_string());
         }
+        if !ends
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .is_empty()
+        {
+            return Err("failed close published a session end".to_string());
+        }
         if handler.handle(test_message("late", "second")).await.is_ok() {
             return Err("closed SessionHandler admitted a new message".to_string());
         }
         handler.close().await.map_err(|error| error.to_string())?;
         if handler.active_sessions() != 0 || closes.load(Ordering::Acquire) != 2 {
             return Err("retried session Agent close did not settle".to_string());
+        }
+        let ends = ends
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        if ends.len() != 1 || ends[0].1 != SessionEndReason::Shutdown || ends[0].0.is_empty() {
+            return Err(format!(
+                "successful close published {ends:?} instead of one shutdown end"
+            ));
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn session_close_publishes_one_shutdown_end_per_retained_session() -> Result<(), String> {
+        struct IdleHandler;
+
+        #[async_trait]
+        impl MessageHandler for IdleHandler {
+            async fn handle(
+                &self,
+                msg: InboundMessage,
+            ) -> echo_core::error::Result<OutboundMessage> {
+                Ok(OutboundMessage::new(
+                    &msg.channel_id,
+                    msg.reply_target(),
+                    msg.chat_type,
+                    "reply",
+                ))
+            }
+
+            async fn reply(&self, _msg: OutboundMessage) -> echo_core::error::Result<()> {
+                Ok(())
+            }
+
+            async fn close(&self) -> echo_core::error::Result<()> {
+                Ok(())
+            }
+        }
+
+        let created = Arc::new(std::sync::Mutex::new(Vec::<(String, String)>::new()));
+        let ends = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let handler = SessionHandler::new(SessionConfig::default(), {
+            let created = Arc::clone(&created);
+            move |instance: &ChannelSessionInstance| -> Box<dyn MessageHandler> {
+                created
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .push((instance.sender_id().to_string(), instance.incarnation_id()));
+                Box::new(IdleHandler)
+            }
+        })
+        .with_on_session_end({
+            let ends = Arc::clone(&ends);
+            move |info: SessionEndInfo| {
+                ends.lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .push((info.sender_id, info.incarnation_id, info.reason));
+            }
+        });
+        for sender in ["u1", "u2"] {
+            handler
+                .handle(InboundMessage::new(
+                    "qq",
+                    sender,
+                    "c1",
+                    ChatType::Direct,
+                    "hello",
+                    format!("{sender}-1"),
+                ))
+                .await
+                .map_err(|error| error.to_string())?;
+        }
+        if handler.active_sessions() != 2 {
+            return Err(format!(
+                "expected two retained sessions, got {}",
+                handler.active_sessions()
+            ));
+        }
+        handler.close().await.map_err(|error| error.to_string())?;
+        if handler.active_sessions() != 0 {
+            return Err("shutdown left a retained session owner".to_string());
+        }
+        let created = created
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        let published = ends
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        if created.len() != 2 || published.len() != created.len() {
+            return Err(format!(
+                "shutdown published {} ends for {} sessions",
+                published.len(),
+                created.len()
+            ));
+        }
+        for (sender, incarnation) in created {
+            if !published
+                .iter()
+                .any(|(ended_sender, ended_incarnation, reason)| {
+                    ended_sender == &sender
+                        && ended_incarnation == &incarnation
+                        && *reason == SessionEndReason::Shutdown
+                })
+            {
+                return Err(format!("shutdown end lost the incarnation of {sender}"));
+            }
+        }
+        // No retained owner remains, so a second close must not republish.
+        handler.close().await.map_err(|error| error.to_string())?;
+        if ends
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .len()
+            != 2
+        {
+            return Err("repeated close republished a session end".to_string());
         }
         Ok(())
     }
@@ -2835,12 +3181,21 @@ mod tests {
         }
 
         let closes = Arc::new(AtomicUsize::new(0));
+        let ends = Arc::new(std::sync::Mutex::new(Vec::new()));
         let handler = SessionHandler::new(SessionConfig::default(), {
             let closes = Arc::clone(&closes);
             move |_instance: &ChannelSessionInstance| -> Box<dyn MessageHandler> {
                 Box::new(InterruptedHandler {
                     closes: Arc::clone(&closes),
                 })
+            }
+        })
+        .with_on_session_end({
+            let ends = Arc::clone(&ends);
+            move |info: SessionEndInfo| {
+                ends.lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .push(info.reason);
             }
         });
         handler
@@ -2856,9 +3211,25 @@ mod tests {
         if handler.active_sessions() != 1 || closes.load(Ordering::Acquire) != 1 {
             return Err("interrupted Agent close lost its owner".to_string());
         }
+        if !ends
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .is_empty()
+        {
+            return Err("interrupted close published a session end".to_string());
+        }
         handler.close().await.map_err(|error| error.to_string())?;
         if handler.active_sessions() != 0 || closes.load(Ordering::Acquire) != 2 {
             return Err("Agent close retry did not settle".to_string());
+        }
+        let ends = ends
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        if ends != vec![SessionEndReason::Shutdown] {
+            return Err(format!(
+                "cancelled close retry published {ends:?} instead of one shutdown end"
+            ));
         }
         Ok(())
     }
@@ -2924,18 +3295,35 @@ mod tests {
         let started = Arc::new(Notify::new());
         let stream_dropped = Arc::new(AtomicBool::new(false));
         let closes = Arc::new(AtomicUsize::new(0));
-        let handler = Arc::new(SessionHandler::new(SessionConfig::default(), {
-            let started = Arc::clone(&started);
-            let stream_dropped = Arc::clone(&stream_dropped);
-            let closes = Arc::clone(&closes);
-            move |_instance: &ChannelSessionInstance| -> Box<dyn MessageHandler> {
-                Box::new(LegacyResourceHandler {
-                    started: Arc::clone(&started),
-                    stream_dropped: Arc::clone(&stream_dropped),
-                    closes: Arc::clone(&closes),
-                })
-            }
-        }));
+        let ends = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let handler = Arc::new(
+            SessionHandler::new(SessionConfig::default(), {
+                let started = Arc::clone(&started);
+                let stream_dropped = Arc::clone(&stream_dropped);
+                let closes = Arc::clone(&closes);
+                move |_instance: &ChannelSessionInstance| -> Box<dyn MessageHandler> {
+                    Box::new(LegacyResourceHandler {
+                        started: Arc::clone(&started),
+                        stream_dropped: Arc::clone(&stream_dropped),
+                        closes: Arc::clone(&closes),
+                    })
+                }
+            })
+            .with_on_session_end({
+                let ends = Arc::clone(&ends);
+                let stream_dropped = Arc::clone(&stream_dropped);
+                let closes = Arc::clone(&closes);
+                move |info: SessionEndInfo| {
+                    ends.lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .push((
+                            info.reason,
+                            stream_dropped.load(Ordering::Acquire),
+                            closes.load(Ordering::Acquire),
+                        ));
+                }
+            }),
+        );
         let stream_owner = Arc::clone(&handler);
         let stream_task = tokio::spawn(async move {
             let mut stream = stream_owner
@@ -2959,6 +3347,367 @@ mod tests {
         {
             return Err("legacy stream was not dropped before handler close".to_string());
         }
+        let ends = ends
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        if ends != vec![(SessionEndReason::Shutdown, true, 1)] {
+            return Err(format!(
+                "legacy close settled stream/Agent/end out of order: {ends:?}"
+            ));
+        }
+        Ok(())
+    }
+
+    struct RetainedPumpProbe {
+        pending: Arc<AtomicBool>,
+        calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl MessageHandler for RetainedPumpProbe {
+        async fn handle(&self, msg: InboundMessage) -> echo_core::error::Result<OutboundMessage> {
+            self.calls.fetch_add(1, Ordering::AcqRel);
+            Ok(OutboundMessage::new(
+                msg.channel_id,
+                msg.chat_id,
+                msg.chat_type,
+                "中文🙂",
+            ))
+        }
+        async fn reply(&self, _msg: OutboundMessage) -> echo_core::error::Result<()> {
+            Ok(())
+        }
+        fn has_pending_work(&self) -> bool {
+            self.pending.load(Ordering::Acquire)
+        }
+    }
+
+    #[tokio::test]
+    async fn original_retained_pump_prevents_idle_prune_after_admission_stream_ends()
+    -> Result<(), String> {
+        let pending = Arc::new(AtomicBool::new(true));
+        let factory_pending = pending.clone();
+        let handler = SessionHandler::new(
+            SessionConfig::default().with_timeout(Duration::ZERO),
+            move |_instance: &ChannelSessionInstance| {
+                Box::new(RetainedPumpProbe {
+                    pending: factory_pending.clone(),
+                    calls: Arc::new(AtomicUsize::new(0)),
+                }) as Box<dyn MessageHandler>
+            },
+        );
+        handler
+            .handle(test_message("queued", "queued-1"))
+            .await
+            .map_err(|error| error.to_string())?;
+        let other = SessionKey::from_message(&InboundMessage::new(
+            "qq",
+            "other",
+            "other",
+            ChatType::Direct,
+            "probe",
+            "other-1",
+        ))
+        .map_err(|error| error.to_string())?;
+        handler
+            .prune_expired_except(&other, &CancellationToken::new())
+            .await
+            .map_err(|error| error.to_string())?;
+        if handler.active_sessions() != 1 {
+            return Err("idle prune retired the original retained pump".into());
+        }
+        pending.store(false, Ordering::Release);
+        handler
+            .prune_expired_except(&other, &CancellationToken::new())
+            .await
+            .map_err(|error| error.to_string())?;
+        if handler.active_sessions() != 0 {
+            return Err("settled original pump prevented normal idle pruning".into());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn queued_response_template_keeps_the_retired_incarnation_fence() -> Result<(), String> {
+        let msg = test_message("queued", "template-1");
+        let key = SessionKey::from_message(&msg).map_err(|error| error.to_string())?;
+        let instance = ChannelSessionInstance::from_key(&key, None);
+        let template = instance.bind_outbound(OutboundMessage::new(
+            "qq",
+            msg.chat_id,
+            ChatType::Direct,
+            "中文🙂",
+        ));
+        let permit = template
+            .begin_delivery()
+            .map_err(|error| error.to_string())?;
+        if permit.is_none() {
+            return Err("queued template lost its original fence".into());
+        }
+        drop(permit);
+        // Only the fence change is needed; discard the identity-only result now.
+        let _ = instance.rotate();
+        if template.begin_delivery().is_ok() {
+            return Err("old queued response entered a replacement session".into());
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn legacy_handler_does_not_execute_before_unsupported_ingress_is_reported()
+    -> Result<(), String> {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let handler = RetainedPumpProbe {
+            pending: Arc::new(AtomicBool::new(false)),
+            calls: calls.clone(),
+        };
+        let (receipt, receiver) = crate::channels::types::channel_ingress_receipt();
+        let result = handler
+            .admit_with_ingress(
+                test_message("must not run", "unsupported-1"),
+                CancellationToken::new(),
+                receipt,
+            )
+            .await;
+        if result.is_ok() || calls.load(Ordering::Acquire) != 0 || receiver.await.is_ok() {
+            return Err("unsupported ingress executed a legacy effect or forged admission".into());
+        }
+        Ok(())
+    }
+
+    #[derive(Default)]
+    struct DurableProbeState {
+        creations: AtomicUsize,
+        calls: AtomicUsize,
+        legacy: AtomicUsize,
+        closed: AtomicUsize,
+        replies: StdMutex<Vec<OutboundMessage>>,
+        children: StdMutex<Vec<CancellationToken>>,
+        instances: StdMutex<Vec<ChannelSessionInstance>>,
+    }
+
+    struct DurableProbe {
+        state: Arc<DurableProbeState>,
+        supported: bool,
+    }
+
+    #[async_trait]
+    impl MessageHandler for DurableProbe {
+        async fn handle(&self, _msg: InboundMessage) -> echo_core::error::Result<OutboundMessage> {
+            self.state.legacy.fetch_add(1, Ordering::AcqRel);
+            Err(ReactError::Other(
+                "fixture must not execute a legacy method".into(),
+            ))
+        }
+        async fn reply(&self, msg: OutboundMessage) -> echo_core::error::Result<()> {
+            self.state
+                .replies
+                .lock()
+                .map_err(|_| ReactError::Other("fixture reply lock poisoned".into()))?
+                .push(msg);
+            Ok(())
+        }
+        fn bind_durable_ingress(&self, child: CancellationToken) -> echo_core::error::Result<()> {
+            if !self.supported {
+                return Err(ReactError::Other("fixture unsupported".into()));
+            }
+            self.state
+                .children
+                .lock()
+                .map_err(|_| ReactError::Other("fixture child lock poisoned".into()))?
+                .push(child);
+            Ok(())
+        }
+        async fn admit_with_ingress(
+            &self,
+            _msg: InboundMessage,
+            cancel: CancellationToken,
+            receipt: ChannelIngressReceipt,
+        ) -> echo_core::error::Result<()> {
+            if cancel.is_cancelled() {
+                return Err(ReactError::Other("fixture admission cancelled".into()));
+            }
+            self.state.calls.fetch_add(1, Ordering::AcqRel);
+            receipt.publish(ChannelIngressDisposition::DurableInput);
+            Ok(())
+        }
+        async fn close(&self) -> echo_core::error::Result<()> {
+            self.state.closed.fetch_add(1, Ordering::AcqRel);
+            Ok(())
+        }
+    }
+
+    fn durable_probe_session(state: Arc<DurableProbeState>, supported: bool) -> SessionHandler {
+        SessionHandler::with_defaults(
+            move |instance: &ChannelSessionInstance| -> Box<dyn MessageHandler> {
+                state.creations.fetch_add(1, Ordering::AcqRel);
+                if let Ok(mut instances) = state.instances.lock() {
+                    instances.push(instance.clone());
+                }
+                Box::new(DurableProbe {
+                    state: state.clone(),
+                    supported,
+                })
+            },
+        )
+        .with_durable_ingress()
+    }
+
+    #[tokio::test]
+    async fn durable_factory_mismatch_keeps_original_owner_for_close_without_legacy_effect()
+    -> Result<(), String> {
+        let state = Arc::new(DurableProbeState::default());
+        let handler = durable_probe_session(state.clone(), false);
+        handler
+            .bind_durable_ingress(CancellationToken::new())
+            .map_err(|error| error.to_string())?;
+        for _ in 0..2 {
+            let (receipt, received) = channel_ingress_receipt();
+            let result = handler
+                .admit_with_ingress(
+                    test_message("normal", "mismatch"),
+                    CancellationToken::new(),
+                    receipt,
+                )
+                .await;
+            assert!(
+                result.is_err_and(|error| error
+                    .to_string()
+                    .contains("inner handler does not support"))
+            );
+            assert!(received.await.is_err());
+        }
+        assert_eq!(state.creations.load(Ordering::Acquire), 1);
+        assert_eq!(state.legacy.load(Ordering::Acquire), 0);
+        assert_eq!(state.calls.load(Ordering::Acquire), 0);
+        handler.close().await.map_err(|error| error.to_string())?;
+        assert_eq!(state.closed.load(Ordering::Acquire), 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn durable_session_child_propagates_stop_without_rebinding_or_cancelling_transport_parent()
+    -> Result<(), String> {
+        let state = Arc::new(DurableProbeState::default());
+        let handler = durable_probe_session(state.clone(), true);
+        let parent = CancellationToken::new();
+        handler
+            .bind_durable_ingress(parent.child_token())
+            .map_err(|error| error.to_string())?;
+        assert!(
+            handler
+                .bind_durable_ingress(CancellationToken::new())
+                .is_err()
+        );
+        let (receipt, received) = channel_ingress_receipt();
+        handler
+            .admit_with_ingress(
+                test_message("normal", "bound"),
+                CancellationToken::new(),
+                receipt,
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+        assert_eq!(
+            received.await.map_err(|error| error.to_string())?,
+            ChannelIngressDisposition::DurableInput
+        );
+        let child = state
+            .children
+            .lock()
+            .map_err(|_| "fixture child poisoned")?
+            .first()
+            .cloned()
+            .ok_or("missing session child")?;
+        assert!(!child.is_cancelled());
+        child.cancel();
+        assert!(!parent.is_cancelled());
+        let (receipt, received) = channel_ingress_receipt();
+        assert!(
+            handler
+                .admit_with_ingress(
+                    test_message("normal", "closed-child"),
+                    CancellationToken::new(),
+                    receipt
+                )
+                .await
+                .is_err()
+        );
+        assert!(received.await.is_err());
+        handler.close().await.map_err(|error| error.to_string())?;
+        assert!(!parent.is_cancelled());
+        assert!(handler.bind_durable_ingress(parent.child_token()).is_err());
+        assert_eq!(state.calls.load(Ordering::Acquire), 1);
+        assert_eq!(state.closed.load(Ordering::Acquire), 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn durable_reset_uses_shared_rotation_and_original_reply_with_current_fence()
+    -> Result<(), String> {
+        let state = Arc::new(DurableProbeState::default());
+        let handler = durable_probe_session(state.clone(), true);
+        let parent = CancellationToken::new();
+        handler
+            .bind_durable_ingress(parent.child_token())
+            .map_err(|error| error.to_string())?;
+        let initial = test_message("normal", "before-reset");
+        let (receipt, received) = channel_ingress_receipt();
+        handler
+            .admit_with_ingress(initial.clone(), CancellationToken::new(), receipt)
+            .await
+            .map_err(|error| error.to_string())?;
+        received.await.map_err(|error| error.to_string())?;
+        let instance = state
+            .instances
+            .lock()
+            .map_err(|_| "fixture instances poisoned")?
+            .first()
+            .cloned()
+            .ok_or("missing original instance")?;
+        let old_template = instance.bind_outbound(OutboundMessage::new(
+            "qq",
+            initial.reply_target(),
+            ChatType::Direct,
+            "old",
+        ));
+        let (receipt, received) = channel_ingress_receipt();
+        handler
+            .admit_with_ingress(
+                test_message("/reset", "reset-1"),
+                CancellationToken::new(),
+                receipt,
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+        assert_eq!(
+            received.await.map_err(|error| error.to_string())?,
+            ChannelIngressDisposition::ControlHandled
+        );
+        assert!(old_template.begin_delivery().is_err());
+        {
+            let replies = state
+                .replies
+                .lock()
+                .map_err(|_| "fixture replies poisoned")?;
+            let reply = replies.first().ok_or("reset reply was silently dropped")?;
+            assert_eq!(reply.to, initial.reply_target());
+            assert_eq!(reply.reply_to.as_deref(), Some("reset-1"));
+            assert_eq!(reply.text, SessionConfig::default().reset_reply);
+            assert!(
+                reply
+                    .begin_delivery()
+                    .map_err(|error| error.to_string())?
+                    .is_some()
+            );
+        }
+        assert_eq!(state.creations.load(Ordering::Acquire), 2);
+        assert_eq!(state.closed.load(Ordering::Acquire), 1);
+        assert_eq!(state.legacy.load(Ordering::Acquire), 0);
+        handler.close().await.map_err(|error| error.to_string())?;
+        assert!(!parent.is_cancelled());
+        assert_eq!(state.closed.load(Ordering::Acquire), 2);
         Ok(())
     }
 }

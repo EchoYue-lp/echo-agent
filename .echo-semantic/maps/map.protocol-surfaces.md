@@ -4,7 +4,7 @@ id: map.protocol-surfaces
 kind: capability_map
 title: ACP、A2A、Channels、Headless 与 SDK Surfaces
 risk: high
-observed_at: 77de6ca90ad842eb4b7b2921a4baa954f41cccfe
+observed_at: source:3fc37deb9da5313ffb1d3e80bc29162f1969b12d88d7bf35a2d1e74706b635fc
 boundary_refs:
 - boundary.protocol-surfaces
 behavior_refs:
@@ -57,6 +57,27 @@ related_map_refs:
 - map.extension-lifecycle
 - map.sdk-facade-parity
 scenarios:
+  weixin-durable-no-stream-admission:
+    status: needs_review
+    source_refs:
+    - docs/en/15-im-channels.md
+    - docs/zh/15-im-channels.md
+    - echo-agent-learning/examples/demo38_im_channels.rs
+    - echo-integration/src/channels/channels/mod.rs
+    - echo-integration/src/channels/mod.rs
+    - echo-integration/src/channels/session.rs
+    - echo-integration/src/channels/types.rs
+    - docs/adr/0099-personal-weixin-channel.md
+    - echo-integration/src/channels/channels/weixin/api.rs
+    - echo-integration/src/channels/channels/weixin/auth.rs
+    - echo-integration/src/channels/channels/weixin/channel.rs
+    - echo-integration/src/channels/channels/weixin/codec.rs
+    - echo-integration/src/channels/channels/weixin/mod.rs
+    - echo-integration/src/channels/channels/weixin/state.rs
+    - echo-integration/src/channels/channels/weixin/wire.rs
+    rule_refs: [rule.channel-invocation-generation]
+    unknown: Framework source review and focused checks passed for retained Rust inputs; complete App/A2/native/main and full merge qualification remain unverified, with historical evidence scope preserved.
+    next_step: Preserve actual focused raw/close receipts and complete downstream App/A2/native and task-main qualification; source/focused acceptance is not global closure.
   acp-session-run-projection:
     status: mapped
     source_refs:
@@ -71,8 +92,7 @@ scenarios:
   a2a-task-and-stream:
     status: needs_review
     source_refs:
-    - src/a2a/server.rs
-    - src/a2a/types.rs
+    - docs/adr/0090-a2a-lsp-retirement-contract.md
     finding_refs:
     - finding.a2a-terminal-authority
     - finding.a2a-stream-cleanup
@@ -165,6 +185,20 @@ scenarios:
 
 
 # ACP、A2A、Channels、Headless 与 SDK Surfaces
+## 当前 Task 的微信业务回执依据
+
+`echo-integration/docs/weixin-business-acceptance.md` 承接当前
+`echo-integration/src/channels/channels/weixin/wire.rs`／`api.rs`／`channel.rs` 的业务接受
+边界及真实验证限制。getupdates 在无拒绝码、无 null 业务码时，使用明确 ret／errcode
+业务0或当前 typed msgs／cursor 建立接受；非零／-14、raw null 与坏类型保持各自结果。
+HTTP 成功本身不是业务证据。当前来源独立记录于 `map.canonical-output-consumers`。
+sendmessage 新增的缺 ret ACK 还要求原 typed 非空 ID 且无错误码／null 码；原明确 ret=0
+及 String/u64 decoder 保留。Unknown 不回填、不授权自动重发，Accepted 不等于手机 Received。
+
+此依据复用原请求、发送回执、cursor／ACK 与 Stop owner；一次有界脱敏诊断不输出
+正文、token、cursor 或未知键名。本文仅补当前项目关联，不改历史 `observed_at`、
+原场景状态／unknown、旧观察与资格；不引入 getConfig／typing、第二 poller 或新执行器。
+
 
 ## 能力范围
 
@@ -214,3 +248,29 @@ ACP permission 与 Agent policy 只在协商后调用；channel/provider credent
 
 
 当前候选最终复审：audit.framework-final-34d5-gate-rereview 绑定新23真实工程收据与完整已审源码，implementation review PASS/action0；不替代独立SDK/main验收，不升级原broad状态。
+
+
+## Weixin NoStream current source increment
+
+Native Weixin poll uses original fallible bind/no-stream admission and original sender; exact context presence validation supports host recovery, with no EKO binding fields in Framework. Initial NoStream source observation: `source:4bc6e5fb3d60dd9ce705013f006f8eec0279cbbc1fd1414320b0574058187374`; prior map observation `77de6ca90ad842eb4b7b2921a4baa954f41cccfe` remains historical, with all old scenario statuses/evidence unchanged. The added scenario is needs_review. It does not re-date old engineering results or claim A2 application implementation, SDK accepted changes, real QR/messages, complete qualification or main delivery. The external formal Design c791eea4 / Plan fb4fafcd is the authorized cross-repository input, not a local Asset.
+
+Historical Clippy-only source increment: `source:bf1789e2c47fc26e7e331858887f567067068e077aae6feb3c1a7ca24eda074b`. Two equivalent let-chain rewrites and one test identity-result discard resolve actual lint diagnostics; no scenario status, contract, assertion, API, manifest/lock or historical result is changed. Source/build acceptance still requires the actual repeated affected checks.
+
+Historical documentation-only observation: `source:a40fa344d8df5fcccba273828d7f086dd1100f182e875cdae3a9a6bd04506557`; all Rust inputs remain identical to executed v4 `source:bf1789e2c47fc26e7e331858887f567067068e077aae6feb3c1a7ca24eda074b`. Actual focused batch selected135 channel tests (including NoStream10), root12 and doc2compile with0failed/0ignored, example/scoped lints/featureless/fmt0 and exactclean0(targetabsent). Original02warning/07lint101/sourceSemantic1 remain retained. Source reviews8cf8+777eac and batch `df4e7cf05d1ea805c37bcdcdbd157a6c5667c6d65588513b495928f972c8c2d5` / cleanup `49d90a0f95c77725411a5df48d63273eeef0443000faeebaa769f88fba3ef4d1` are local authoring-worktree evidence under `.echo-semantic/local/weixin-no-stream-build/focused-actual/`, not distributed assets or a new scan. No historical object status or full/global/native/consumer/main claim is changed.
+
+Durable-reset current observation: `source:3fc37deb9da5313ffb1d3e80bc29162f1969b12d88d7bf35a2d1e74706b635fc`. The exact existing Session→inner reply regression genuinely selected1 and failed None versusSome(reset-1), then passed after only durable outbound `.with_reply_to(original message_id)`; original scalar/stream/owner/API/lock unchanged. Current Rust inputs match executed green v7 `source:c3fbb9242dcf81f0e05e6ce9e074c1396707d343447db08350e42ce62cfbc032`; exactgreen1, all135 channels (including NoStream10), scoped warnings/strictpanic and fmt/check0, exactclean0 targetabsent. Batch `59070d12b5afec08224894070f20f2d31d4aa07d7d2c3fdff0706397412ba6af` and cleanup `4f69bd9889e90f8612696fdd9863e2ded7ef8d55acbde42767e46e58da9ebecb` are preserved local evidence under `.echo-semantic/local/weixin-no-stream-build/reset-reply-actual/`. Prior root12/doc2/demo/features retain their actual oldepoch and unchanged-API/legacy branch applicability, not a new run. Scenario status/oldFindings stay unchanged; App/A2/native/platform/fullmain remain separate.
+
+
+## 2026-10-28 已批准专用协议退出后的引用定位
+
+本对象原observed_at、原scenario status、unknown、next_step与全部Finding/Evidence
+身份保留其历史范围；不关闭旧行为问题，不冒当前运行时通过。具名A2A/LSP专用实现
+已在当前WIP删除，故这项场景的当前可读sourceRefs指向所属ADR0090的退役合同。
+原source:3fc37deb9da5313ffb1d3e80bc29162f1969b12d88d7bf35a2d1e74706b635fc
+下的旧路径为：
+- `src/a2a/server.rs`：历史实现；可恢复Git0e404185c8f252da3e335c35547e52249c74dc65，精确Blob/SHA见新增历史asset。
+- `src/a2a/types.rs`：历史实现；可恢复Git0e404185c8f252da3e335c35547e52249c74dc65，精确Blob/SHA见新增历史asset。
+
+这不是从闭包排除未知义务：其它动态/needs_review以及90个原loaded关联保原，
+也不重新注册旧协议或引入兼容shim。原native执行/ACP/MCP/channel/Subagent/Store
+与runtimeFinal通知另按各自当前合同维护。

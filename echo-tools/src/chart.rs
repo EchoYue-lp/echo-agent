@@ -1,7 +1,7 @@
-//! Chart generation tool
+//! Vega-Lite v5 图表工具。
 //!
-//! Generate data visualization charts via vega-lite v5 JSON specification.
-//! Supports line, bar, pie, scatter, area, heatmap, boxplot, and more.
+//! JSON 输出同时声明现有 ToolResult 的公开 data/MIME，消费者按格式呈现，
+//! 不从工具名称推测注册来源。原 pretty JSON 文本及 HTML 导出保持。
 
 use futures::future::BoxFuture;
 use serde_json::Value;
@@ -133,7 +133,17 @@ impl Tool for GenerateChartTool {
                 serde_json::to_string_pretty(&spec).unwrap_or_else(|_| "{}".to_string())
             };
 
-            Ok(ToolResult::success(output))
+            let mut result = ToolResult::success(output);
+            // 原artifact阈值按UTF-8字节计量；len只作wire预算，不截断字符串。
+            if output_format != "html"
+                && result.output.len()
+                    <= echo_core::tools::artifact::DEFAULT_TOOL_OUTPUT_ARTIFACT_THRESHOLD_BYTES
+            {
+                // 采用Jupyter/Vega既有公开MIME；这是格式声明，不是工具来源/权限证明。
+                result.data = Some(spec);
+                result.mime_type = Some("application/vnd.vegalite.v5+json".into());
+            }
+            Ok(result)
         })
     }
 }
@@ -413,6 +423,73 @@ mod tests {
                     "valid chart dimensions changed: {width}x{height}"
                 )));
             }
+        }
+        Ok(())
+    }
+    #[tokio::test]
+    async fn chart_json_declares_existing_typed_data_and_preserves_pretty_output() -> Result<()> {
+        let result = GenerateChartTool.execute(chart_parameters()).await?;
+        assert!(result.success && !result.truncated);
+        assert!(matches!(
+            result.kind,
+            echo_core::tools::ToolResultKind::Text
+        ));
+        assert_eq!(
+            result.mime_type.as_deref(),
+            Some("application/vnd.vegalite.v5+json")
+        );
+        let spec = result
+            .data
+            .as_ref()
+            .ok_or_else(|| ReactError::Other("公开spec缺失".into()))?;
+        assert_eq!(result.output, serde_json::to_string_pretty(spec)?);
+        let roundtrip: ToolResult = serde_json::from_value(serde_json::to_value(&result)?)?;
+        assert_eq!(roundtrip.data, result.data);
+        assert_eq!(roundtrip.output, result.output);
+        assert_eq!(roundtrip.mime_type, result.mime_type);
+        let mut html = chart_parameters();
+        html.insert("output_format".into(), serde_json::json!("html"));
+        let exported = GenerateChartTool.execute(html).await?;
+        assert!(exported.output.starts_with("<!DOCTYPE html>"));
+        assert!(exported.data.is_none() && exported.mime_type.is_none());
+        assert!(matches!(
+            exported.kind,
+            echo_core::tools::ToolResultKind::Text
+        ));
+        Ok(())
+    }
+    #[tokio::test]
+    async fn chart_inline_view_uses_original_artifact_threshold_without_truncating_text()
+    -> Result<()> {
+        let mut baseline = chart_parameters();
+        baseline.insert(
+            "data".into(),
+            serde_json::json!([{ "类别😀": "", "值": 1 }]),
+        );
+        let empty = GenerateChartTool.execute(baseline).await?;
+        let threshold = echo_core::tools::artifact::DEFAULT_TOOL_OUTPUT_ARTIFACT_THRESHOLD_BYTES;
+        let padding = threshold
+            .checked_sub(empty.output.len())
+            .ok_or_else(|| ReactError::Other("原inline阈值小于基础spec".into()))?;
+        for extra in [0_usize, 1] {
+            let original = "a".repeat(padding.saturating_add(extra));
+            let mut parameters = chart_parameters();
+            parameters.insert(
+                "data".into(),
+                serde_json::json!([{ "类别😀": original, "值": 1 }]),
+            );
+            let result = GenerateChartTool.execute(parameters).await?;
+            assert!(result.success && !result.truncated);
+            // 此处len计量UTF-8 wire字节预算；不作用户字符数判断或字节切片/截断。
+            assert_eq!(result.output.len(), threshold.saturating_add(extra));
+            assert_eq!(result.data.is_some(), extra == 0);
+            assert_eq!(result.mime_type.is_some(), extra == 0);
+            let spec: Value = serde_json::from_str(&result.output)?;
+            assert_eq!(
+                spec.pointer("/data/values/0/类别😀")
+                    .and_then(Value::as_str),
+                Some(original.as_str())
+            );
         }
         Ok(())
     }

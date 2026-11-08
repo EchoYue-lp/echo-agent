@@ -29,7 +29,7 @@ impl ToolApprovalReceipt {
     /// Issue a receipt for the final effective invocation.
     ///
     /// Permission services and trusted hook adapters are the intended issuers.
-    /// Consumers should only pass the receipt through [`ToolContext`] and must
+    /// Consumers should only pass the receipt through [`ToolContext`](crate::tools::ToolContext) and must
     /// validate it immediately before the effect they protect.
     pub fn issue(tool_name: impl Into<String>, args: &Value) -> Result<Self, serde_json::Error> {
         Ok(Self {
@@ -104,38 +104,23 @@ pub enum PermissionMode {
     /// User-facing planning/task routing should use interaction mode instead.
     Plan,
     /// Automatically accept file edit operations
-    #[serde(
-        rename = "auto-edit",
-        alias = "accept-edits",
-        alias = "autoedit",
-        alias = "acceptedits"
-    )]
+    #[serde(rename = "auto-edit")]
     AcceptEdits,
     /// Bypass all permission checks (use with caution)
-    #[serde(
-        rename = "full-auto",
-        alias = "fullauto",
-        alias = "bypass",
-        alias = "bypass-permissions",
-        alias = "bypasspermissions"
-    )]
+    #[serde(rename = "full-auto")]
     BypassPermissions,
     /// AI classifier auto-decides (requires Classifier implementation)
     Auto,
-    /// Sub-agent permissions bubble up to parent process
+    /// Subagent permissions bubble up to parent process
     Bubble,
     /// Silent mode: auto-allow rules that match, silently reject those that don't
     ///
     /// An intermediate mode between Default and BypassPermissions,
     /// suitable for CI/CD and other unattended execution scenarios.
-    #[serde(rename = "dont-ask", alias = "dontask")]
+    #[serde(rename = "dont-ask")]
     DontAsk,
     /// Strict interactive mode: reads are allowed, mutating or external operations ask.
-    #[serde(
-        rename = "strict",
-        alias = "strict-confirm",
-        alias = "strict-confirmation"
-    )]
+    #[serde(rename = "strict")]
     StrictConfirm,
 }
 
@@ -196,17 +181,16 @@ impl std::str::FromStr for PermissionMode {
     type Err = String;
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
-        match value.trim().to_ascii_lowercase().as_str() {
-            "default" | "ask" => Ok(Self::Default),
+        // 配置与typed调用只有同一canonical ID；不从旧别名、大小写或空白推断权限。
+        match value {
+            "default" => Ok(Self::Default),
             "plan" => Ok(Self::Plan),
-            "auto-edit" | "autoedit" | "accept-edits" | "acceptedits" => Ok(Self::AcceptEdits),
-            "full-auto" | "fullauto" | "bypass" | "bypass-permissions" | "bypasspermissions" => {
-                Ok(Self::BypassPermissions)
-            }
+            "auto-edit" => Ok(Self::AcceptEdits),
+            "full-auto" => Ok(Self::BypassPermissions),
             "auto" => Ok(Self::Auto),
             "bubble" => Ok(Self::Bubble),
-            "dont-ask" | "dontask" => Ok(Self::DontAsk),
-            "strict" | "strict-confirm" | "strict-confirmation" => Ok(Self::StrictConfirm),
+            "dont-ask" => Ok(Self::DontAsk),
+            "strict" => Ok(Self::StrictConfirm),
             other => Err(format!(
                 "invalid permission mode '{other}'; expected default, plan, auto-edit, full-auto, auto, bubble, dont-ask, or strict"
             )),
@@ -680,7 +664,7 @@ pub trait PermissionPolicy: Send + Sync {
     ) -> BoxFuture<'a, PermissionDecision>;
 }
 
-/// Default permission policy (retains backward compatibility)
+/// Default permission policy for current tool automation.
 pub struct DefaultPermissionPolicy {
     granted: HashSet<ToolPermission>,
     approval_required: HashSet<ToolPermission>,
@@ -804,21 +788,53 @@ mod tests {
     }
 
     #[test]
-    fn permission_mode_ids_and_aliases_are_framework_owned() {
-        let cases = [
-            ("default", PermissionMode::Default),
-            ("ask", PermissionMode::Default),
-            ("auto-edit", PermissionMode::AcceptEdits),
-            ("acceptEdits", PermissionMode::AcceptEdits),
-            ("full-auto", PermissionMode::BypassPermissions),
-            ("bypassPermissions", PermissionMode::BypassPermissions),
-            ("dont-ask", PermissionMode::DontAsk),
-            ("dontAsk", PermissionMode::DontAsk),
-            ("strict", PermissionMode::StrictConfirm),
+    fn permission_mode_current_ids_round_trip_through_text_and_serde()
+    -> Result<(), serde_json::Error> {
+        let modes = [
+            PermissionMode::Default,
+            PermissionMode::Plan,
+            PermissionMode::AcceptEdits,
+            PermissionMode::BypassPermissions,
+            PermissionMode::Auto,
+            PermissionMode::Bubble,
+            PermissionMode::DontAsk,
+            PermissionMode::StrictConfirm,
         ];
-        for (wire, expected) in cases {
-            assert_eq!(wire.parse::<PermissionMode>(), Ok(expected));
-            assert_eq!(expected.id(), expected.to_string());
+        for mode in modes {
+            assert_eq!(mode.id().parse::<PermissionMode>(), Ok(mode));
+            assert_eq!(mode.id(), mode.to_string());
+            let wire = serde_json::to_value(mode)?;
+            assert_eq!(wire, serde_json::json!(mode.id()));
+            assert_eq!(serde_json::from_value::<PermissionMode>(wire)?, mode);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn retired_permission_spellings_are_not_current_ids() {
+        for retired in [
+            "ask",
+            "accept-edits",
+            "autoedit",
+            "acceptedits",
+            "acceptEdits",
+            "fullauto",
+            "bypass",
+            "bypass-permissions",
+            "bypasspermissions",
+            "bypassPermissions",
+            "dontask",
+            "dontAsk",
+            "strict-confirm",
+            "strict-confirmation",
+            "DEFAULT",
+            " full-auto ",
+        ] {
+            assert!(retired.parse::<PermissionMode>().is_err(), "{retired}");
+            assert!(
+                serde_json::from_value::<PermissionMode>(serde_json::json!(retired)).is_err(),
+                "{retired}"
+            );
         }
     }
 

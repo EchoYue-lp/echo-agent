@@ -266,7 +266,7 @@ impl SummaryCompressor {
                 .llm
                 .chat(echo_core::llm::ChatRequest {
                     messages: vec![Message::user(prompt)],
-                    temperature: Some(0.3),
+                    temperature: None,
                     max_tokens: Some(2048),
                     tools: None,
                     tool_choice: None,
@@ -365,7 +365,7 @@ impl ContextCompressor for SummaryCompressor {
                 .filter(|message| message.role != Role::System || is_generated_summary(message))
                 .cloned()
                 .collect();
-            let (to_summarize, to_keep) = select_recent_tail(
+            let (to_summarize, to_keep, _) = select_recent_tail(
                 conv_msgs,
                 input
                     .token_limit
@@ -604,7 +604,7 @@ impl IncrementalSummaryCompressor {
                 .llm
                 .chat(echo_core::llm::ChatRequest {
                     messages: vec![Message::user(prompt)],
-                    temperature: Some(0.3),
+                    temperature: None,
                     max_tokens: Some(2048),
                     tools: None,
                     tool_choice: None,
@@ -686,7 +686,7 @@ impl IncrementalSummaryCompressor {
                 .llm
                 .chat(echo_core::llm::ChatRequest {
                     messages: vec![Message::user(format!("{}{}", focus_note, prompt))],
-                    temperature: Some(0.3),
+                    temperature: None,
                     max_tokens: Some(2048),
                     tools: None,
                     tool_choice: None,
@@ -799,7 +799,7 @@ impl ContextCompressor for IncrementalSummaryCompressor {
                 .filter(|message| message.role != Role::System || is_generated_summary(message))
                 .cloned()
                 .collect();
-            let (to_summarize, to_keep) = select_recent_tail(
+            let (to_summarize, to_keep, _) = select_recent_tail(
                 conv_msgs,
                 input
                     .token_limit
@@ -955,12 +955,88 @@ impl ContextCompressor for IncrementalSummaryCompressor {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use echo_core::llm::capabilities::ProviderCapabilities;
     use echo_core::llm::{ChatChunk, ChatRequest, ChatResponse};
     use echo_core::tokenizer::HeuristicTokenizer;
     use futures::stream::BoxStream;
+
+    #[derive(Default)]
+    pub(crate) struct TemperatureRecordingSummaryLlm {
+        pub(crate) temperatures: Mutex<Vec<Option<f32>>>,
+    }
+
+    impl LlmClient for TemperatureRecordingSummaryLlm {
+        fn chat(&self, request: ChatRequest) -> BoxFuture<'_, Result<ChatResponse>> {
+            self.temperatures
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .push(request.temperature);
+            Box::pin(async {
+                Ok(ChatResponse {
+                    message: Message::assistant(r#"{"goal":"recorded summary"}"#.into()),
+                    finish_reason: Some("stop".into()),
+                    usage: None,
+                    raw: echo_core::llm::types::ChatCompletionResponse::default(),
+                })
+            })
+        }
+        fn chat_stream(
+            &self,
+            _: ChatRequest,
+        ) -> BoxFuture<'_, Result<BoxStream<'static, Result<ChatChunk>>>> {
+            Box::pin(async {
+                Ok(Box::pin(futures::stream::empty()) as BoxStream<'static, Result<ChatChunk>>)
+            })
+        }
+        fn model_name(&self) -> &str {
+            "recording-summary"
+        }
+        fn capabilities(&self) -> ProviderCapabilities {
+            ProviderCapabilities::openai_compatible()
+        }
+    }
+
+    #[tokio::test]
+    async fn implicit_temperature_is_absent_from_all_structured_summary_requests() {
+        let llm = Arc::new(TemperatureRecordingSummaryLlm::default());
+        let messages = vec![Message::user("summarize".into())];
+        let summary = SummaryCompressor::new(llm.clone(), 1);
+        assert!(
+            summary
+                .try_structured_summary(&messages, None, None)
+                .await
+                .1
+                .is_some()
+        );
+        let incremental = IncrementalSummaryCompressor::new(llm.clone(), 1);
+        assert!(
+            incremental
+                .try_first_structured_summary(&messages, None, None)
+                .await
+                .1
+                .is_some()
+        );
+        assert!(
+            incremental
+                .incremental_structured_summary(
+                    &messages,
+                    &StructuredSummary::default(),
+                    None,
+                    None
+                )
+                .await
+                .1
+                .is_some()
+        );
+        assert_eq!(
+            *llm.temperatures
+                .lock()
+                .unwrap_or_else(|error| error.into_inner()),
+            vec![None, None, None]
+        );
+    }
 
     struct StaticSummaryLlm;
 
@@ -1058,6 +1134,7 @@ mod tests {
         let request = "请保留当前用户的精确约束🚀";
         let mut call = Message::assistant(String::new());
         call.tool_calls = Some(vec![ToolCall {
+            provider_source: None,
             id: "lookup".to_string(),
             call_type: "function".to_string(),
             function: FunctionCall {

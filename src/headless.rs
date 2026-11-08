@@ -553,6 +553,26 @@ mod tests {
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::time::Duration;
 
+    fn headless_source_status(
+        execution: &str,
+        kind: echo_core::agent::ExecutionStatusKind,
+        sequence: u64,
+    ) -> AgentEvent {
+        AgentEvent::ExecutionStatus(echo_core::agent::ExecutionStatus {
+            adapter_generated: false,
+            execution_id: execution.into(),
+            request_id: Some("headless-fixture-response".into()),
+            sequence,
+            phase: if kind == echo_core::agent::ExecutionStatusKind::Started {
+                echo_core::agent::AgentPhase::Thinking
+            } else {
+                echo_core::agent::AgentPhase::Terminal
+            },
+            status: kind,
+            reason: None,
+        })
+    }
+
     struct ClosingAgent {
         closes: Arc<AtomicUsize>,
         fail_first_close: Arc<AtomicBool>,
@@ -571,20 +591,20 @@ mod tests {
             "test"
         }
 
-        fn execute<'a>(&'a self, _task: &'a str) -> BoxFuture<'a, crate::error::Result<String>> {
-            Box::pin(async { Ok("done".to_string()) })
-        }
-
-        fn execute_stream<'a>(
+        fn execute_stream_message_with_invocation_context<'a>(
             &'a self,
-            _task: &'a str,
+            message: crate::llm::types::Message,
+            _cancel: CancellationToken,
+            invocation: echo_core::agent::AgentInvocationContext,
         ) -> BoxFuture<'a, crate::error::Result<BoxStream<'a, crate::error::Result<AgentEvent>>>>
         {
-            Box::pin(async {
-                Ok(
-                    futures::stream::iter(vec![Ok(AgentEvent::FinalAnswer("done".to_string()))])
-                        .boxed(),
-                )
+            Box::pin(async move {
+                Ok(async_stream::stream! {
+                    let _retained_input_and_resources = (message, invocation);
+                    yield Ok(headless_source_status("headless-closing-source", echo_core::agent::ExecutionStatusKind::Started, 0));
+                    yield Ok(AgentEvent::FinalAnswer("done".into()));
+                    yield Ok(headless_source_status("headless-closing-source", echo_core::agent::ExecutionStatusKind::Settled, 1));
+                }.boxed())
             })
         }
 
@@ -620,25 +640,28 @@ mod tests {
             "test"
         }
 
-        fn execute<'a>(&'a self, _task: &'a str) -> BoxFuture<'a, crate::error::Result<String>> {
-            Box::pin(async { Ok("done".to_string()) })
-        }
-
-        fn execute_stream<'a>(
+        fn execute_stream_message_with_invocation_context<'a>(
             &'a self,
-            _task: &'a str,
+            message: crate::llm::types::Message,
+            cancel: CancellationToken,
+            invocation: echo_core::agent::AgentInvocationContext,
         ) -> BoxFuture<'a, crate::error::Result<BoxStream<'a, crate::error::Result<AgentEvent>>>>
         {
             let started = Arc::clone(&self.started);
             let release = Arc::clone(&self.release);
             Box::pin(async move {
-                Ok(futures::stream::once(async move {
+                Ok(async_stream::stream! {
+                    let _retained_input_and_resources = (message, invocation);
+                    yield Ok(headless_source_status("headless-held-source", echo_core::agent::ExecutionStatusKind::Started, 0));
                     started.notify_one();
                     release.notified().await;
-                    None::<crate::error::Result<AgentEvent>>
-                })
-                .filter_map(futures::future::ready)
-                .boxed())
+                    if cancel.is_cancelled() {
+                        yield Ok(headless_source_status("headless-held-source", echo_core::agent::ExecutionStatusKind::Cancelled, 1));
+                    } else {
+                        yield Ok(AgentEvent::FinalAnswer("done".into()));
+                        yield Ok(headless_source_status("headless-held-source", echo_core::agent::ExecutionStatusKind::Settled, 1));
+                    }
+                }.boxed())
             })
         }
 

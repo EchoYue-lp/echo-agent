@@ -106,10 +106,6 @@ pub mod subagent {
 #[cfg_attr(docsrs, doc(cfg(feature = "acp")))]
 pub mod acp;
 
-#[cfg(feature = "a2a")]
-#[cfg_attr(docsrs, doc(cfg(feature = "a2a")))]
-pub mod a2a;
-
 #[cfg(feature = "channels")]
 #[cfg_attr(docsrs, doc(cfg(feature = "channels")))]
 pub mod channels;
@@ -124,10 +120,6 @@ pub mod hooks_bridge;
 #[cfg(feature = "mcp")]
 #[cfg_attr(docsrs, doc(cfg(feature = "mcp")))]
 pub mod mcp;
-
-#[cfg(feature = "lsp")]
-#[cfg_attr(docsrs, doc(cfg(feature = "lsp")))]
-pub mod lsp;
 
 pub mod tasks;
 
@@ -196,14 +188,15 @@ pub mod prelude {
     pub use crate::budget::TokenBudgetConfig;
     pub use echo_core::agent::{PromptTemplateManager, RunBudgetPolicy};
     // Config
-    pub use crate::config::{AgentSettings, FrameworkConfig, ModelConfig, SourcedModelConfig};
+    pub use crate::config::{AgentSettings, FrameworkConfig, ModelConfig};
 
     /// Convenience alias for [`ReactAgentBuilder`], the canonical builder type.
     pub type AgentBuilder = ReactAgentBuilder;
 
     // LLM
     pub use crate::llm::types::{
-        ContentPart, ImageUrl, LinkedResource, Message, MessageContent, Role, ToolCall,
+        ContentPart, ImageUrl, LinkedResource, Message, MessageContent, ProviderOutputSource, Role,
+        ToolCall,
     };
     pub use crate::llm::{
         AnthropicClient, BUILT_IN_MODEL_FACTS_VERSION, ChatChunk, ChatRequest, ChatResponse,
@@ -216,7 +209,6 @@ pub mod prelude {
     };
 
     // Tools
-    pub use crate::tools::builtin::think::ThinkTool;
     pub use crate::tools::control::{
         ToolControlError, ToolControlMutation, ToolControlService, ToolControlSnapshot,
     };
@@ -375,14 +367,6 @@ pub mod advanced {
     #[cfg(feature = "telemetry")]
     #[cfg_attr(docsrs, doc(cfg(feature = "telemetry")))]
     pub use crate::telemetry::{Metrics, TelemetryConfig, init_telemetry, shutdown_telemetry};
-
-    #[cfg(feature = "a2a")]
-    #[cfg_attr(docsrs, doc(cfg(feature = "a2a")))]
-    pub use crate::a2a::{
-        A2AClient, A2AServer, A2AStreamEvent, AgentCapabilities, AgentCard, AgentProvider,
-        AgentSkill, JwtClaims, JwtConfig, JwtConfigError, TaskState, get_claims, serve,
-        serve_with_auth,
-    };
 
     #[cfg(feature = "topology")]
     #[cfg_attr(docsrs, doc(cfg(feature = "topology")))]

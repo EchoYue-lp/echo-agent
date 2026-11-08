@@ -15,7 +15,7 @@ my-plugin/
 │   └── reviewer.md
 ├── hooks/
 │   └── hooks.yaml
-├── lsp.yaml
+├── lsp.yaml          # 旧声明：仅冻结与诊断，不加载语言服务
 ├── monitors.yaml
 ├── themes/
 ├── output-styles/
@@ -122,16 +122,31 @@ The remaining components are discovered from fixed root locations:
 |---|---|
 | `agents/*.md` | Subagent adapter |
 | `hooks/hooks.yaml` | Hook registry |
-| `lsp.yaml` | Embedding application's LSP manager |
+| `lsp.yaml` | 已退役声明：原prepare仅冻结文本与diagnostics，不启动manager |
 | `monitors.yaml` | embedding application scheduler |
 | `themes/*.json` | embedding application GUI/TUI theme catalogs |
 | `output-styles/*.md` | embedding application system-context projection |
 
 `scripts/` and `README.md` are package resources rather than automatically executed components. Skills and Hooks may reference scripts explicitly.
 
+## 冻结旧声明的退役诊断
+
+`lsp` feature与LSP运行组件已经具名退出。原registry／prepare在cold generation识别旧
+`lsp.yaml`：合法UTF-8文本保完整冻结文档与原hash，并产生含component/path/plugin身份的
+退役Warning；非法UTF-8、读取失败、metadata错误、非普通文件及坏链接保原Error。
+真实缺席仍是optional，不打开FIFO／设备。没有LSP parser／manager／进程启动，也不假报加载成功。
+
+完整旧文本以原`PreparedPluginDocument`保留在同generation私有通用容器，应用读取完整
+`PreparedPluginSet::diagnostics()`；不恢复`lsp_document()`或`lsp_discovered`专属出口。
+cache hit返回同一Arc，不重读或重复追加；源改／删／换链接不改旧集合，invalidate后才重建。
+`wire_prepared`／rollback不重读包文件，健康Skill／Hook／MCP／Subagent和原cleanup receipt保留。
+
+SDK接入此删后源时应只原样投影Framework通用diagnostics，不从路径重新推断或补造来源。这里的源码合同
+与删后构建、正式SDK pin、native及发布资格分别验收。见[ADR0090](../adr/0090-a2a-lsp-retirement-contract.md)。
+
 ## Framework and application boundary
 
-The reusable framework owns manifest parsing, Skills, MCP, plugin scopes/lifecycle, Hooks, Subagent definitions, and LSP adapter output. An embedding application discovers and converts only its product-specific `monitors.yaml`, `themes/`, and `output-styles/` files. The application integration does not duplicate dependency ordering, component ownership, or reload semantics.
+The reusable framework owns manifest parsing, Skills, MCP, plugin scopes/lifecycle, Hooks, Subagent definitions, 及旧声明冻结诊断. An embedding application discovers and converts only its product-specific `monitors.yaml`, `themes/`, and `output-styles/` files. The application integration does not duplicate dependency ordering, component ownership, or reload semantics.
 
 ## Discovery and lifecycle
 
@@ -145,14 +160,46 @@ The registry scans these scopes:
 
 Applications can override the plugin data base directory. embedding application sets it to `<application-data>`.
 
-Loading proceeds in dependency order. Fatal manifest errors skip the package. Framework-parsed Skill, Hook, and MCP errors remain isolated at the component boundary and are recorded as error diagnostics; unreadable frozen Subagent or LSP documents are omitted the same way. Their product-specific syntax is validated by the embedding application's second preparation stage. Healthy siblings remain in the prepared plugin. Runtime replacement records ownership so disable, uninstall, and reload remove exactly the components contributed by each plugin.
+Loading proceeds in dependency order. Fatal manifest errors skip the package. Framework-parsed Skill, Hook, and MCP errors remain isolated at the component boundary and are recorded as error diagnostics; unreadable frozen Subagent文档及旧声明 are omitted the same way. 保留Subagent的产品语法继续由应用第二阶段prepare校验；旧LSP声明不再作为可执行组件。 Healthy siblings remain in the prepared plugin. Runtime replacement records ownership so disable, uninstall, and reload remove exactly the components contributed by each plugin.
 
 `PluginIntegrator::prepare` captures one immutable `PreparedPluginSet` with a monotonic generation,
 deterministic content identity, structured diagnostics, parsed Skills/Hooks/MCP, and owner-qualified
-Subagent/LSP documents. `wire_prepared` and rollback perform no component file reads. Disk changes
+Subagent文档及私有旧声明. `wire_prepared` and rollback perform no component file reads. Disk changes
 become visible only after registry mutation or explicit invalidation. See [ADR 0012](../adr/0012-immutable-plugin-preparation.md).
 Generation ordinals are allocated across all integrators in the process, so independent integrators
 can publish successive snapshots to the same Agent without resetting their order.
+
+### Selective prepared identities
+
+`PreparedPlugin::content_identity() -> &str` returns a SHA-256 for that plugin's
+same-prepare manifest (including its real optional version and dependencies), effective
+configuration/variables, discovered Skill identity documents, Hook/MCP declarations and frozen
+Subagent documents. Object keys and manifest dependency order are canonicalized; relative
+component paths and contents participate. Repreparation and process-local generation counters
+do not change this identity when the inputs are equal. An absent version remains absent: the
+digest is neither a fabricated version nor `latest`.
+
+`PreparedPluginSet::dependency_closure(id) -> Result<Vec<&PreparedPlugin>, String>` returns the
+enabled root and its transitive dependencies in stable dependency-first order. It selects only
+from that immutable applicable set. Original registry preparation still rejects missing or
+disabled dependencies, unsatisfied/invalid version constraints and cycles. An inapplicable set
+or a root not prepared in that set returns an error. Changing an unrelated plugin does not
+change the selected members' identities; changing a necessary dependency does. Inspecting an
+old set does not grant permission to publish it or keep its external resources alive.
+
+The complete `PreparedPluginSet::identity()` remains the aggregate identity for publication,
+not a substitute for this selected closure. Its encoding now aggregates the canonical plugin
+identities; previous hash strings are not a cross-release compatibility promise. Generation,
+publication targets, rollback receipts, cancellation and cleanup ownership are unchanged.
+
+The identity covers the inputs actually frozen by the framework, not an entire package:
+discovered `SKILL.md` identity documents do not freeze every `scripts/` or `references/` file;
+Hook commands and MCP connection declarations do not freeze external implementations or
+services. Product-specific declarations and inputs remain the embedding application's
+responsibility. See [ADR 0096](../adr/0096-selective-prepared-plugin-identity.md).
+The existing `demo56_plugin_system` example selects the actual prepared closure before using
+the same integrator for real coordinator publication. It remains in the workspace examples
+compile/test chain; no separate demonstration target or dependency is added.
 
 Each `ReactAgent` still owns one publication target, but hosts drive complete lifecycle
 transitions through `PluginCoordinator`. Construct it with the durable registry and integrator,

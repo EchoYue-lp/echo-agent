@@ -76,7 +76,7 @@ use super::audit::{PermissionAuditEntry, PermissionAuditSink};
 use super::classifier::{Classifier, ClassifierContext, DenialTracker};
 use super::permission::{
     PermissionContext, PermissionRequest, PermissionRequestHandler, PermissionResponse,
-    PermissionResponseDecision, PermissionUpdate, RiskLevel,
+    PermissionResponseDecision, PermissionUpdate, RiskLevel, SuggestedAction, Suggestion,
 };
 use super::policy::ApprovalScope;
 use super::protected::{ProtectedPathChecker, ProtectedPathResult};
@@ -643,6 +643,98 @@ impl PermissionService {
         .await
     }
 
+    /// Require a fresh handler decision for this invocation, even when an allow
+    /// rule, session approval or automatic mode would ordinarily allow it.
+    ///
+    /// Existing denials still apply. A missing real handler is an error, never
+    /// an approval. The same handler post-processing rechecks rewritten input,
+    /// records explicitly granted scope and issues the final-input receipt.
+    /// Suggestions are descriptive custom responses, not inferred grants.
+    /// Cancellation remains owned by the caller awaiting this operation.
+    pub async fn request_approval_with_context(
+        &self,
+        tool_name: &str,
+        tool_input: &Value,
+        permissions: &[ToolPermission],
+        mode_override: Option<PermissionMode>,
+        invocation: Option<&PermissionInvocationContext>,
+        suggestions: &[String],
+    ) -> Result<PermissionCheck> {
+        let start = std::time::Instant::now();
+        if let Some(decision) = self.protected_path_decision_since(tool_name, tool_input, start) {
+            return Ok(PermissionCheck::from_decision(decision));
+        }
+        let mode = mode_override.unwrap_or_else(|| self.current_mode());
+        let mode_denial = if mode == PermissionMode::BypassPermissions
+            && self.config.read().await.bypass_disabled
+        {
+            Some("BypassPermissions 模式已被管理员禁用")
+        } else if mode == PermissionMode::Plan
+            && permissions.iter().any(|permission| {
+                matches!(
+                    permission,
+                    ToolPermission::Write | ToolPermission::Execute | ToolPermission::Sensitive
+                )
+            })
+        {
+            Some("Plan 模式不允许写入或执行操作")
+        } else {
+            None
+        };
+        let denial = if let Some(reason) = mode_denial {
+            Some(PermissionDecision::Deny {
+                reason: reason.into(),
+            })
+        } else {
+            let decision = self
+                .rules
+                .read()
+                .await
+                .check(tool_name, permissions)
+                .map(|behavior| behavior.to_decision());
+            match decision {
+                Some(decision) if decision.is_denied() => Some(decision),
+                None if mode == PermissionMode::DontAsk => Some(Self::dont_ask_denial(tool_name)),
+                _ => None,
+            }
+        };
+        if let Some(decision) = denial {
+            self.record_audit(
+                tool_name,
+                tool_input,
+                &decision,
+                "denied",
+                "explicit_approval",
+                start,
+                start.elapsed(),
+            );
+            return Ok(PermissionCheck::from_decision(decision));
+        }
+        if !self.has_real_handler() {
+            return Err(echo_core::error::ReactError::Other(format!(
+                "Tool '{tool_name}' explicitly requires approval but no permission request handler is configured"
+            )));
+        }
+        let (check, audited) = self
+            .check_with_handler_and_suggestions(
+                tool_name,
+                tool_input,
+                permissions,
+                invocation,
+                suggestions,
+            )
+            .await?;
+        self.finish_check(
+            tool_name,
+            tool_input,
+            check,
+            audited,
+            start,
+            "explicit_approval",
+        )
+        .await
+    }
+
     /// Check permissions with invocation context for automatic classification.
     pub async fn check_with_permissions_result_in_mode_and_context(
         &self,
@@ -842,16 +934,9 @@ impl PermissionService {
                     PermissionCheck::for_input(PermissionDecision::Allow, tool_name, tool_input)?
                 }
             }
-            PermissionMode::DontAsk => PermissionCheck::from_decision(
-                // 静默模式：只放行有明确 allow 规则的操作，其他静默拒绝
-                // 注意：到这里规则已检查过且无匹配，直接拒绝
-                PermissionDecision::Deny {
-                    reason: format!(
-                        "DontAsk 模式下工具 '{}' 未匹配任何允许规则，已静默拒绝",
-                        tool_name
-                    ),
-                },
-            ),
+            PermissionMode::DontAsk => {
+                PermissionCheck::from_decision(Self::dont_ask_denial(tool_name))
+            }
             PermissionMode::Bubble => {
                 if self.has_real_handler() {
                     let (check, audited) = self
@@ -868,6 +953,35 @@ impl PermissionService {
                 PermissionCheck::for_input(PermissionDecision::Allow, tool_name, tool_input)?
             }
         };
+        self.finish_check(
+            tool_name,
+            tool_input,
+            check,
+            protected_path_audited,
+            pipeline_start,
+            "mode_dispatch",
+        )
+        .await
+    }
+
+    fn dont_ask_denial(tool_name: &str) -> PermissionDecision {
+        PermissionDecision::Deny {
+            reason: format!(
+                "DontAsk 模式下工具 '{}' 未匹配任何允许规则，已静默拒绝",
+                tool_name
+            ),
+        }
+    }
+
+    async fn finish_check(
+        &self,
+        tool_name: &str,
+        tool_input: &Value,
+        check: PermissionCheck,
+        protected_path_audited: bool,
+        pipeline_start: std::time::Instant,
+        source: &str,
+    ) -> Result<PermissionCheck> {
         let decision = &check.decision;
 
         // 7. 结果后处理
@@ -896,7 +1010,7 @@ impl PermissionService {
                 tool_input,
                 decision,
                 reason,
-                "mode_dispatch",
+                source,
                 pipeline_start,
                 pipeline_start.elapsed(),
             );
@@ -938,12 +1052,37 @@ impl PermissionService {
         permissions: &[ToolPermission],
         invocation: Option<&PermissionInvocationContext>,
     ) -> Result<(PermissionCheck, bool)> {
+        self.check_with_handler_and_suggestions(tool_name, tool_input, permissions, invocation, &[])
+            .await
+    }
+
+    async fn check_with_handler_and_suggestions(
+        &self,
+        tool_name: &str,
+        tool_input: &Value,
+        permissions: &[ToolPermission],
+        invocation: Option<&PermissionInvocationContext>,
+        suggestions: &[String],
+    ) -> Result<(PermissionCheck, bool)> {
         let risk_level = RiskLevel::from_permissions(permissions);
 
         let mut request = PermissionRequest::new(tool_name, tool_input.clone())
             .with_permissions(permissions.to_vec())
             .with_risk_level(risk_level)
             .with_risk_based_suggestions();
+        // Hook text carries advice, not a typed approval action. Keep the
+        // standard approval choices and preserve each supplied label verbatim.
+        request
+            .suggestions
+            .extend(suggestions.iter().map(|text| Suggestion {
+                label: text.clone(),
+                description: text.clone(),
+                action: SuggestedAction::Custom {
+                    response: text.clone(),
+                },
+                recommended: false,
+                shortcut: None,
+            }));
         if let Some(invocation) = invocation {
             request.context = invocation.permission.clone();
             request.request_id = invocation.request_id.clone();
@@ -1316,6 +1455,314 @@ mod tests {
         ) -> BoxFuture<'_, EchoResult<super::super::HumanLoopResponse>> {
             Box::pin(async { Ok(super::super::HumanLoopResponse::Approved) })
         }
+    }
+
+    #[tokio::test]
+    async fn explicit_approval_preserves_context_and_descriptive_suggestions() -> EchoResult<()> {
+        struct CaptureHandler(Arc<tokio::sync::Mutex<Option<PermissionRequest>>>);
+        #[async_trait::async_trait]
+        impl PermissionRequestHandler for CaptureHandler {
+            async fn handle(&self, request: PermissionRequest) -> EchoResult<PermissionResponse> {
+                *self.0.lock().await = Some(request);
+                Ok(PermissionResponse::allowed())
+            }
+        }
+        let captured = Arc::new(tokio::sync::Mutex::new(None));
+        let service = PermissionService::new()
+            .with_request_handler(Arc::new(CaptureHandler(captured.clone())));
+        let mut context = invocation("context-scope");
+        context.request_id = Some("request 中文".into());
+        context.session_id = Some("session".into());
+        context.agent_name = Some("agent".into());
+        context.timeout = Some(Duration::from_secs(7));
+        context.permission.working_directory = Some("/workspace/中文".into());
+        context.permission.affected_files = vec!["a.txt".into()];
+        context
+            .permission
+            .metadata
+            .insert("origin".into(), Value::String("hook".into()));
+        let labels = vec!["Always allow 中文".into(), "second 🔎".into()];
+        service
+            .request_approval_with_context(
+                "Read",
+                &serde_json::json!({}),
+                &[ToolPermission::Read],
+                None,
+                Some(&context),
+                &labels,
+            )
+            .await?;
+        let request = captured.lock().await.take().ok_or_else(|| {
+            echo_core::error::ReactError::Other("missing observed request".into())
+        })?;
+        assert_eq!(request.request_id, context.request_id);
+        assert_eq!(request.session_id, context.session_id);
+        assert_eq!(request.agent_name, context.agent_name);
+        assert_eq!(request.timeout, context.timeout);
+        assert_eq!(
+            request.context.working_directory,
+            context.permission.working_directory
+        );
+        assert_eq!(
+            request.context.affected_files,
+            context.permission.affected_files
+        );
+        assert_eq!(request.context.metadata, context.permission.metadata);
+        let custom: Vec<_> = request
+            .suggestions
+            .iter()
+            .filter_map(|s| match &s.action {
+                SuggestedAction::Custom { response } => {
+                    assert_eq!(&s.label, response);
+                    Some(s.label.clone())
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(custom, labels);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn explicit_approval_ignores_cached_grants_but_preserves_scope_writes() -> EchoResult<()>
+    {
+        let count = Arc::new(AtomicUsize::new(0));
+        let service =
+            PermissionService::new().with_request_handler(Arc::new(CountingAllowHandler {
+                count: count.clone(),
+                response: PermissionResponse {
+                    decision: PermissionResponseDecision::Allowed,
+                    rule_updates: Vec::new(),
+                    feedback: None,
+                    updated_input: None,
+                    approval_scope: Some(ApprovalScope::SessionTool),
+                },
+            }));
+        let context = invocation("explicit-scope");
+        let input = serde_json::json!({"path": "notes.txt"});
+        for _ in 0..2 {
+            let check = service
+                .request_approval_with_context(
+                    "Read",
+                    &input,
+                    &[ToolPermission::Read],
+                    None,
+                    Some(&context),
+                    &[],
+                )
+                .await?;
+            assert!(check.decision.is_allowed());
+            assert!(
+                check
+                    .approval_receipt
+                    .as_ref()
+                    .is_some_and(|r| r.matches("Read", &input))
+            );
+        }
+        assert_eq!(count.load(Ordering::SeqCst), 2);
+        assert!(service.is_approved("explicit-scope", "Read", &input));
+        let ordinary = service
+            .check_with_permissions_result_in_mode_and_context(
+                "Read",
+                &input,
+                &[ToolPermission::Read],
+                None,
+                Some(&context),
+            )
+            .await?;
+        assert!(ordinary.decision.is_allowed());
+        assert_eq!(count.load(Ordering::SeqCst), 2);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn explicit_approval_without_real_handler_fails_only_the_explicit_path() -> EchoResult<()>
+    {
+        let service = PermissionService::new().with_mode(PermissionMode::BypassPermissions);
+        let input = serde_json::json!({});
+        assert!(
+            service
+                .request_approval_with_context(
+                    "Read",
+                    &input,
+                    &[ToolPermission::Read],
+                    None,
+                    None,
+                    &[],
+                )
+                .await
+                .is_err()
+        );
+        assert!(
+            service
+                .check_with_permissions("Read", &input, &[ToolPermission::Read])
+                .await?
+                .is_allowed()
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn explicit_approval_denials_precede_handler_and_cached_approval() -> EchoResult<()> {
+        let count = Arc::new(AtomicUsize::new(0));
+        let service = PermissionService::new()
+            .with_mode(PermissionMode::BypassPermissions)
+            .with_request_handler(Arc::new(CountingAllowHandler {
+                count: count.clone(),
+                response: PermissionResponse::allowed(),
+            }));
+        service
+            .add_rule(PermissionRule::deny(
+                RuleMatcher::Pattern {
+                    pattern: "Write".into(),
+                },
+                "explicit policy denial".into(),
+                RuleSource::Session,
+            ))
+            .await;
+        let input = serde_json::json!({"path":"notes.txt"});
+        service.record_approval("scope", "Write", &input, ApprovalScope::SessionTool);
+        let context = invocation("scope");
+        let check = service
+            .request_approval_with_context(
+                "Write",
+                &input,
+                &[ToolPermission::Write],
+                None,
+                Some(&context),
+                &[],
+            )
+            .await?;
+        assert!(check.decision.is_denied());
+        assert!(check.approval_receipt.is_none());
+        assert_eq!(count.load(Ordering::SeqCst), 0);
+        // The explicit path does not reorder ordinary full-auto semantics.
+        assert!(
+            service
+                .check_with_permissions("Write", &input, &[ToolPermission::Write])
+                .await?
+                .is_allowed()
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn explicit_approval_dont_ask_preserves_unmatched_denial() -> EchoResult<()> {
+        let count = Arc::new(AtomicUsize::new(0));
+        let service = PermissionService::new()
+            .with_mode(PermissionMode::DontAsk)
+            .with_request_handler(Arc::new(CountingAllowHandler {
+                count: count.clone(),
+                response: PermissionResponse::allowed(),
+            }));
+        let input = serde_json::json!({});
+        let denied = service
+            .request_approval_with_context("Read", &input, &[ToolPermission::Read], None, None, &[])
+            .await?;
+        assert!(denied.decision.is_denied());
+        assert!(denied.approval_receipt.is_none());
+        assert_eq!(count.load(Ordering::SeqCst), 0);
+        service
+            .add_rule(PermissionRule::allow(
+                RuleMatcher::Pattern {
+                    pattern: "Read".into(),
+                },
+                RuleSource::Session,
+            ))
+            .await;
+        let allowed = service
+            .request_approval_with_context("Read", &input, &[ToolPermission::Read], None, None, &[])
+            .await?;
+        assert!(allowed.decision.is_allowed());
+        assert_eq!(count.load(Ordering::SeqCst), 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn explicit_approval_reuses_modified_input_protection_and_receipts() -> EchoResult<()> {
+        let context = invocation("rewrite-scope");
+        let input = serde_json::json!({"path":"notes.txt", "request_id":"unicode 中文"});
+        let protected =
+            PermissionService::new().with_request_handler(Arc::new(ProtectedModifiedInputHandler));
+        let check = protected
+            .request_approval_with_context(
+                "Write",
+                &input,
+                &[ToolPermission::Write],
+                None,
+                Some(&context),
+                &[],
+            )
+            .await?;
+        assert!(check.decision.is_denied());
+        assert!(check.approval_receipt.is_none());
+        assert!(!protected.is_approved(
+            "rewrite-scope",
+            "Write",
+            &serde_json::json!({"path":".git/config"})
+        ));
+
+        let service =
+            PermissionService::new().with_request_handler(Arc::new(EchoModifiedInputHandler));
+        let check = service
+            .request_approval_with_context(
+                "Write",
+                &input,
+                &[ToolPermission::Write],
+                None,
+                Some(&context),
+                &[],
+            )
+            .await?;
+        let updated = check
+            .updated_input
+            .as_ref()
+            .ok_or_else(|| echo_core::error::ReactError::Other("missing rewritten input".into()))?;
+        assert!(
+            check
+                .approval_receipt
+                .as_ref()
+                .is_some_and(|r| r.matches("Write", updated))
+        );
+        assert!(
+            !check
+                .approval_receipt
+                .as_ref()
+                .is_some_and(|r| r.matches("Write", &input))
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn explicit_approval_need_more_info_is_not_a_grant() -> EchoResult<()> {
+        let service =
+            PermissionService::new().with_request_handler(Arc::new(CountingAllowHandler {
+                count: Arc::new(AtomicUsize::new(0)),
+                response: PermissionResponse {
+                    decision: PermissionResponseDecision::NeedMoreInfo {
+                        question: "clarify 中文".into(),
+                    },
+                    rule_updates: Vec::new(),
+                    feedback: None,
+                    updated_input: None,
+                    approval_scope: None,
+                },
+            }));
+        let input = serde_json::json!({});
+        let check = service
+            .request_approval_with_context(
+                "Read",
+                &input,
+                &[ToolPermission::Read],
+                None,
+                Some(&invocation("scope")),
+                &[],
+            )
+            .await?;
+        assert!(matches!(check.decision, PermissionDecision::Ask { .. }));
+        assert!(check.approval_receipt.is_none());
+        assert!(!service.is_approved("scope", "Read", &input));
+        Ok(())
     }
 
     #[tokio::test]

@@ -98,7 +98,6 @@ impl SqliteRuntimeStateStore {
             CREATE TABLE IF NOT EXISTS agent_checkpoints (
                 conversation_id TEXT PRIMARY KEY,
                 messages_json   TEXT NOT NULL,
-                current_plan    TEXT,
                 active_skills   TEXT NOT NULL,
                 blocked_reason  TEXT,
                 working_dir     TEXT,
@@ -138,36 +137,7 @@ impl SqliteRuntimeStateStore {
         )
         .map_err(|error| RuntimeStateError::Io(format!("failed to init tables: {error}")))?;
 
-        // Databases created before working-directory restoration lack this
-        // column. SQLite has no `ADD COLUMN IF NOT EXISTS`, so only the exact
-        // duplicate-column outcome is accepted.
-        if let Err(error) = conn.execute(
-            "ALTER TABLE agent_checkpoints ADD COLUMN working_dir TEXT",
-            [],
-        ) {
-            let message = error.to_string();
-            if !message.contains("duplicate column name") {
-                return Err(RuntimeStateError::Io(format!(
-                    "failed to add working_dir column: {message}"
-                ))
-                .into());
-            }
-        }
-        for statement in [
-            "ALTER TABLE runtime_state_versions ADD COLUMN cas_expected_state_version_json TEXT",
-            "ALTER TABLE runtime_state_versions ADD COLUMN cas_expected_scope_revision TEXT",
-            "ALTER TABLE runtime_state_versions ADD COLUMN transcript_ack_proof_json TEXT",
-        ] {
-            if let Err(error) = conn.execute(statement, []) {
-                let message = error.to_string();
-                if !message.contains("duplicate column name") {
-                    return Err(RuntimeStateError::Io(format!(
-                        "failed to migrate runtime-state CAS metadata: {message}"
-                    ))
-                    .into());
-                }
-            }
-        }
+        // 当前建库声明已含全部字段；不对旧库执行ALTER或把补列失败当兼容成功。
         Ok(())
     }
 
@@ -404,8 +374,7 @@ impl SqliteRuntimeStateStore {
                     && messages_match
                     && state.is_some_and(|state| {
                         state.checkpoint.as_ref().is_some_and(|current_checkpoint| {
-                            current_checkpoint.current_plan == checkpoint.current_plan
-                                && current_checkpoint.active_skills == checkpoint.active_skills
+                            current_checkpoint.active_skills == checkpoint.active_skills
                                 && current_checkpoint.blocked_reason == checkpoint.blocked_reason
                                 && current_checkpoint.working_dir == checkpoint.working_dir
                         })
@@ -489,7 +458,6 @@ impl SqliteRuntimeStateStore {
             || pending.batch.conversation_epoch != request.conversation_epoch
             || acknowledged.transcript_projection.as_ref() != Some(&pending.cursor_after)
             || !messages_match
-            || request.checkpoint.current_plan != checkpoint.current_plan
             || request.checkpoint.active_skills != checkpoint.active_skills
             || request.checkpoint.blocked_reason != checkpoint.blocked_reason
             || request.checkpoint.working_dir != checkpoint.working_dir
@@ -531,17 +499,16 @@ impl SqliteRuntimeStateStore {
     ) -> Result<Option<AgentCheckpoint>> {
         let row = conn
             .query_row(
-                "SELECT messages_json, current_plan, active_skills, blocked_reason, working_dir, timestamp
+                "SELECT messages_json, active_skills, blocked_reason, working_dir, timestamp
                  FROM agent_checkpoints WHERE conversation_id = ?1",
                 params![conversation_id],
                 |row| {
                     Ok((
                         row.get::<_, String>(0)?,
-                        row.get::<_, Option<String>>(1)?,
-                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, Option<String>>(2)?,
                         row.get::<_, Option<String>>(3)?,
-                        row.get::<_, Option<String>>(4)?,
-                        row.get::<_, String>(5)?,
+                        row.get::<_, String>(4)?,
                     ))
                 },
             )
@@ -549,14 +516,7 @@ impl SqliteRuntimeStateStore {
             .map_err(|error| {
                 RuntimeStateError::Io(format!("failed to query checkpoint: {error}"))
             })?;
-        let Some((
-            messages_json,
-            current_plan,
-            active_skills_json,
-            blocked_reason,
-            working_dir,
-            timestamp,
-        )) = row
+        let Some((messages_json, active_skills_json, blocked_reason, working_dir, timestamp)) = row
         else {
             return Ok(None);
         };
@@ -575,7 +535,6 @@ impl SqliteRuntimeStateStore {
         Ok(Some(AgentCheckpoint {
             conversation_id: conversation_id.to_string(),
             messages_json,
-            current_plan,
             active_skills,
             blocked_reason,
             working_dir: working_dir.map(std::path::PathBuf::from),
@@ -1307,11 +1266,10 @@ impl SqliteRuntimeStateStore {
         })?;
         conn.execute(
             r#"
-            INSERT INTO agent_checkpoints (conversation_id, messages_json, current_plan, active_skills, blocked_reason, working_dir, timestamp)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+            INSERT INTO agent_checkpoints (conversation_id, messages_json, active_skills, blocked_reason, working_dir, timestamp)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6)
             ON CONFLICT(conversation_id) DO UPDATE SET
                 messages_json = excluded.messages_json,
-                current_plan = excluded.current_plan,
                 active_skills = excluded.active_skills,
                 blocked_reason = excluded.blocked_reason,
                 working_dir = excluded.working_dir,
@@ -1320,7 +1278,6 @@ impl SqliteRuntimeStateStore {
             params![
                 &checkpoint.conversation_id,
                 &checkpoint.messages_json,
-                checkpoint.current_plan.as_deref(),
                 active_skills,
                 checkpoint.blocked_reason.as_deref(),
                 checkpoint.working_dir.as_ref().and_then(|path| path.to_str()),
@@ -2666,11 +2623,11 @@ mod tests {
     fn checkpoint(runtime_state_id: &str, marker: &str) -> Result<AgentCheckpoint> {
         Ok(AgentCheckpoint {
             conversation_id: runtime_state_id.to_string(),
-            messages_json: serde_json::to_string(&vec![crate::llm::types::Message::user(
-                marker.to_string(),
-            )])
-            .map_err(|error| RuntimeStateError::SerializationError(error.to_string()))?,
-            current_plan: None,
+            messages_json: AgentCheckpoint::serialize_payload(
+                vec![crate::llm::types::Message::user(marker.to_string())],
+                None,
+            )?,
+
             active_skills: Vec::new(),
             blocked_reason: None,
             working_dir: None,
@@ -2743,7 +2700,7 @@ mod tests {
                     last_error: None,
                 }),
             )?,
-            current_plan: None,
+
             active_skills: Vec::new(),
             blocked_reason: None,
             working_dir: None,
@@ -2985,7 +2942,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn revisioned_cas_replays_and_fences_legacy_mutators() -> Result<()> {
+    async fn revisioned_cas_replays_and_fences_raw_mutators() -> Result<()> {
         let path = std::env::temp_dir().join(format!(
             "echo-state-cas-{}-{}.sqlite",
             std::process::id(),
@@ -3108,8 +3065,8 @@ mod tests {
 
         let legacy = AgentCheckpoint {
             conversation_id: "runtime-b".to_string(),
-            messages_json: "[]".to_string(),
-            current_plan: None,
+            messages_json: r#"{"schema_version":3,"messages":[]}"#.to_string(),
+
             active_skills: Vec::new(),
             blocked_reason: None,
             working_dir: None,
@@ -3263,9 +3220,6 @@ mod tests {
                 .is_err()
         );
         let mut metadata_rewrites = Vec::new();
-        let mut changed_plan = recorded.clone();
-        changed_plan.current_plan = Some("forged plan".to_string());
-        metadata_rewrites.push(changed_plan);
         let mut changed_skills = recorded.clone();
         changed_skills.active_skills = vec!["forged-skill".to_string()];
         metadata_rewrites.push(changed_skills);
@@ -3516,7 +3470,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn legacy_raw_pending_is_rejected_without_side_effects() -> Result<()> {
+    async fn raw_pending_is_rejected_without_side_effects() -> Result<()> {
         let path = std::env::temp_dir().join(format!(
             "echo-state-legacy-pending-{}-{}.sqlite",
             std::process::id(),
@@ -4451,47 +4405,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn revisioned_tables_migrate_legacy_checkpoint_database() -> Result<()> {
+    async fn current_tables_preserve_raw_adoption_and_generation_retirement() -> Result<()> {
         let path = std::env::temp_dir().join(format!(
-            "echo-state-legacy-migration-{}-{}.sqlite",
+            "echo-state-current-layout-{}-{}.sqlite",
             std::process::id(),
             uuid::Uuid::new_v4()
         ));
-        let connection =
-            Connection::open(&path).map_err(|error| RuntimeStateError::Io(error.to_string()))?;
-        connection
-            .execute_batch(
-                "CREATE TABLE agent_checkpoints (
-                    conversation_id TEXT PRIMARY KEY,
-                    messages_json TEXT NOT NULL,
-                    current_plan TEXT,
-                    active_skills TEXT NOT NULL,
-                    blocked_reason TEXT,
-                    timestamp TEXT NOT NULL
-                 );",
-            )
-            .map_err(|error| RuntimeStateError::Io(error.to_string()))?;
-        connection
-            .execute(
-                "INSERT INTO agent_checkpoints
-                 (conversation_id, messages_json, current_plan, active_skills, blocked_reason, timestamp)
-                 VALUES (?1, ?2, NULL, ?3, NULL, ?4)",
-                params!["legacy", "[]", "[]", Utc::now().to_rfc3339()],
-            )
-            .map_err(|error| RuntimeStateError::Io(error.to_string()))?;
-        connection
-            .execute(
-                "INSERT INTO agent_checkpoints
-                 (conversation_id, messages_json, current_plan, active_skills, blocked_reason, timestamp)
-                 VALUES (?1, ?2, NULL, ?3, NULL, ?4)",
-                params!["legacy-delete", "[]", "[]", Utc::now().to_rfc3339()],
-            )
-            .map_err(|error| RuntimeStateError::Io(error.to_string()))?;
-        drop(connection);
-
         let store = SqliteRuntimeStateStore::new(&path)?;
-        let delete = crate::memory::ManagedConversationDelete::prepare("legacy-delete", 10)?;
-        let request = ScopeRetirementRequest::prepare("legacy-delete", 0, &delete)?;
+        store
+            .save_checkpoint(&checkpoint("current-raw", "raw")?)
+            .await?;
+        store
+            .save_checkpoint(&checkpoint("current-delete", "delete")?)
+            .await?;
+        let delete = crate::memory::ManagedConversationDelete::prepare("current-delete", 10)?;
+        let request = ScopeRetirementRequest::prepare("current-delete", 0, &delete)?;
         let begun = store.begin_scope_retirement(request.clone()).await?;
         assert_eq!(begun.manifest.items.len(), 1);
         assert_eq!(
@@ -4500,11 +4428,11 @@ mod tests {
                 .items
                 .first()
                 .map(|item| item.runtime_state_id.as_str()),
-            Some("legacy-delete")
+            Some("current-delete")
         );
         let conversation = store
             .continue_scope_retirement(
-                "legacy-delete",
+                "current-delete",
                 &request.delete_operation_id,
                 begun.scope.revision,
                 ScopeRetirementAdvance::ConversationDeleted {
@@ -4520,45 +4448,45 @@ mod tests {
             .await?;
         let dropped = store
             .continue_scope_retirement(
-                "legacy-delete",
+                "current-delete",
                 &request.delete_operation_id,
                 conversation.scope.revision,
                 ScopeRetirementAdvance::GenerationDropped {
-                    runtime_state_id: "legacy-delete".to_string(),
+                    runtime_state_id: "current-delete".to_string(),
                     pending_operation_id: None,
                 },
             )
             .await?;
         let completed = store
             .continue_scope_retirement(
-                "legacy-delete",
+                "current-delete",
                 &request.delete_operation_id,
                 dropped.scope.revision,
                 ScopeRetirementAdvance::Complete,
             )
             .await?;
         assert_eq!(completed.status, ScopeRetirementStatus::Completed);
-        assert!(store.get_checkpoint("legacy-delete").await?.is_none());
+        assert!(store.get_checkpoint("current-delete").await?.is_none());
 
         let unmanaged = store
-            .load_runtime_state("legacy", "legacy")
+            .load_runtime_state("current-raw", "current-raw")
             .await?
-            .ok_or_else(|| RuntimeStateError::NotFound("legacy checkpoint".to_string()))?;
+            .ok_or_else(|| RuntimeStateError::NotFound("current raw checkpoint".to_string()))?;
         let RuntimeStateVersion::Unmanaged { digest } = unmanaged.version else {
             return Err(RuntimeStateError::SerializationError(
-                "legacy checkpoint was not exposed as unmanaged".to_string(),
+                "current raw checkpoint was not exposed as unmanaged".to_string(),
             )
             .into());
         };
         let adopted = store
             .compare_and_save_checkpoint(RuntimeCheckpointCasRequest {
                 managed_import: None,
-                scope_id: "legacy".to_string(),
-                runtime_state_id: "legacy".to_string(),
+                scope_id: "current-raw".to_string(),
+                runtime_state_id: "current-raw".to_string(),
                 conversation_epoch: Some(1),
                 expected_scope_revision: 0,
                 expected_state_version: RuntimeStateExpectedVersion::Unmanaged { digest },
-                checkpoint: checkpoint("legacy", "adopted")?,
+                checkpoint: checkpoint("current-raw", "adopted")?,
             })
             .await?;
         assert_eq!(adopted.status, RuntimeCheckpointCasStatus::Applied);
@@ -4694,8 +4622,8 @@ mod tests {
         let store = SqliteRuntimeStateStore::new(&path)?;
         let checkpoint = AgentCheckpoint {
             conversation_id: "conv-1".to_string(),
-            messages_json: "[]".to_string(),
-            current_plan: Some("plan".to_string()),
+            messages_json: r#"{"schema_version":3,"messages":[]}"#.to_string(),
+
             active_skills: vec!["coding".to_string()],
             blocked_reason: None,
             working_dir: Some(std::path::PathBuf::from("/tmp/work")),
@@ -4725,8 +4653,8 @@ mod tests {
         ));
         let checkpoint = |runtime_state_id: &str| AgentCheckpoint {
             conversation_id: runtime_state_id.to_string(),
-            messages_json: "[]".to_string(),
-            current_plan: None,
+            messages_json: r#"{"schema_version":3,"messages":[]}"#.to_string(),
+
             active_skills: Vec::new(),
             blocked_reason: None,
             working_dir: None,
@@ -4815,9 +4743,9 @@ mod tests {
         connection
             .execute(
                 "INSERT INTO agent_checkpoints
-                 (conversation_id, messages_json, current_plan, active_skills, blocked_reason, working_dir, timestamp)
-                 VALUES (?1, ?2, NULL, ?3, NULL, NULL, ?4)",
-                params!["corrupt", "[]", "not-json", "not-a-timestamp"],
+                 (conversation_id, messages_json, active_skills, blocked_reason, working_dir, timestamp)
+                 VALUES (?1, ?2, ?3, NULL, NULL, ?4)",
+                params!["corrupt", r#"{"schema_version":3,"messages":[]}"#, "not-json", "not-a-timestamp"],
             )
             .map_err(|error| RuntimeStateError::Io(error.to_string()))?;
         drop(connection);

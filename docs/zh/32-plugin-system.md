@@ -15,7 +15,6 @@ my-plugin/
 │   └── reviewer.md
 ├── hooks/
 │   └── hooks.yaml
-├── lsp.yaml
 ├── monitors.yaml
 ├── themes/
 ├── output-styles/
@@ -118,16 +117,32 @@ Integrator 注入 prepared plugin owner。
 |---|---|
 | `agents/*.md` | Subagent 适配器 |
 | `hooks/hooks.yaml` | Hook registry |
-| `lsp.yaml` | 宿主应用 LSP manager |
 | `monitors.yaml` | embedding application 调度器 |
 | `themes/*.json` | embedding application GUI/TUI 主题目录 |
 | `output-styles/*.md` | embedding application system context 投影 |
 
 `scripts/` 和 `README.md` 是插件资源，不会自动执行；Skill 或 Hook 可以显式引用脚本。
 
+## 当前文档冻结与退役边界
+
+A2A／LSP 的 feature、运行组件与专属公开出口已经具名退出。按
+[ADR0105](../adr/0105-current-config-and-plugin-inputs.md)，当前 registry／prepare
+不再专门发现、读取、冻结、hash 或缓存 `lsp.yaml`，该旧文件也不参与当前 generation
+内容身份。用户保留的旧文件不会被删除、改写、迁移或恢复执行；Stage0 的冻结桥接仅为
+下文及 [ADR0090](../adr/0090-a2a-lsp-retirement-contract.md) 中的阶段历史。
+
+通用 `PreparedPluginDocument` 继续冻结当前 Subagent 文档，普通文件类型、UTF-8、
+来源消失和链接错误沿同一 owner 产生完整诊断；应用读取
+`PreparedPluginSet::diagnostics()`。cache hit 返回同一 Arc，不重读或重复追加；
+源改／删／换链接不改旧集合，invalidate 后才重建。`wire_prepared`／rollback 不重读
+包文件，健康 Skill／Hook／MCP／Subagent 和原 cleanup receipt 保留。
+
+SDK 只原样投影 Framework 通用 diagnostics，不从路径重新推断或补造来源。
+这里的源码合同与删后构建、正式 SDK pin、native 及发布资格分别验收。
+
 ## 框架与应用分层
 
-通用框架负责清单解析、Skills、MCP、作用域与生命周期、Hooks、Subagent 定义和 LSP 适配输出。embedding application 只发现并转换产品专属的 `monitors.yaml`、`themes/` 和 `output-styles/`；应用 integration 不重复拥有依赖排序、组件所有权或重载语义。
+通用框架负责清单解析、Skills、MCP、作用域与生命周期、Hooks、Subagent 定义及当前文档冻结诊断。embedding application 只发现并转换产品专属的 `monitors.yaml`、`themes/` 和 `output-styles/`；应用 integration 不重复拥有依赖排序、组件所有权或重载语义。
 
 ## 发现与生命周期
 
@@ -141,14 +156,38 @@ Integrator 注入 prepared plugin owner。
 
 应用可以覆盖插件数据根目录，embedding application 会将其设为 `<application-data>`。
 
-插件按依赖顺序加载。清单致命错误会跳过整个包；framework解析的Skill、Hook、MCP错误按组件边界隔离并记录error diagnostic，无法读取的冻结Subagent/LSP文档也按相同方式排除。二者的产品级语法由embedding application的第二阶段prepare校验。同一插件中健康的兄弟组件仍保留在prepared plugin中。运行时记录每个插件的组件所有权，因此disable、uninstall和reload能精确卸载对应组件。
+插件按依赖顺序加载。清单致命错误会跳过整个包；framework解析的Skill、Hook、MCP错误按组件边界隔离并记录error diagnostic，无法读取的冻结Subagent文档也按相同方式排除。保留Subagent的产品级语法由embedding application的第二阶段prepare校验；旧LSP文件不参与当前组件准备。同一插件中健康的兄弟组件仍保留在prepared plugin中。运行时记录每个插件的组件所有权，因此disable、uninstall和reload能精确卸载对应组件。
 
 `PluginIntegrator::prepare` 捕获唯一不可变的 `PreparedPluginSet`，包括单调 generation、确定性
-内容 identity、结构化诊断、已解析的 Skills/Hooks/MCP，以及保留 owner 的 Subagent/LSP 文档。
+内容 identity、结构化诊断、已解析的 Skills/Hooks/MCP，以及保留 owner 的 Subagent文档。
 `wire_prepared` 与 rollback 不读取组件文件；磁盘变化只在 registry mutation 或显式 invalidation
 后可见。见 [ADR 0012](../adr/0012-immutable-plugin-preparation.md)。
 generation 序号在同一进程的所有 Integrator 间统一分配，因此两个独立 Integrator 为同一 Agent
 准备的新旧快照仍有可比较的顺序。
+
+### 选择性 prepared 内容身份
+
+`PreparedPlugin::content_identity() -> &str` 返回该插件同次 prepare 输入的 SHA-256，覆盖
+manifest（真实可选 version 与依赖）、有效配置/变量、已发现 Skill 身份文档、Hook/MCP
+声明及冻结的 Subagent 文档。对象键和 manifest 依赖顺序规范化，相对来源路径与内容共同
+参与摘要。同输入重准备或进程内 generation 变化不改变内容身份；未声明 version 继续保持
+None，摘要不冒充版本号或 latest。
+
+`PreparedPluginSet::dependency_closure(id) -> Result<Vec<&PreparedPlugin>, String>` 从本次
+不可变且适用的 Set 选择已启用的根及传递依赖，按稳定的依赖优先顺序返回。缺失/禁用依赖、
+不满足或非法版本条件、环仍由原 registry 在 prepare 时检查；Set 不适用或根未准备时明确
+返回错误。无关插件改变不改变所选成员的内容身份，必要依赖改变会改变对应成员身份。
+读取旧 Set 的闭包不授予发布旧代或继续持有外部资源的资格。
+
+完整 `PreparedPluginSet::identity()` 继续为整批 publication 提供聚合身份，不能代替某任务
+选择的闭包。本次编码改为聚合规范化的单插件身份，不承诺历史摘要字符串跨版本兼容；
+generation、publication target、rollback receipt、取消和清理 owner 的职责均不改变。
+
+摘要只覆盖框架实际冻结的输入，不是完整包归档：已发现 SKILL.md 身份文档不等于整个
+scripts/references 目录；Hook 命令、MCP 连接声明不固定外部实现或服务。产品声明与显式输入
+仍由 embedding application 承接。见 [ADR 0096](../adr/0096-selective-prepared-plugin-identity.md)。
+既有 `demo56_plugin_system` 已在实际 prepared 产物上选择闭包，再以同一 integrator 进入
+coordinator publication，继续纳入 workspace examples 的编译/测试链，不新增演示目标或依赖。
 
 每个 `ReactAgent` 仍拥有唯一 publication target，但 Host 通过 `PluginCoordinator` 驱动完整
 生命周期。用 durable registry 与 integrator 构造 coordinator 后，调用
@@ -226,18 +265,22 @@ coordinator.enable(&mut agent, &id).await?;
 
 本设计复用 Agent Plugins 1.0 官方的 [manifest](https://agent-plugins.org/plugin-authors/manifest)、[Skills](https://agent-plugins.org/plugin-authors/skills)、[MCP](https://agent-plugins.org/plugin-authors/mcp-servers) 和 [loading](https://agent-plugins.org/client-implementers/loading-and-discovery) 约定。embedding application 作为本地个人助理，额外组件有意采用固定根位置，不引入客户端扩展 namespace。
 
-## Stage0：未启用 LSP 时的冻结声明诊断
+## Stage0 历史：未启用 LSP 时的冻结声明诊断
 
-在未启用 `lsp` feature 的 Framework 构建中，`PluginIntegrator::prepare` 仍冻结插件的
-`lsp.yaml` 声明，并沿既有 `PreparedPluginSet`、identity、generation、cache 和 rollback
-owner 保存这份输入。声明存在且来源是普通文件时，准备结果保留原文并记录组件级 Warning，
-明确说明该组件已冻结但当前构建不能应用它；目录、断链、循环链接、非法 UTF-8、来源消失
-和不可读输入记录带插件身份、组件名与路径的 Error。真正没有声明时继续保持可适用且不产生
-LSP 诊断。
+以下逐行保留 main `f5688958960b985da4141212824abe7c74884f7c` 的阶段说明。
+它描述保留 `lsp` feature 时的桥接行为，不表示 ADR0105 后的当前插件输入合同。
+Stage0 原始结果只绑定其自身 source；本地接收、消费者、main CI 和发布资格分别验收。
 
-这条路径复用 `PluginPreparationDiagnostic`，不新增 decoder、执行器、状态权威、wire mapper
-或第二份 prepared cache。健康的 Skill、Hook、MCP 和 Subagent 组件继续独立准备；启用
-`lsp` feature 的原有冻结与应用路径不变。该说明只描述 Framework 的通用冻结事实，不代替
-EKO 产品退役文案，也不宣称 A2A/LSP 已删除、消费者已进 main、Source/final、CI、native
-或发布已经完成。Stage0 绑定和待验范围见 ADR0090 与
-`.echo-semantic/evidence/evidence.stage0-generic-diagnostics.md`。
+> 在未启用 `lsp` feature 的 Framework 构建中，`PluginIntegrator::prepare` 仍冻结插件的
+> `lsp.yaml` 声明，并沿既有 `PreparedPluginSet`、identity、generation、cache 和 rollback
+> owner 保存这份输入。声明存在且来源是普通文件时，准备结果保留原文并记录组件级 Warning，
+> 明确说明该组件已冻结但当前构建不能应用它；目录、断链、循环链接、非法 UTF-8、来源消失
+> 和不可读输入记录带插件身份、组件名与路径的 Error。真正没有声明时继续保持可适用且不产生
+> LSP 诊断。
+>
+> 这条路径复用 `PluginPreparationDiagnostic`，不新增 decoder、执行器、状态权威、wire mapper
+> 或第二份 prepared cache。健康的 Skill、Hook、MCP 和 Subagent 组件继续独立准备；启用
+> `lsp` feature 的原有冻结与应用路径不变。该说明只描述 Framework 的通用冻结事实，不代替
+> EKO 产品退役文案，也不宣称 A2A/LSP 已删除、消费者已进 main、Source/final、CI、native
+> 或发布已经完成。Stage0 绑定和待验范围见 ADR0090 与
+> `.echo-semantic/evidence/evidence.stage0-generic-diagnostics.md`。

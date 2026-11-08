@@ -54,6 +54,10 @@ Journal 通常适合承担“已经发生的领域事实”。当前状态、列
 
 ## Checkpoint：稳定边界的状态快照
 
+模型上下文中的版本投影随原 checkpoint 消息信封保存，恢复后仍可按最新版本去重；
+旧版可压缩、最新版受保护，失效以追加版本表达。它是派生上下文，不是新的状态权威。
+固定规则和协议诊断边界见 [ADR 0108](../adr/0108-versioned-context-projections.md)。
+
 ### Reducer checkpoint
 
 `CheckpointedReducer` 将 Journal 事件 fold 为状态，并通过 `CheckpointStore<S>` 保存：
@@ -80,9 +84,15 @@ Checkpoint:   journal=A, state@7
 
 ### AgentCheckpoint
 
-`AgentCheckpoint` 是另一种 checkpoint：它保存 ReAct 继续运行所需的消息、激活技能、blocked reason、working directory 和时间戳，并由 `RuntimeStateStore` 持久化。公开的 `current_plan` 字段为旧记录和 Store 读写保留；ReactAgent 恢复时忽略历史值，新 safe point 写入 `None`。版本化任务图与计划 artifact 由 `TaskRevisionService` 持有。
+`AgentCheckpoint` 保存 ReAct 继续运行所需的消息、激活技能、blocked reason、working directory 和时间戳，由 `RuntimeStateStore` 持久化。它不承载计划副本；版本化任务图与计划 artifact 由 `TaskRevisionService` 持有。当前payload统一显式schema3，合法无cursor的runtime-only/raw用途仍保留；旧裸数组、缺版本与旧迁移恢复义务退出，不能据此删除通用Store或当前CAS/恢复能力。
 
 恢复前会校验 assistant tool call 与 tool result 是否成对，避免恢复出 provider 无法接受的上下文，或重复执行已经完成的副作用。
+
+当前 `Message.provider_response` 通过同一 canonical Message、projection metadata 和摘要
+保存供应商响应观察，缺字段与显式 null 保持区分。它不拥有 runtime 完成或正文批准资格。
+失败时完整 partial 只在直接 LlmClient 的 typed error 中供检查；ReAct 可保存的
+metadata-only assistant 记录没有未执行工具片段或正文，冷开／Fork／import 后仍从
+模型输入整条排除，不新增 Store、第二份消息历史或恢复 owner。
 
 `AgentCheckpoint` 只拥有 ReAct runtime state，不拥有任务 DAG 或其它应用领域状态。它也不是 `ConversationStore` 中面向用户展示的 transcript。启用 transcript projection 时，其私有 versioned payload 可以保存一条完整的 `PendingTranscriptProjection`；在 ConversationStore receipt 确认提交前，它只是 durable intent，不是 transcript fact。
 
@@ -98,7 +108,8 @@ pre-compaction transcript 已落盘后重新对齐 cursor。
 `context_only` 位置/digest 绑定标明派生项；完整 messages 与绑定通过同一次 runtime CAS
 保存。存在 pending 时，当前消息视图校验针对 cursor-after，原 cursor-before 的形状和
 lineage 约束保留。后续同文新 turn 仍分配新 ordinal，清空活跃视图也不倒退 append frontier。
-version 1/2 继续按缺少派生来源证明的 legacy 路径读取，旧 framework reader 会拒绝 version 3。
+当前 reader 只接纳显式 schema version 3；version 1/2、缺版本和旧裸数组明确拒绝，
+不自动迁移或推断缺失来源。该版本限定不取消合法的 runtime-only/raw 保存用途。
 
 Managed 压缩在 Store I/O 期间释放 Context 锁，让只读回调读取一致的 pre-view；候选 observer
 和 cache 只在 checkpoint CAS 成功后接受。失败或取消恢复的是 volatile view，后续 managed
@@ -124,26 +135,71 @@ checkpoint 写入前再次校验，因此不会持久化出恢复端必然拒绝
 framework 会在模型准备前精确 reset/restore；只有相同 ID 才复用 warm context。运行时显式记录
 当前 hydrated ID：任何可取消的状态修改前先写 `Hydrating(target)`，restore hook 完整结算后才
 提交 `Hydrated(target)`；非 exact 状态一律重建。identity 切换还会清空 rollback snapshots。
-restore/save 使用相同优先级：显式 invocation runtime ID、invocation 产品 conversation、legacy
-external conversation、configured conversation。因此 A -> B -> A 不会把 A 的消息写入 B。
+restore/save 使用相同优先级：显式 invocation runtime ID、invocation 产品 conversation、
+configured conversation。旧 external setter 入口已退役，因此 A -> B -> A 不会把 A 的消息写入 B。
+
+产品scope与runtime ID可以不同，即使runtime ID恰好等于Agent构造时的conversation配置，也不能
+把构造期ID当作本轮产品scope。流准入使用原invocation快照先协调pending投影，后续上下文恢复
+保留同一scope／runtime组合；默认快照的补充协调只适用于真正的默认scope，scope缺省时沿原
+runtime回退。错误scope读仍由Store拒绝，不通过清空checkpoint或弱化归属校验恢复运行。
 
 轮换 `runtime_state_id` 会创建干净的模型上下文，但不会删除稳定产品会话。
 `save_checkpoint_for_scope` 把每个 runtime ID 持久索引到产品 scope。关闭 admission 并完成旧 owner
 结算后，reset 通过 `clear_persisted_runtime_incarnation` 先结清 durable pending projection，再精确
-退役旧 runtime checkpoint，并保留 transcript 数据。只有 legacy unmanaged Store pair 会顺带删除
-incarnation-keyed transcript；managed 清理在会话重建后无法安全推断稳定 delete identity。managed 产品删除
+退役旧 runtime checkpoint，并保留 transcript 数据。该协调入口要求 managed Store pair，
+不会顺带删除同名 transcript；合法 raw CRUD 由调用方显式调用。产品删除
 必须由调用方保留稳定的 `ManagedConversationDelete` request，并调用
 `delete_persisted_conversation_managed`；timeout、重启、回执丢失以及会话后来以新 epoch 重建时，都复用
-同一个 request identity。`delete_persisted_conversation` 仅保留给 legacy unmanaged Store pair；managed
-pair 会失败关闭，因为该便捷入口无法判断一次调用是在重试旧删除，还是要删除后来重建的新 epoch。
+同一个 request identity。缺稳定 identity 的旧 `delete_persisted_conversation` 入口已退役，
+不能由便捷调用推断是在重试旧删除，还是要删除后来重建的新 epoch。
 managed generation 使用 revision CAS 与 retirement tombstone；产品删除先持久化完整 scope manifest、
 全部 dropped operation identity，再取得带 epoch fence 的 ConversationStore receipt。详见
 [ADR 0006](../adr/0006-runtime-state-scope-lineage.md) 和
 [ADR 0056](../adr/0056-durable-transcript-projection-settlement.md)。
 
-managed clear/delete helper 提供 context-aware 变体，把调用方 absolute deadline 贯穿整个 saga。
-legacy unmanaged Store 的原始 trait 没有 context 参数，因此兼容 helper 保留历史上的无界合同；其
-context-aware 变体会返回 Unsupported，不会伪装成无法兑现的 deadline 保证。
+managed clear/delete helper 的 context-aware 变体把调用方 absolute deadline 贯穿整个 saga；
+便利入口也使用既有有界操作期限。没有 managed／deadline 能力的 Store pair 明确返回
+Unsupported；不保留无界兼容清理路径，也不影响显式 raw Store CRUD。
+
+### Transcript 投影坐标与应用扩展元数据
+
+`StoredMessage.attachments_json` 可同时包含 Framework 的规范消息字段与应用自有
+JSON 扩展。`set_transcript_projection_meta` 先校验既有 projection marker、版本及已知
+字段，再只替换 `transcript_generation_id` 和 `transcript_ordinal`。未知字段、嵌套值、
+显式 `null`、布尔值和中文内容按 JSON 值保留；该操作不负责解释应用呈现 schema，
+也不承诺 JSON 空白或对象键顺序逐字节不变。
+
+`normalized_transcript_attachments` 是现有 **Framework canonical 摘要视图**，供
+`transcript_projection_message_digest` 与 runtime cursor 使用。它继续忽略应用扩展及
+append 坐标，不可作为重写存储行的方法。此次修复不改变该 v1 digest 的序列化、
+旧 checkpoint hash 或 cursor 比较语义；应用呈现扩展的变化不代表新的模型执行事实。
+
+Managed import／projection batch 的操作身份及 Store ordinal digest 仍覆盖完整
+`StoredMessage`，包括应用扩展。修改扩展后须按原 CAS 生成新的有效请求，不能复用
+旧 payload_digest；这与排除应用扩展的 runtime cursor 摘要是两层既有合同。FileStore
+原件冷重载与重复请求回执沿用同一权威，无需新增 Store 或迁移版本。
+
+原生 raw／approved assistant blocks、`Some(empty)` 的禁止回退语义、reasoning 签名／
+opaque payload 及多模态 Parts 继续通过规范字段持久化。此处只保证数据保存，不使
+应用呈现 provenance 成为 Framework 的成功终态或执行许可。
+
+### 当前typed恢复与context-view派生
+
+新执行及显式Resume沿原RuntimeStateStore严格load/reconcile、tool配对、cursor与pending
+transcript检查；没有旧控制工具来源getter、宽松inspection、pending-control归一或
+专用recovery commit。旧think/final日志与恢复原件不迁移/改写，不从旧参数补成功。
+
+当前File CAS仍使用同scope/runtime锁、expected revision、epoch、replay/conflict与
+普通pending transition内核。`derive_context_view_checkpoint`继续为runtime-only新
+context view保原cursor lineage，不把未交付内容变成transcript事实。
+
+同一React准备owner在当前Store已准入的Load/保存等待中持有原lease、execution mutex
+与资源束；typedunknown或丢失等待者不等于物理结算，不能释放owner或重放真实工具。
+原截止时间传播到实际Store，迟到结算后仍按原期限拒新写，不延长期限或另建Store。
+
+旧兼容专用测试义务随人类新裁决retire，不新增skip、不记matched/pass；当前cursor
+损坏拒绝、CAS幂等与stale hydrate、context lineage、deadline与资源保有继续由新
+正常managed记录测试覆盖。
 
 ### 其它同名 checkpoint
 
@@ -200,3 +256,15 @@ Trace 与 Journal 都可能包含按时间排列的事件，但职责不同：
 - Trace `Run` / `RunEvent` / `RunStore`：`src/trace/mod.rs`
 
 延伸阅读：[记忆系统](03-memory.md)、[上下文压缩](04-compression.md)、[追踪系统](27-tracing.md)、[Git 隔离](34-git-isolation.md)。
+
+## 工具结果错误观察的 canonical 投影
+
+`Message.tool_result_is_error: Option<bool>` 保持工具调用结果的原始观察：None 表示没有该事实，Some(false) 表示真实工具调用成功，Some(true) 表示真实调用失败。它与 TaskRun 的 Completed/Cancelled/Paused/Failed、Agent execution status 及最终发布是不同维度，不能靠正文前缀推测，也不能把一条成功查询得到的失败任务状态改成工具调用失败。
+
+该字段随 Message 手写 serde、既有 MessageProjectionMeta、FileConversationStore、managed import 和冷恢复一起保留；工具 ID/name 必须显式存在且与投影相等。没有该字段不恢复旧控制工具兼容，不放宽当前 canonical marker 校验。snapshot 和请求重建仍使用同一 Message，不新建错误观察 store。
+
+Provider 只在原生支持的边界转换错误位，不能把它或服务同名 execution_status 扩展升级为运行时结束权威。SDK 基础字段与三语言消费由其独立 owner/consumers 组合，不能由框架局部测试推断消费者已验收。
+
+### 同次保存的工作复用与分段观测
+
+FileRuntimeStateStore 的 owner 扫描直接验证刚解码的记录，不再次读取同一文件；CAS 重用请求 payload 的已解析结果。Coordinator 复用 runtime snapshot 的 scope revision，Absent 仍查权威；投影与 checkpoint 共用一次冻结，Context 锁不跨 I/O。原十秒共享预算、文件格式、原件、fsync、CAS/epoch/退休围栏和未知结果恢复保持原合同。debug tracing 的 persistence stage 记录各段单调耗时和剩余预算，阶段离开不表示写入成功。详见 [ADR 0107](../adr/0107-command-cell-admission-and-save-work.md)。

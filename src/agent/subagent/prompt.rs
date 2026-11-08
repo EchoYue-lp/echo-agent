@@ -339,6 +339,7 @@ mod tests {
     fn filter_history_drops_tool_and_reasoning_turns() {
         let mut tool_assistant = Message::assistant("calling tool".to_string());
         tool_assistant.tool_calls = Some(vec![ToolCall {
+            provider_source: None,
             id: "call-1".to_string(),
             call_type: "function".to_string(),
             function: echo_core::llm::types::FunctionCall {

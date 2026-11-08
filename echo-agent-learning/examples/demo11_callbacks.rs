@@ -1,6 +1,6 @@
 //! demo11_callbacks.rs —— 事件回调系统综合演示
 
-use echo_agent::agent::{Agent, AgentCallback, AgentEvent};
+use echo_agent::agent::{Agent, AgentCallback, AgentEvent, AgentOutputProjection};
 use echo_agent::error::ReactError;
 
 use echo_agent::prelude::*;
@@ -88,46 +88,54 @@ impl AgentCallback for LogCallback {
         })
     }
 
-    fn on_tool_start<'a>(
+    fn on_tool_start_with_id<'a>(
         &'a self,
         _agent: &'a str,
+        call_id: &'a str,
         tool: &'a str,
         args: &'a Value,
     ) -> futures::future::BoxFuture<'a, ()> {
         Box::pin(async move {
             println!(
-                "  [{}] 🔧 工具调用: {} args={}",
+                "  [{}] 🔧 工具调用: {} call_id={} args={}",
                 self.label,
                 tool,
+                call_id,
                 compact_args(args)
             );
         })
     }
 
-    fn on_tool_end<'a>(
+    fn on_tool_end_with_id<'a>(
         &'a self,
         _agent: &'a str,
+        call_id: &'a str,
         tool: &'a str,
         result: &'a str,
     ) -> futures::future::BoxFuture<'a, ()> {
         Box::pin(async move {
             println!(
-                "  [{}] ✅ 工具成功: {} result=\"{}\"",
+                "  [{}] ✅ 工具成功: {} call_id={} result=\"{}\"",
                 self.label,
                 tool,
+                call_id,
                 truncate(result, 60)
             );
         })
     }
 
-    fn on_tool_error<'a>(
+    fn on_tool_error_with_id<'a>(
         &'a self,
         _agent: &'a str,
+        call_id: &'a str,
         tool: &'a str,
         err: &'a ReactError,
     ) -> futures::future::BoxFuture<'a, ()> {
         Box::pin(async move {
-            println!("  [{}] ❌ 工具错误: {} err={}", self.label, tool, err);
+            println!(
+                "  [{}] ❌ 工具错误: {} call_id={} err={}",
+                self.label, tool, call_id, err
+            );
         })
     }
 
@@ -223,9 +231,10 @@ impl AgentCallback for MetricsCallback {
         Box::pin(async {})
     }
 
-    fn on_tool_start<'a>(
+    fn on_tool_start_with_id<'a>(
         &'a self,
         _agent: &'a str,
+        _call_id: &'a str,
         _tool: &'a str,
         _args: &'a Value,
     ) -> futures::future::BoxFuture<'a, ()> {
@@ -233,9 +242,10 @@ impl AgentCallback for MetricsCallback {
         Box::pin(async {})
     }
 
-    fn on_tool_error<'a>(
+    fn on_tool_error_with_id<'a>(
         &'a self,
         _agent: &'a str,
+        _call_id: &'a str,
         _tool: &'a str,
         _err: &'a ReactError,
     ) -> futures::future::BoxFuture<'a, ()> {
@@ -305,39 +315,77 @@ async fn demo_multi_callback_stream() -> echo_agent::error::Result<()> {
     println!("  任务: {task}\n");
 
     let mut stream = agent.execute_stream(task).await?;
-    let mut final_answer = String::new();
+    let mut output = AgentOutputProjection::default();
+    let mut first_error = None;
 
+    // 投影只观察这一条原生 producer；通知或块 complete 都不能代替真实 EOF。
     while let Some(ev) = stream.next().await {
-        match ev? {
-            AgentEvent::Token(t) => {
-                print!("{}", t);
-                std::io::stdout().flush().ok();
+        let observed = match ev {
+            Ok(AgentEvent::ExecutionStatus(status)) => output.observe_status(&status).map(|_| {
+                if let Some(error) = output.terminal_failure() {
+                    first_error.get_or_insert(error);
+                }
+            }),
+            Ok(AgentEvent::AssistantMessage { block }) => {
+                output.observe_block(&block).map(|delta| {
+                    if let Some(delta) = delta {
+                        print!("{}", delta.text);
+                        std::io::stdout().flush().ok();
+                    }
+                })
             }
-            AgentEvent::ToolCall { invocation, .. } => {
+            Ok(AgentEvent::ToolCall {
+                invocation,
+                call_id,
+            }) => {
                 println!(
-                    "\n  [ToolCall] {}({})",
+                    "\n  [ToolCall] {} call_id={} ({})",
                     invocation.name,
+                    call_id,
                     compact_args(&invocation.args)
                 );
+                Ok(())
             }
-            AgentEvent::ToolResult { name, result, .. } => {
-                if !result.success {
-                    return Err(ReactError::Other(format!(
-                        "demo11 验收失败：流式回调示例中工具 `{name}` 出错: {}",
+            Ok(AgentEvent::ToolResult {
+                call_id,
+                name,
+                result,
+            }) => {
+                if result.success {
+                    println!(
+                        "  [ToolResult] [{name}] call_id={call_id} {}",
+                        truncate(&result.output, 60)
+                    );
+                } else {
+                    first_error.get_or_insert_with(|| ReactError::Other(format!(
+                        "demo11 验收失败：流式回调示例中工具 `{name}` call_id={call_id} 出错: {}",
                         result.error.unwrap_or(result.output)
                     )));
                 }
-                println!("  [ToolResult] [{name}] {}", truncate(&result.output, 60));
+                Ok(())
             }
-            AgentEvent::FinalAnswer(ans) => {
-                final_answer = ans.clone();
-                println!("\n  [FinalAnswer] {}", truncate(&ans, 80));
+            Ok(AgentEvent::FinalAnswer(answer)) => output.confirm_answer(&answer),
+            Ok(AgentEvent::Error {
+                source, message, ..
+            }) => {
+                first_error
+                    .get_or_insert_with(|| ReactError::Other(format!("{source}: {message}")));
+                Ok(())
             }
-            AgentEvent::Cancelled => {
-                println!("\n  [Cancelled] 执行已取消");
-            }
-            _ => {}
+            Err(error) => Err(error),
+            _ => Ok(()),
+        };
+        if let Err(error) = observed {
+            first_error.get_or_insert(error);
         }
+    }
+    if let Some(error) = first_error {
+        return Err(error);
+    }
+    let final_answer = output.finish()?;
+    // 只补该 request 尚未展示的最终正文；FinalAnswer 确认本身不重复打印。
+    if let Some(missing) = output.take_final_presentation()? {
+        print!("{missing}");
     }
 
     println!("\n  --- Metrics ---");

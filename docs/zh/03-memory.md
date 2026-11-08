@@ -26,29 +26,24 @@ echo-agent 的记忆系统包含三个正交层次，每层解决不同的"记�
 
 LLM 的上下文窗口在每次请求结束后就消失了，进程也可能在循环中途崩溃。没有运行时检查点，长任务被中断就需要从头开始；用户想在明天继续昨天的对话也只能重新输入。
 
-`RuntimeStateStore` 在 run 推进过程中持续保存 `AgentCheckpoint` 的运行时字段（消息 + 激活技能 + 阻塞原因 + 时间戳）。下次使用同一 `conversation_id` 启动时，运行时自动恢复先前状态，实现**线程连续性**。公开的 `current_plan` 字段仍可读取旧 checkpoint，但 ReactAgent 不把它恢复成任务计划，也不会将它写入新 checkpoint。
+`RuntimeStateStore` 保存 `AgentCheckpoint` 的当前运行字段（消息、激活技能、blocked reason、working directory 与时间戳）。同一 runtime-state 身份可以恢复当前合法格式，实现线程连续性；计划与依赖图由 `TaskRevisionService` 持有，checkpoint 不保存计划副本。raw Store CRUD仍独立保留，旧格式拒绝不构成删除用户原件或迁移数据的许可。
 
 ### 工作原理
 
+```text
+产品 conversation_id
+        │  可由 invocation 显式拆分 runtime_state_id
+        ▼
+FileRuntimeStateStore/runtime_state/_runtime_owners/<编码身份>.json
+  owner：版本2 + 显式 RuntimeStateVersion（Unmanaged/Managed/Retired）
+  checkpoint：schema3 消息payload + active_skills/blocked_reason/working_dir/timestamp
+  managed：保原 epoch/revision/pending effect/ack 证明
+  scope/index：仍为当前版本1
 ```
-conversation_id: "user-123-chat-5"
-                │
-                ▼
-FileRuntimeStateStore (./agent-data/runtime_state/_runtime_owners/):
-<编码后的-runtime-id>.json
-{
-  "runtime_state_id": "user-123-chat-5",
-  "scope_id": "user-123-chat-5",
-  "phase": "active",
-  "checkpoint": {
-    "messages_json":  "...完整消息历史...",
-    "current_plan":   null,
-    "active_skills":  ["doc-writing"],
-    "blocked_reason": null,
-    "timestamp":      "2026-06-14T..."
-  }
-}
-```
+
+上图是字段职责示意，不是可直接写入的记录。当前runtime payload不猜旧数组/缺版本，
+无cursor的runtime-only用途仍合法；会话log manifest和当前message marker也按各自合同
+校验。完整格式、raw与managed边界见ADR0103。
 
 ### 使用方式
 

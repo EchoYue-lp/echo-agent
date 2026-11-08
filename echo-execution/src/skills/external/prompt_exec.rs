@@ -78,6 +78,9 @@ pub struct PromptContext {
     /// Optional sandbox manager for command execution.
     /// When Some, commands are routed through the sandbox.
     pub sandbox: Option<Arc<dyn SandboxExecutor>>,
+    /// Invocation resources follow actual commands, never the catalog cache.
+    pub resource_guards: Vec<echo_core::tools::InvocationResourceGuard>,
+    pub cancel: Option<Arc<tokio_util::sync::CancellationToken>>,
 }
 
 impl Default for PromptContext {
@@ -90,6 +93,8 @@ impl Default for PromptContext {
             timeout: DEFAULT_CMD_TIMEOUT,
             source: SkillSource::Local,
             sandbox: None,
+            resource_guards: Vec::new(),
+            cancel: None,
         }
     }
 }
@@ -106,9 +111,19 @@ impl Default for PromptContext {
 ///    substitution is rejected and the content is returned without command execution.
 /// 4. Original commands are executed and their output replaces the placeholders.
 pub async fn process_skill_content(content: &str, ctx: &PromptContext) -> String {
+    process_skill_content_in_source(content, ctx, false)
+        .await
+        .unwrap_or_else(|error| format!("[sandbox error: {error}]"))
+}
+
+async fn process_skill_content_in_source(
+    content: &str,
+    ctx: &PromptContext,
+    requires_executor: bool,
+) -> echo_core::error::Result<String> {
     // MCP skills: completely forbid execution of inline commands
     if ctx.source == SkillSource::Mcp {
-        return substitute_variables(content, ctx);
+        return Ok(substitute_variables(content, ctx));
     }
 
     // Step 1: Extract all command regions from ORIGINAL content (before substitution)
@@ -134,13 +149,23 @@ pub async fn process_skill_content(content: &str, ctx: &PromptContext) -> String
                command execution disabled for this skill activation"
         );
         // Return substituted content with placeholders removed (no command execution)
-        return strip_placeholders(&substituted);
+        return Ok(strip_placeholders(&substituted));
     }
 
     // Step 5: Execute original commands and collect outputs
     let mut cmd_outputs: HashMap<usize, String> = HashMap::new();
     for (i, region) in regions.iter().enumerate() {
-        let output = run_command(&region.command_text, ctx).await;
+        let output = if requires_executor {
+            let executor = ctx.sandbox.as_deref().ok_or_else(|| {
+                echo_core::error::ReactError::Other(
+                    "This Skill's file source requires a matching executor for inline commands"
+                        .to_string(),
+                )
+            })?;
+            run_command_sandboxed(&region.command_text, ctx, executor, false).await?
+        } else {
+            run_command(&region.command_text, ctx).await
+        };
         cmd_outputs.insert(i, output);
     }
 
@@ -165,7 +190,26 @@ pub async fn process_skill_content(content: &str, ctx: &PromptContext) -> String
         }
     }
 
-    result
+    Ok(result)
+}
+
+/// Keep the original parser and execution semantics while rejecting an
+/// impossible source/executor combination before any inline effect starts.
+pub(crate) async fn process_skill_content_with_executor_requirement(
+    content: &str,
+    ctx: &PromptContext,
+    requires_executor: bool,
+) -> echo_core::error::Result<String> {
+    if requires_executor
+        && ctx.source != SkillSource::Mcp
+        && ctx.sandbox.is_none()
+        && has_command_markers(content)
+    {
+        return Err(echo_core::error::ReactError::Other(
+            "This Skill's file source requires a matching executor for inline commands".to_string(),
+        ));
+    }
+    process_skill_content_in_source(content, ctx, requires_executor).await
 }
 
 /// A detected command region in skill content.
@@ -342,7 +386,9 @@ async fn execute_inline_commands(content: &str, ctx: &PromptContext) -> String {
 async fn run_command(command: &str, ctx: &PromptContext) -> String {
     // Sandbox execution path
     if let Some(ref manager) = ctx.sandbox {
-        return run_command_sandboxed(command, ctx, manager.as_ref()).await;
+        return run_command_sandboxed(command, ctx, manager.as_ref(), true)
+            .await
+            .unwrap_or_else(|error| format!("[sandbox error: {error}]"));
     }
 
     // Fallback: direct process execution with minimal env and proper kill
@@ -354,13 +400,26 @@ async fn run_command_sandboxed(
     command: &str,
     ctx: &PromptContext,
     manager: &dyn SandboxExecutor,
-) -> String {
-    // Use minimal environment
-    let env = minimal_env(&ctx.skill_dir, &ctx.session_id, HashMap::new());
+    inherit_local_environment: bool,
+) -> echo_core::error::Result<String> {
+    // A target executor owns its PATH/HOME/temp directory. Passing the local
+    // client's functional variables would redirect a target Skill elsewhere.
+    let env = if inherit_local_environment {
+        minimal_env(&ctx.skill_dir, &ctx.session_id, HashMap::new())
+    } else {
+        HashMap::from([
+            ("SKILL_DIR".to_string(), ctx.skill_dir.clone()),
+            ("SESSION_ID".to_string(), ctx.session_id.clone()),
+        ])
+    };
 
     let mut sandbox_cmd = SandboxCommand::shell(command).with_timeout(ctx.timeout);
+    sandbox_cmd.resource_guards = ctx.resource_guards.clone();
+    sandbox_cmd.cancel = ctx.cancel.clone();
 
-    if !ctx.skill_dir.is_empty() && Path::new(&ctx.skill_dir).exists() {
+    // The executor owns this namespace. Local existence cannot establish or
+    // disprove a directory on another target.
+    if !ctx.skill_dir.is_empty() {
         sandbox_cmd = sandbox_cmd.with_working_dir(&ctx.skill_dir);
     }
 
@@ -368,10 +427,12 @@ async fn run_command_sandboxed(
         sandbox_cmd = sandbox_cmd.with_env(k, v);
     }
 
+    // No explicit Skill policy: keep the executor's configured limits. Runtime
+    // cancellation and guards already travel on this same command.
     match manager.execute(sandbox_cmd).await {
         Ok(result) => {
             if result.success() {
-                result.stdout.trim().to_string()
+                Ok(result.stdout.trim().to_string())
             } else {
                 let stderr = result.stderr.trim();
                 if !stderr.is_empty() {
@@ -381,15 +442,15 @@ async fn run_command_sandboxed(
                         stderr = %stderr,
                         "Inline skill command failed (sandboxed)"
                     );
-                    format!("[error: {}]", stderr)
+                    Ok(format!("[error: {}]", stderr))
                 } else {
-                    format!("[error: exit code {}]", result.exit_code)
+                    Ok(format!("[error: exit code {}]", result.exit_code))
                 }
             }
         }
         Err(e) => {
             warn!(command = command, error = %e, "Inline skill command sandbox error");
-            format!("[sandbox error: {}]", e)
+            Err(e)
         }
     }
 }
@@ -622,6 +683,8 @@ mod tests {
             timeout: Duration::from_secs(5),
             source: SkillSource::Local,
             sandbox: None,
+            resource_guards: Vec::new(),
+            cancel: None,
         }
     }
 

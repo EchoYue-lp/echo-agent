@@ -25,3 +25,21 @@ pub(crate) mod stream_channel;
 pub(crate) mod stream_macros;
 pub(crate) mod types;
 pub(crate) use types::StreamMode;
+
+#[cfg(test)]
+mod native_message_contract_tests;
+
+#[cfg(test)]
+mod consumer_test_artifacts;
+
+#[cfg(test)]
+mod json_object_runtime_gate_tests;
+
+#[cfg(test)]
+mod deepseek_tool_result_default_tests;
+
+#[cfg(test)]
+mod root_history_provenance_tests;
+
+#[cfg(test)]
+mod late_native_source_store_tests;

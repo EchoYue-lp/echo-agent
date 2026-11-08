@@ -1,196 +1,203 @@
-# Streaming Output
+# 流式输出与原生执行
 
-## What It Is
+## 当前入口
 
-Streaming output allows the Agent to push Token fragments to the caller as the LLM generates them, rather than waiting for the full response before returning. Users see the Agent "typing" in real time, dramatically improving the interactive experience.
+`execute()` / `chat()` 返回 `String`，对应的流式入口返回
+`BoxStream<'_, Result<AgentEvent>>`。两种返回形式共用原 typed producer、ReAct、
+校验、取消与物理收尾；String 便利方法读取同一原流至 EOF 后投影最终结果。
+`chat` 保留多轮上下文，不能因为请求的是 String 就换成 fresh execute。
 
----
+返回形式不决定模型 HTTP 传输。`model_streaming(true)` 是默认值；显式
+`model_streaming(false)` 让同一执行调用 `LlmClient::chat`，完整响应仍保留原生块、
+工具来源、reasoning 与实际 usage，随后走同一候选校验和结算路径。它不是第二套执行器。
 
-## Problem It Solves
+## 当前事件
 
-Blocking calls have serious UX problems:
-- **Long wait**: Complex reasoning tasks take tens of seconds — the UI freezes
-- **No feedback**: Users have no visibility into what the Agent is "thinking"
-- **Experience gap**: Falls far behind modern AI products (ChatGPT, Claude) in fluency
+| 事件 | 含义 |
+| --- | --- |
+| `AssistantMessage { block }` | 保留请求、块身份、序号、明确阶段与增量；缺阶段保持 Unknown |
+| `ExecutionStatus` | 原 source 的 Started/运行观察及真正终态，不由展示文本推断 |
+| `ToolCall` / `ToolResult` | 保留 call_id、真实调用与完整结果/资源引用 |
+| `LlmUsage` | 每次模型响应的实际报告；未报告时不能把零当成已知用量 |
+| `FinalAnswer(String)` | 当前运行时批准的最终正文通知；不代表原 source 已读到 EOF |
 
-Streaming solves:
-- Time-to-first-token (TTFT) drops from seconds to milliseconds
-- Users see the reasoning process (CoT text) and tool calls in real time
-- Execution can be cancelled mid-generation
+Core 的旧 AgentEvent Token/ThinkStart/ThinkEnd 和旧 String source fallback 已退役。
+provider 原生 reasoning wire、签名/加密回放块及真实 `on_think_*` 回调继续保留。
+显示推理时只取投影后的可见文字，不直接打印完整 block、签名或密文。
 
----
+## 读取同一原流到 EOF
 
-## Event Types
+下面沿用当前 [demo17_chat.rs](../../echo-agent-learning/examples/demo17_chat.rs) 的
+原生投影模式，改为一次 fresh execute。首因和未结算观察保留原值，所有事件都继续
+从同一 source 读取。只有投影接受的同 run/execution 新终态才能解除匹配观察，
+foreign 状态或正文不能解除它。每段正文只展示一次；EOF 后补同 request 尚未显示的
+安全最终正文，FinalAnswer 通知本身不重复打印。
 
-The following is a simplified view of the main event payloads; identity metadata
-and other lifecycle variants are omitted. `execute_stream()` returns `BoxStream<'_, Result<AgentEvent>>` containing:
-
-```rust
-pub enum AgentEvent {
-    Token(String),                               // LLM token fragment (reasoning / final answer)
-    ToolCall { invocation: ToolInvocation },     // LLM decided to call a tool
-    ToolResult { name: String, result: ToolResult }, // tool finished, returning result
-    FinalAnswer(String),                         // final answer generated; cleanup can follow
-}
-```
-
----
-
-## Usage
-
-```rust
+```rust,no_run
+use echo_agent::agent::{Agent, AgentEvent, AgentOutputProjection, AssistantPhase, ExecutionStatusKind};
+use echo_agent::error::{AgentError, AgentTerminalKind, ReactError};
 use echo_agent::prelude::*;
 use futures::StreamExt;
+use std::io::Write;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let config = AgentConfig::new("qwen3-max", "assistant", "You are a helpful assistant")
-        .enable_tool(true);
-
-    let mut agent = ReactAgent::new(config);
-    agent.add_tool(Box::new(CalculatorTool));
-
-    let mut stream = agent.execute_stream("Calculate (3 + 4) * 5 and explain each step").await?;
-
+    let agent = ReactAgentBuilder::new()
+        .model("qwen3-max")
+        .system_prompt("你是一个有帮助的助手，请用中文回答。")
+        .build()?;
+    let mut stream = agent.execute_stream("解释 Rust 的异步编程").await?;
+    let owner_run = agent.current_run_id();
+    let mut output = AgentOutputProjection::default();
     let mut first_error = None;
-    while let Some(event) = stream.next().await {
-        match event {
-            Ok(AgentEvent::Token(token)) => {
-                print!("{}", token);
-                std::io::Write::flush(&mut std::io::stdout()).ok();
-            }
-            Ok(AgentEvent::ToolCall { invocation, .. }) => {
-                println!("\n[Tool call] {} {:?}", invocation.name, invocation.args);
-            }
-            Ok(AgentEvent::ToolResult { name, result, .. }) => {
-                println!("[Tool result] {} -> {}", name, result.output);
-            }
-            Ok(AgentEvent::FinalAnswer(answer)) => {
-                println!("\n[Final answer] {}", answer);
-            }
-            Err(error) => {
-                // Report each observation, but retain the first error value.
-                // Continue polling this same source through cleanup and EOF.
-                eprintln!("[Stream error / observation] {error}");
-                if first_error.is_none() {
-                    first_error = Some(error);
-                }
-            }
-            Ok(event) => println!("[Lifecycle] {event:?}"),
-        }
-    }
-    match first_error {
-        Some(error) => Err(error),
-        None => Ok(()),
-    }
-}
-```
-
----
-
-## Streaming + CoT
-
-When `enable_cot=true` (default), the framework appends a guidance instruction to the system prompt, asking the LLM to output reasoning text in the `content` field before each tool call. This text streams out as `Token` events in real time:
-
-```
-User: "Calculate 42 * 7"
-
-Event stream:
-  Token("Let me analyze this calculation...")       ← CoT reasoning (real-time)
-  Token("42 times 7 — I should use the multiply tool")
-  ToolCall { name: "multiply", args: {"a": 42, "b": 7} }
-  ToolResult { name: "multiply", output: "294" }
-  Token("The calculation is done. The result is 294.") ← final answer (real-time)
-  FinalAnswer("42 × 7 = 294")
-```
-
----
-
-## Blocking vs Streaming
-
-```rust
-// Blocking: wait for full response
-let answer: String = agent.execute("Hello").await?;
-
-// Streaming: receive events in real time
-let mut stream = agent.execute_stream("Hello").await?;
-while let Some(event) = stream.next().await {
-    match event {
-        Ok(event) => println!("{event:?}"),
-        Err(error) => eprintln!("[Stream error / observation] {error}"),
-    }
-}
-```
-
-Both modes run identical execution logic; only the delivery mechanism differs. `execute()` internally aggregates streaming events and returns the `FinalAnswer` string.
-
----
-
-## Using in a Web Service (SSE)
-
-```rust
-use axum::response::Sse;
-use futures::StreamExt;
-use echo_agent::prelude::*;
-
-async fn chat_sse(task: String) -> Sse<impl futures::Stream<Item = Result<axum::response::sse::Event, std::convert::Infallible>>> {
-    let mut agent = ReactAgent::new(/* config */);
-
-    let event_stream = async_stream::stream! {
-        match agent.execute_stream(&task).await {
-            Ok(mut agent_stream) => {
-                while let Some(event) = agent_stream.next().await {
-                    let data = match event {
-                        Ok(AgentEvent::Token(text)) => serde_json::json!({
-                            "type": "token", "data": text,
-                        }),
-                        Ok(AgentEvent::ToolCall { invocation, .. }) => serde_json::json!({
-                            "type": "tool_call", "name": invocation.name,
-                        }),
-                        Ok(AgentEvent::FinalAnswer(answer)) => serde_json::json!({
-                            "type": "answer", "data": answer,
-                        }),
-                        Err(error) => {
-                            // Emitting an error does not end or replace the original producer.
-                            serde_json::json!({
-                                "type": "stream_error_or_observation", "message": error.to_string(),
-                            })
-                        }
-                        Ok(event) => serde_json::json!({
-                            "type": "lifecycle", "event": event,
-                        }),
-                    };
-                    yield Ok(axum::response::sse::Event::default().data(data.to_string()));
-                }
-            }
-            Err(error) => {
-                let data = serde_json::json!({
-                    "type": "setup_error_or_observation", "message": error.to_string(),
-                });
-                yield Ok(axum::response::sse::Event::default().data(data.to_string()));
-            }
-        }
+    let mut unresolved = None::<ReactError>;
+    let same_source = |error: &ReactError, projection: &AgentOutputProjection| {
+        matches!(error, ReactError::ExecutionNotSettled { run_id, execution_id }
+            if owner_run.as_deref() == Some(run_id.as_str())
+                && execution_id.as_deref().is_some()
+                && execution_id.as_deref() == projection.execution_id())
     };
 
-    Sse::new(event_stream)
+    // 持续读取同一原 source 到真实 EOF，再判断是否成功。
+    while let Some(event) = stream.next().await {
+        let observed = match event {
+            Err(error @ ReactError::ExecutionNotSettled { .. }) => {
+                // 未结算观察不是终态；foreign 观察不会被这条 source 的完成覆盖。
+                if unresolved
+                    .as_ref()
+                    .is_none_or(|prior| same_source(prior, &output))
+                {
+                    unresolved = Some(error);
+                }
+                Ok(())
+            }
+            Ok(AgentEvent::ExecutionStatus(status)) => {
+                output.observe_status(&status).map(|changed| {
+                    if changed
+                        && matches!(
+                            status.status,
+                            ExecutionStatusKind::Settled
+                                | ExecutionStatusKind::Failed
+                                | ExecutionStatusKind::Cancelled
+                        )
+                        && unresolved
+                            .as_ref()
+                            .is_some_and(|prior| same_source(prior, &output))
+                    {
+                        unresolved = None;
+                    }
+                    if let Some(error) = output.terminal_failure() {
+                        first_error.get_or_insert(error);
+                    }
+                })
+            }
+            Ok(AgentEvent::AssistantMessage { block }) => {
+                output.observe_block(&block).map(|delta| {
+                    if let Some(delta) = delta {
+                        // 只显示投影后的可见文本；签名、密文和重放载体不直接输出。
+                        match delta.block.phase {
+                            AssistantPhase::Reasoning if !delta.text.is_empty() => {
+                                println!("\n[推理] {}", delta.text)
+                            }
+                            AssistantPhase::Commentary if !delta.text.is_empty() => {
+                                println!("\n[进度] {}", delta.text)
+                            }
+                            AssistantPhase::Reasoning | AssistantPhase::Commentary => {}
+                            _ => {
+                                print!("{}", delta.text);
+                                std::io::stdout().flush().ok();
+                            }
+                        }
+                    }
+                })
+            }
+            Ok(AgentEvent::LlmUsage {
+                model,
+                prompt_tokens,
+                completion_tokens,
+                total_tokens,
+                usage_reported,
+                ..
+            }) => {
+                if usage_reported {
+                    println!(
+                        "\n[LLM 用量] model={model}, prompt={prompt_tokens}, completion={completion_tokens}, total={total_tokens}"
+                    );
+                } else {
+                    println!("\n[LLM 用量] model={model}，上游未报告用量");
+                }
+                Ok(())
+            }
+            Ok(AgentEvent::FinalAnswer(answer)) => output.confirm_answer(&answer),
+            Ok(AgentEvent::Error { failure, .. }) => Err(match failure.terminal_kind {
+                AgentTerminalKind::Cancelled => AgentError::Cancelled(failure.message).into(),
+                AgentTerminalKind::TimedOut => AgentError::Timeout(failure.message).into(),
+                AgentTerminalKind::PermissionDenied => {
+                    AgentError::PermissionDenied(failure.message).into()
+                }
+                _ => ReactError::Other(failure.message),
+            }),
+            Ok(AgentEvent::Cancelled) => {
+                Err(AgentError::Cancelled("原生 Agent source 已取消".into()).into())
+            }
+            Err(error) => Err(error),
+            _ => Ok(()),
+        };
+        if let Err(error) = observed {
+            first_error.get_or_insert(error);
+        }
+    }
+    if let Some(error) = unresolved {
+        return Err(error);
+    }
+    if let Some(error) = first_error {
+        return Err(error);
+    }
+    let final_answer = output.finish()?;
+    // 原 source EOF 后只补尚未展示的安全最终正文，确认通知本身不重印。
+    if let Some(missing) = output.take_final_presentation()? {
+        print!("{missing}");
+        std::io::stdout().flush().ok();
+    }
+    if final_answer.trim().is_empty() {
+        return Err(ReactError::Other(
+            "流式示例返回空答案".into(),
+        ));
+    }
+    Ok(())
 }
 ```
 
----
+这段代码按当前源码接口整理，本轮没有执行片段编译、模型调用或原生宿主验收。
+完整进度、工具和回调示例见 [demo11_callbacks.rs](../../echo-agent-learning/examples/demo11_callbacks.rs)，
+多轮入口见 [13-chat.md](./13-chat.md)。
 
-## Notes
+## 自定义 Agent 与完整调用值
 
-1. **Tool execution is not streamed**: `execute_tool()` is still blocking — a `ToolResult` event fires only after the tool completes, because tools themselves don't produce incremental output
-2. **`FinalAnswer` is a business result**: Keep consuming the same source to physical EOF; producer cleanup can still fail after the answer. The default cancellation and invocation adapters preserve its first ordinary cleanup error while retaining the original source.
-3. **Error handling**: Every event is `Result<AgentEvent>`. Preserve the first failure or cancellation cause while draining; a later cleanup failure must not replace it. `ExecutionNotSettled` retains its original run/execution identity and remains a separate nonterminal observation. EOF alone does not clear that observation.
+自定义实现应接纳 `execute_stream_message_with_invocation_context` 和/或
+`chat_stream_message_with_invocation_context`，按实际支持能力实现各自 typed producer。
+Message、history、取消、资源、工作目录及工具上界按值进入同一次调用。未实现的入口
+在 source admission 前明确拒绝：当前默认错误分别为 `canonical typed execute invocation`
+和 `canonical typed chat invocation`；不会调用旧 String 方法补正文、猜 Started 或补成功。
+只有 fresh execute 的自定义 Agent 不会自动获得多轮 chat 能力。
 
-The examples above render every stream error or observation and continue the same
-source to EOF. Returning the first error preserves its original value; it does
-not turn `ExecutionNotSettled` into a terminal failure or certify physical
-settlement. Applications that persist execution status should consume the
-canonical `AgentTurnDriver` receipt instead of inferring it from these UI events.
+## 在 SSE 或其它事件接收端中使用
 
-See: `echo-agent-learning/examples/demo10_streaming.rs`
+接收端可序列化原生消息块、工具事实和运行观察，或显示同一投影产生的可见文字。
+`FinalAnswer` 是确认通知，不能被命名为“已关闭”或追加到已经显示的正文。
+投递失败/接收端断开是 delivery 结果，不能代替 producer 的执行/物理结算。
+需要规范化 turn receipt 的宿主使用现有 `AgentTurnDriver`，保留原 source 到 EOF；
+执行结果与投递结果分别判断，不为 UI 新建另一份执行 owner 或 turn summary。
+
+## 完成、失败与取消
+
+- 单块 `complete`、provider 的 `phase=final_answer` 和普通文字均不能证明执行完成。
+- 最终候选继续经过配置的 Guard/Critic、Stop、持久化和原 owner 的实际收尾；
+  只有真实 native status 与原 EOF 满足后才返回成功，尾部错误仍可阻止成功。
+- `ExecutionNotSettled` 是非终态观察；原 run/execution 不能被新身份或 foreign 状态替换。
+- 普通工具还可以发布进度与资源事件，不能把某个工具返回或工具日志当作 Agent 终态。
+
+完整字段与持久化约束见[原生消息与执行结算](../zh/43-native-message-execution.md)。
 
 ---
 
@@ -230,6 +237,35 @@ mailbox drain and active-turn lease; callers should not infer them from rendered
 tokens or transcript timing. Hook blocks settle as `Failed`. If the lifecycle
 signal closes abnormally, all receipt clones converge on `Dropped` while
 preserving the last known drain fact.
+
+### Steering before unstarted tools
+
+The shared streaming/non-streaming ReAct loop checks the original mailbox when
+the model returns a tool proposal, and before admitting each existing tool
+execution wave. A correction accepted before the check returns to the model
+before that unstarted work runs. This uses the same turn ID and private
+incarnation as the tracked receipt.
+
+An unpublished tool proposal is discarded without inventing tool results. If
+the assistant's call IDs are already in the transcript, every remaining
+unstarted call receives an explicit not-executed result with no side effects,
+and all call/result pairs are closed before the correction enters context and
+becomes `Drained`. Earlier physical results remain available to the model;
+earlier final-answer candidates are reconsidered.
+
+An admitted wave keeps its original execution futures, parallel peers, results,
+stream readers and resources until actual settlement. Steering received after
+that wave's check waits for the next unstarted boundary. It does not interrupt
+an active model/tool, answer HITL or request Stop. Explicit Stop and timeout
+continue to use their original cancellation and physical-settlement paths;
+uncertain effects are never automatically replayed.
+
+These earlier checks are the behavior selected by this framework. The reviewed
+official Pi loop polls steering after a whole tool batch; it is not evidence of
+a per-tool steering guarantee. See [ADR 0003](../adr/0003-tracked-steer-lifecycle.md)
+for the decision and source comparison. Product draft acknowledgment and durable
+ingress remain application responsibilities; `Accepted` and `Drained` do not
+replace those product facts.
 
 ### Tracked initial input
 
@@ -315,18 +351,22 @@ flow through the existing retry policy.
 
 ### Tool Output Spill and Truncation
 
-All tool results pass through one output-budget stage. Outputs of at least 1 MiB are
-written to a managed spill file before token truncation, and the model receives a
-preview plus the exact path for `read_file`. Spill is active even when
-`max_tool_output_tokens` is not configured.
+ReAct tool results pass through one output-budget stage. With artifact storage enabled,
+outputs at its configured byte threshold (1 MiB by default), or above the configured
+`max_tool_output_tokens`, are persisted before truncation. The model receives a preview
+and the exact artifact path and SHA-256 for bounded `read_artifact` pages. Byte-threshold
+spill remains active when `max_tool_output_tokens` is not configured.
 
-When a working directory is configured, spill files live under
-`<working_dir>/.echo-agent/spill` so the confined file tools can read them. Without a
-working directory, echo-agent falls back to the system temporary directory. Files older
-than one hour are removed on a best-effort basis when a new spill is created.
+`tool_output_artifacts` owns the artifact root and retention policy. The framework default
+uses the system temporary directory under `echo_agent_artifacts/tool-logs`, with a
+one-hour maximum age; applications can supply their own managed root and retention.
+Passing `None` disables artifact persistence. Working directory alone is not an artifact
+root or a complete-output reading authority.
 
-Smaller output that exceeds `max_tool_output_tokens` uses a UTF-8-safe head+tail view
-with a 70/30 character allocation:
+When persistence is disabled or fails, oversized output uses a UTF-8-safe head+tail view
+with a 70/30 allocation of retained characters. The existing `HeuristicTokenizer` counts
+the entire rendered text, including the truncation notice; mixed ASCII/CJK/emoji output
+stays within the same estimated-token cap:
 
 ```
 Full output:    [────────────────────────────────────────] 10KB
@@ -334,7 +374,10 @@ After truncate: [────── head (70%) ──────][── tail (
                                       ↑ middle omitted
 ```
 
-If spill creation fails, echo-agent applies a conservative fallback token budget instead
-of returning the full oversized result to the model. `ToolResult.truncated` and metadata
-record output handling, while a successful spill is carried by the typed
-`ToolResult.artifact` descriptor.
+Small budgets use a shorter notice or an ellipsis; a zero-token cap returns empty model
+text while `ToolResult.truncated` and metadata still record the truncation. This is an
+estimated-token bound, not a provider billing-token guarantee. If spill creation fails
+without an explicit token cap, the existing 8,000-token fallback applies. Failed spill
+does not create a recoverable artifact: the omitted content is unavailable through
+`read_artifact`. A successful spill is carried by the typed `ToolResult.artifact`
+descriptor; consumers must not reconstruct it from display text or metadata.

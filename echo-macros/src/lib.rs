@@ -342,6 +342,9 @@ fn tool_impl(attrs: ToolAttrs, func: ItemFn) -> syn::Result<proc_macro2::TokenSt
 /// Generate an `AgentCallback` implementation from an impl block, overriding
 /// only the methods you define.
 ///
+/// 工具生命周期方法必须使用 `on_tool_*_with_id` 并接收原始 call_id；宏不生成
+/// 无 ID 回调或丢弃 ID 的兼容转发。真实模型步骤和最终答案回调保持原签名。
+///
 /// # Example
 ///
 /// ```rust,ignore
@@ -349,8 +352,14 @@ fn tool_impl(attrs: ToolAttrs, func: ItemFn) -> syn::Result<proc_macro2::TokenSt
 ///
 /// #[callback]
 /// impl LogCallback {
-///     async fn on_tool_start(&self, _agent: &str, tool: &str, _args: &Value) {
-///         println!("Tool started: {tool}");
+///     async fn on_tool_start_with_id(
+///         &self,
+///         _agent: &str,
+///         call_id: &str,
+///         tool: &str,
+///         _args: &Value,
+///     ) {
+///         println!("工具开始: {tool} call_id={call_id}");
 ///     }
 ///     async fn on_final_answer(&self, _agent: &str, answer: &str) {
 ///         println!("Final answer: {answer}");

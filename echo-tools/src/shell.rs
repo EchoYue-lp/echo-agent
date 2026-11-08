@@ -10,7 +10,8 @@ use echo_core::tools::artifact::{
     ToolOutputArtifactIdentity, ToolOutputArtifactRef, ToolOutputArtifactWriter,
 };
 use echo_core::tools::cell::{
-    CommandCellError, CommandCellOwner, CommandCellRegistry, CommandCellRequest,
+    CommandCellAdmission, CommandCellError, CommandCellOwner, CommandCellRegistry,
+    CommandCellRequest,
 };
 use echo_core::tools::permission::ToolPermission;
 use echo_core::tools::{
@@ -291,7 +292,7 @@ impl ShellTool {
         ctx: &ToolContext,
         effective_input: &Value,
         timeout_secs: Option<u64>,
-        has_sandbox: bool,
+        executor: Option<Arc<dyn SandboxExecutor>>,
     ) -> ToolResult {
         let Some(launcher) = self.cell_launcher.clone() else {
             return ToolResult::error("background mode requires a command cell registry");
@@ -321,6 +322,14 @@ impl ShellTool {
             }
         }
 
+        // 即使普通 ToolManager 直接丢弃超时 Future、且调用方没有 token，
+        // 也撤回尚未交接的启动；已接纳 cell 使用独立 lifetime，不受此 guard 影响。
+        let admission_cancel = ctx
+            .cancel
+            .as_ref()
+            .map(|token| token.child_token())
+            .unwrap_or_default();
+        let _admission_guard = admission_cancel.clone().drop_guard();
         let request = CommandCellRequest {
             command: command.to_string(),
             working_dir: ctx
@@ -328,11 +337,27 @@ impl ShellTool {
                 .as_ref()
                 .map(|dir| dir.display().to_string()),
             timeout_secs,
-            require_sandbox: has_sandbox,
+            require_sandbox: executor.is_some(),
+            executor,
+            resource_guards: ctx.resource_guards.clone(),
             // Background cells outlive the foreground Turn. Product runtimes
             // that distinguish pause from cancel stop owned cells explicitly
             // by run identity instead of inheriting the Turn token here.
             cancel: None,
+            // Admission *is* bound to this invocation: once the caller's tool
+            // budget expires there is no point creating the cell, and the
+            // caller must not be told "unknown" about a cell nobody owns.
+            admission: CommandCellAdmission {
+                cancel: Some(Arc::new(admission_cancel)),
+                deadline: None,
+            },
+            // The registry supplies the product resource policy; the tool
+            // carries no product-specific ceiling.
+            resource_admission: ctx.native_execution_admission.as_ref().map(|provider| {
+                echo_core::tools::native_execution::command_cell_resource_admission(
+                    provider.clone(),
+                )
+            }),
             owner: CommandCellOwner {
                 conversation_id: ctx.conversation_id.clone(),
                 run_id: ctx.run_id.clone(),
@@ -559,7 +584,7 @@ impl Tool for ShellTool {
     }
 
     fn description(&self) -> &str {
-        "Execute restricted shell commands (only safe read-only operations and code-related commands are allowed). Parameter: command - the command to execute. Note: only simple commands (program + args) are supported; pipes, redirects, command substitution, and other shell syntax are not allowed."
+        "Safe whitelisted read-only/code commands (program+args); no pipes/redirects/substitution/other shell syntax."
     }
 
     fn permissions(&self) -> Vec<ToolPermission> {
@@ -585,15 +610,15 @@ impl Tool for ShellTool {
             "properties": {
                 "command": {
                     "type": "string",
-                    "description": "The command to execute (only safe commands in the whitelist; shell syntax like pipes/redirects/command substitution is not supported)"
+                    "description": "Command."
                 },
                 "timeout": {
                     "type": "integer",
-                    "description": "Command timeout in seconds (foreground default: 60, max: 300; background uses the cell runtime limit)"
+                    "description": "Seconds: foreground default 60, max 300; background cell limit."
                 },
                 "background": {
                     "type": "boolean",
-                    "description": "Run in background and return a cell_id immediately. Use wait(cell_id, yield_time_ms) to long-poll for output/exit status."
+                    "description": "Immediate cell_id; poll output/exit with wait(cell_id,yield_time_ms)."
                 }
             },
             "required": ["command"]
@@ -667,7 +692,7 @@ impl Tool for ShellTool {
                         } else {
                             None
                         },
-                        sandbox.is_some(),
+                        sandbox.clone(),
                     )
                     .await;
                 return Ok(single_complete_stream(result));
@@ -724,9 +749,20 @@ impl Tool for ShellTool {
                     SandboxCommand::program(program, parts.get(1..).unwrap_or_default().to_vec())
                 };
                 sandbox_cmd.timeout = timeout;
+                sandbox_cmd.resource_guards = ctx.resource_guards.clone();
+                sandbox_cmd.cancel = ctx.cancel.clone();
                 if let Some(dir) = &working_dir {
                     sandbox_cmd = sandbox_cmd.with_working_dir(dir);
                 }
+                echo_core::tools::native_execution::admit_native_execution(
+                    &ctx,
+                    &mut sandbox_cmd,
+                    self.name(),
+                )
+                .await?;
+                sandbox_cmd.ensure_physical_resource_ownership(
+                    sandbox.supports_physical_resource_ownership(),
+                )?;
                 Ok(start_sandbox_stream(
                     sandbox,
                     sandbox_cmd,
@@ -742,12 +778,23 @@ impl Tool for ShellTool {
                     }
                     .into());
                 };
+                let mut native_command =
+                    SandboxCommand::program(program, parts.get(1..).unwrap_or_default().to_vec())
+                        .with_timeout(timeout)
+                        .with_resource_guards(ctx.resource_guards.clone())
+                        .with_cancel(ctx.cancel.clone());
+                echo_core::tools::native_execution::admit_native_execution(
+                    &ctx,
+                    &mut native_command,
+                    self.name(),
+                )
+                .await?;
                 start_direct_stream(
                     program,
                     parts.get(1..).unwrap_or_default(),
                     working_dir,
-                    timeout,
                     artifact_capture,
+                    native_command,
                 )
             }
         })
@@ -791,9 +838,22 @@ fn start_direct_stream<'a>(
     program: &str,
     args: &[String],
     working_dir: Option<std::path::PathBuf>,
-    timeout: Duration,
     artifact_capture: ArtifactCapture,
+    native_command: SandboxCommand,
 ) -> Result<Pin<Box<dyn Stream<Item = ToolStreamEvent> + Send + 'a>>> {
+    // 此 direct owner 的树回收证明依赖原 Unix process group；新要求不套到未证明平台。
+    native_command.ensure_physical_resource_ownership(cfg!(unix))?;
+    let require_physical_resource_ownership = native_command.require_physical_resource_ownership;
+    let timeout = native_command.timeout;
+    if tokio::time::Instant::now().checked_add(timeout).is_none() {
+        return Err(ToolError::InvalidParameter {
+            name: "timeout".to_string(),
+            message: "Shell timeout exceeds the monotonic clock range".to_string(),
+        }
+        .into());
+    }
+    let resource_guards = native_command.resource_guards;
+    let cancel = native_command.cancel;
     let mut command = Command::new(program);
     command
         .args(args)
@@ -806,26 +866,65 @@ fn start_direct_stream<'a>(
         command.current_dir(dir);
     }
 
+    static OWNERS: LazyLock<Arc<echo_core::agent::admission::KeyedExecutionAdmission>> =
+        LazyLock::new(|| Arc::new(echo_core::agent::admission::KeyedExecutionAdmission::default()));
+    static NEXT_OPERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let sequence = NEXT_OPERATION
+        .try_update(
+            std::sync::atomic::Ordering::Relaxed,
+            std::sync::atomic::Ordering::Relaxed,
+            |value| value.checked_add(1),
+        )
+        .map_err(|_| ToolError::ExecutionFailed {
+            tool: "shell".to_string(),
+            message: "Native operation identity exhausted".to_string(),
+        })?;
+    let operation_id = format!("shell-direct:{}:{sequence}", std::process::id());
+    let resources = OWNERS
+        .issue(operation_id)
+        .map_err(|error| ToolError::ExecutionFailed {
+            tool: "shell".to_string(),
+            message: error.to_string(),
+        })?;
     let mut child = command
         .spawn()
         .map_err(|error| ToolError::ExecutionFailed {
             tool: "shell".to_string(),
             message: format!("Unable to execute command: {error}"),
         })?;
+    let process_group_id = child.id();
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
     let (tx, rx) = mpsc::channel(STREAM_CHANNEL_CAPACITY);
     tokio::spawn(async move {
-        run_direct_child(
+        // 原物理 child owner 保有资源，不能因外层工具 future／stream 返回释放。
+        let settled = run_direct_child(
             &mut child,
             stdout,
             stderr,
             tx,
             working_dir,
-            timeout,
+            (
+                timeout,
+                cancel,
+                process_group_id,
+                require_physical_resource_ownership,
+            ),
             artifact_capture,
         )
         .await;
+        if settled {
+            drop(resource_guards);
+            drop(resources);
+        } else {
+            let held_guards = resource_guards.clone();
+            let fence = resources.retain_unknown_with_resources(Some(Box::new(resource_guards)));
+            // 同一个原 child task 继续保有 Child/PGID，Unknown 不结束物理 owner。
+            // 首次 cleanup 后只等待原 child 与组消失，不重复 kill 或重放命令。
+            wait_for_original_direct_closure(&mut child, process_group_id).await;
+            OWNERS.confirm_uncertain_stopped(&fence);
+            drop(held_guards);
+        }
     });
     Ok(receiver_stream(rx))
 }
@@ -838,30 +937,39 @@ fn start_sandbox_stream<'a>(
 ) -> Pin<Box<dyn Stream<Item = ToolStreamEvent> + Send + 'a>> {
     let (tx, rx) = mpsc::channel(STREAM_CHANNEL_CAPACITY);
     tokio::spawn(async move {
+        let started = Instant::now();
         let stream = tokio::select! {
             _ = tx.closed() => return,
             stream = sandbox.execute_stream(command) => stream,
         };
-        let Ok(mut stream) = stream else {
-            let message = stream
-                .err()
-                .map(|error| format!("Sandbox execution failed: {error}"))
-                .unwrap_or_else(|| "Sandbox execution failed".to_string());
-            let result = ToolResult::failure(ToolFailureCategory::Unavailable, message)
-                .with_meta("duration_ms", "0")
-                .with_meta("exit_code", "-1")
-                .with_meta(
-                    "working_dir",
-                    working_dir
-                        .as_ref()
-                        .map(|dir| dir.display().to_string())
-                        .unwrap_or_default(),
-                )
-                .with_meta("output_truncated", "false")
-                .with_meta("stdout_bytes", "0")
-                .with_meta("stderr_bytes", "0");
-            let _ = tx.send(ToolStreamEvent::Complete(result)).await;
-            return;
+        let mut stream = match stream {
+            Ok(stream) => stream,
+            Err(error) => {
+                // 默认execute_stream可能已完成整个缓冲执行后才返回Err。
+                // 已有声明原样传递；未分类错误保守处理，不据建流阶段推断未执行。
+                let declared = matches!(
+                    &error,
+                    echo_core::error::ReactError::Tool(tool)
+                        if matches!(tool.as_ref(), ToolError::RemoteFailure { .. })
+                );
+                let failure = ToolFailure::from_error(&error, !declared);
+                let result = ToolResult::error(format!("Sandbox execution failed: {error}"))
+                    .with_failure(failure)
+                    .with_meta("duration_ms", started.elapsed().as_millis().to_string())
+                    .with_meta("exit_code", "-1")
+                    .with_meta(
+                        "working_dir",
+                        working_dir
+                            .as_ref()
+                            .map(|dir| dir.display().to_string())
+                            .unwrap_or_default(),
+                    )
+                    .with_meta("output_truncated", "false")
+                    .with_meta("stdout_bytes", "0")
+                    .with_meta("stderr_bytes", "0");
+                let _ = tx.send(ToolStreamEvent::Complete(result)).await;
+                return;
+            }
         };
 
         loop {
@@ -895,7 +1003,11 @@ fn start_sandbox_stream<'a>(
                         ToolFailureCategory::Permanent
                     };
                     let result = ToolResult::failure(category, failure.message())
-                        .with_meta("duration_ms", "0")
+                        // 流内失败不能推出没有副作用；输出为零也不是未执行证明。
+                        .with_failure(
+                            ToolFailure::new(category).with_side_effect(ToolSideEffect::Possible),
+                        )
+                        .with_meta("duration_ms", started.elapsed().as_millis().to_string())
                         .with_meta("exit_code", "-1")
                         .with_meta(
                             "working_dir",
@@ -924,9 +1036,15 @@ async fn run_direct_child(
     mut stderr: Option<tokio::process::ChildStderr>,
     tx: mpsc::Sender<ToolStreamEvent>,
     working_dir: Option<std::path::PathBuf>,
-    timeout: Duration,
+    budget: (
+        Duration,
+        Option<Arc<echo_core::agent::CancellationToken>>,
+        Option<u32>,
+        bool,
+    ),
     mut artifact_capture: ArtifactCapture,
-) {
+) -> bool {
+    let (timeout, cancel, process_group_id, require_physical_resource_ownership) = budget;
     let start = Instant::now();
     let deadline = tokio::time::sleep(timeout);
     tokio::pin!(deadline);
@@ -939,17 +1057,64 @@ async fn run_direct_child(
     let mut status = None;
 
     loop {
-        if stdout.is_none() && stderr.is_none() && status.is_some() {
+        let cancelled = cancel.as_ref().is_some_and(|token| token.is_cancelled());
+        if require_physical_resource_ownership
+            && (cancelled || tokio::time::Instant::now() >= deadline.deadline())
+        {
+            let settled = cleanup_direct_child(child, process_group_id).await;
+            let result = if cancelled {
+                ToolResult::failure(
+                    ToolFailureCategory::Cancelled,
+                    "Shell execution cancelled before owned-group closure",
+                )
+                .with_failure(
+                    ToolFailure::new(ToolFailureCategory::Cancelled)
+                        .with_side_effect(ToolSideEffect::Possible),
+                )
+            } else {
+                build_tool_result(
+                    -1,
+                    retained_stdout,
+                    retained_stderr,
+                    start.elapsed(),
+                    working_dir.as_ref(),
+                    true,
+                )
+            };
+            let _ = tx
+                .send(ToolStreamEvent::Complete(artifact_capture.finish(result)))
+                .await;
+            return settled;
+        }
+        if stdout.is_none()
+            && stderr.is_none()
+            && status.is_some()
+            && (!require_physical_resource_ownership
+                || original_direct_group_absent(process_group_id))
+        {
             break;
         }
 
         tokio::select! {
+            biased;
             _ = tx.closed() => {
-                cleanup_direct_child(child).await;
-                return;
+                return cleanup_direct_child(child, process_group_id).await;
+            }
+            _ = async {
+                match cancel.as_ref() {
+                    Some(token) => token.cancelled().await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                let settled = cleanup_direct_child(child, process_group_id).await;
+                let _ = tx.send(ToolStreamEvent::Complete(ToolResult::failure(
+                    ToolFailureCategory::Cancelled, "Shell execution cancelled",
+                ).with_failure(ToolFailure::new(ToolFailureCategory::Cancelled)
+                    .with_side_effect(ToolSideEffect::Possible)))).await;
+                return settled;
             }
             _ = &mut deadline => {
-                cleanup_direct_child(child).await;
+                let settled = cleanup_direct_child(child, process_group_id).await;
                 let result = artifact_capture.finish(build_tool_result(
                     -1,
                     retained_stdout,
@@ -959,8 +1124,10 @@ async fn run_direct_child(
                     true,
                 ));
                 let _ = tx.send(ToolStreamEvent::Complete(result)).await;
-                return;
+                return settled;
             }
+            _ = tokio::time::sleep(Duration::from_millis(10)),
+                if require_physical_resource_ownership && status.is_some() && stdout.is_none() && stderr.is_none() => {}
             read = async {
                 match stdout.as_mut() {
                     Some(pipe) => pipe.read(&mut stdout_buffer).await,
@@ -973,8 +1140,7 @@ async fn run_direct_child(
                         if let Some(chunk) = stdout_decoder.finish() {
                             artifact_capture.push(ToolOutputChannel::Stdout, &chunk);
                             if send_output(&tx, ToolOutputChannel::Stdout, chunk).await.is_err() {
-                                cleanup_direct_child(child).await;
-                                return;
+                                return cleanup_direct_child(child, process_group_id).await;
                             }
                         }
                     }
@@ -988,12 +1154,11 @@ async fn run_direct_child(
                         for chunk in stdout_decoder.push(bytes) {
                             artifact_capture.push(ToolOutputChannel::Stdout, &chunk);
                             if send_output(&tx, ToolOutputChannel::Stdout, chunk).await.is_err() {
-                                cleanup_direct_child(child).await;
-                                return;
+                                return cleanup_direct_child(child, process_group_id).await;
                             }
                         }
                     }
-                    Err(_) => stdout = None,
+                    Err(_) => return cleanup_direct_child(child, process_group_id).await,
                 }
             }
             read = async {
@@ -1008,8 +1173,7 @@ async fn run_direct_child(
                         if let Some(chunk) = stderr_decoder.finish() {
                             artifact_capture.push(ToolOutputChannel::Stderr, &chunk);
                             if send_output(&tx, ToolOutputChannel::Stderr, chunk).await.is_err() {
-                                cleanup_direct_child(child).await;
-                                return;
+                                return cleanup_direct_child(child, process_group_id).await;
                             }
                         }
                     }
@@ -1023,21 +1187,18 @@ async fn run_direct_child(
                         for chunk in stderr_decoder.push(bytes) {
                             artifact_capture.push(ToolOutputChannel::Stderr, &chunk);
                             if send_output(&tx, ToolOutputChannel::Stderr, chunk).await.is_err() {
-                                cleanup_direct_child(child).await;
-                                return;
+                                return cleanup_direct_child(child, process_group_id).await;
                             }
                         }
                     }
-                    Err(_) => stderr = None,
+                    Err(_) => return cleanup_direct_child(child, process_group_id).await,
                 }
             }
             waited = child.wait(), if status.is_none() => {
                 match waited {
                     Ok(exit_status) => status = Some(exit_status),
                     Err(_) => {
-                        cleanup_direct_child(child).await;
-                        status = None;
-                        break;
+                        return cleanup_direct_child(child, process_group_id).await;
                     }
                 }
             }
@@ -1054,6 +1215,7 @@ async fn run_direct_child(
         false,
     ));
     let _ = tx.send(ToolStreamEvent::Complete(result)).await;
+    true
 }
 
 async fn send_output(
@@ -1069,25 +1231,92 @@ async fn send_output(
     Ok(())
 }
 
-async fn cleanup_direct_child(child: &mut tokio::process::Child) {
+fn original_direct_group_absent(process_group_id: Option<u32>) -> bool {
     #[cfg(unix)]
-    if let Some(pid) = child.id() {
-        let _ = process_group_kill_command(pid).status();
+    {
+        process_group_id
+            .and_then(|pid| i32::try_from(pid).ok())
+            .filter(|group| *group > 1)
+            .is_some_and(|group| {
+                // SAFETY: observe only the original group captured before the root child can exit.
+                let result = unsafe { libc::kill(-group, 0) };
+                result != 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+            })
     }
-    let _ = child.kill().await;
-    let _ = child.wait().await;
+    #[cfg(not(unix))]
+    {
+        let _ = process_group_id;
+        false
+    }
 }
 
-#[cfg(unix)]
-fn process_group_kill_command(pid: u32) -> std::process::Command {
-    let mut command = std::process::Command::new("kill");
-    command
-        // Delimit the negative PGID so platform kill utilities cannot reinterpret
-        // the cleanup target as an option or signal number.
-        .args(["-KILL", "--", &format!("-{pid}")])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-    command
+async fn wait_for_original_direct_closure(
+    child: &mut tokio::process::Child,
+    process_group_id: Option<u32>,
+) {
+    loop {
+        let waited = child.wait().await.is_ok();
+        #[cfg(unix)]
+        let absent = process_group_id
+            .and_then(|pid| i32::try_from(pid).ok())
+            .filter(|group| *group > 0)
+            .is_some_and(|group| {
+                // SAFETY: signal 0 only observes this original captured process group.
+                let result = unsafe { libc::kill(-group, 0) };
+                result != 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+            });
+        #[cfg(not(unix))]
+        let absent = {
+            let _ = process_group_id;
+            true
+        };
+        if waited && absent {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+async fn cleanup_direct_child(
+    child: &mut tokio::process::Child,
+    process_group_id: Option<u32>,
+) -> bool {
+    #[cfg(unix)]
+    let group = process_group_id
+        .and_then(|pid| i32::try_from(pid).ok())
+        .filter(|group| *group > 0);
+    #[cfg(unix)]
+    let signalled = match group {
+        Some(group) => {
+            // SAFETY: group id came from this child spawned with process_group(0).
+            let result = unsafe { libc::kill(-group, libc::SIGKILL) };
+            result == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+        }
+        None => false,
+    };
+    #[cfg(not(unix))]
+    let _ = process_group_id;
+    let _ = child.start_kill();
+    let waited = child.wait().await.is_ok();
+    #[cfg(unix)]
+    {
+        let Some(group) = group else {
+            return false;
+        };
+        for _ in 0..100 {
+            // SAFETY: signal 0 only checks the original process group's presence.
+            let result = unsafe { libc::kill(-group, 0) };
+            if result != 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH) {
+                return signalled && waited;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        false
+    }
+    #[cfg(not(unix))]
+    {
+        waited
+    }
 }
 
 #[derive(Default)]
@@ -1336,13 +1565,260 @@ mod tests {
     use super::*;
 
     #[cfg(unix)]
-    #[test]
-    fn cleanup_delimits_negative_process_group_target() {
-        let command = process_group_kill_command(2443);
-        let args: Vec<_> = command.get_args().collect();
-        assert_eq!(args, ["-KILL", "--", "-2443"]);
+    #[tokio::test]
+    async fn direct_root_exit_and_eof_keep_the_original_group_owned_through_normal_cancel_and_deadline()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        for mode in ["natural", "cancel", "deadline"] {
+            let root =
+                std::env::temp_dir().join(format!("direct-group-after-eof-{}", std::process::id()));
+            std::fs::create_dir_all(&root)?;
+            let script = create_test_script(
+                "owned-detached",
+                "#!/bin/sh\necho $$ > \"$1\"\nsh -c 'while [ ! -e \"$1\" ]; do sleep 0.02; done' sh \"$2\" >/dev/null 2>&1 &\necho $! > \"$3\"\nif [ \"$4\" = deadline ]; then sleep 1; fi\n",
+            );
+            let leader_file = root.join(format!("leader-{mode}"));
+            let descendant_file = root.join(format!("descendant-{mode}"));
+            let release_file = root.join(format!("release-{mode}"));
+            let _ = std::fs::remove_file(&release_file);
+            let capacity = Arc::new(tokio::sync::Semaphore::new(1));
+            let permit = capacity.clone().acquire_owned().await?;
+            let cancel = Arc::new(echo_core::agent::CancellationToken::new());
+            let timeout = if mode == "deadline" {
+                Duration::from_secs(2)
+            } else {
+                Duration::from_secs(10)
+            };
+            let args = vec![
+                leader_file.display().to_string(),
+                release_file.display().to_string(),
+                descendant_file.display().to_string(),
+                mode.to_string(),
+            ];
+            let mut native = SandboxCommand::program(script.display().to_string(), args.clone())
+                .with_timeout(timeout)
+                .with_cancel(Some(cancel.clone()))
+                .with_resource_guards(vec![echo_core::tools::InvocationResourceGuard::new(permit)]);
+            native.require_physical_resource_ownership = true;
+            let started = tokio::time::Instant::now();
+            let mut stream = start_direct_stream(
+                script.to_str().ok_or("invalid fixture path")?,
+                &args,
+                Some(root.clone()),
+                ArtifactCapture::new(&ToolContext::default(), "shell"),
+                native,
+            )?;
+            let mut pids = None;
+            for _ in 0..300 {
+                let leader = std::fs::read_to_string(&leader_file)
+                    .ok()
+                    .and_then(|value| value.trim().parse::<i32>().ok());
+                let descendant = std::fs::read_to_string(&descendant_file)
+                    .ok()
+                    .and_then(|value| value.trim().parse::<i32>().ok());
+                if let (Some(leader), Some(descendant)) = (leader, descendant) {
+                    // SAFETY: inspect only pids published by this exact self-owned fixture.
+                    let root_exists = unsafe { libc::kill(leader, 0) } == 0;
+                    if !root_exists {
+                        pids = Some((leader, descendant));
+                        break;
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            let Some((leader, descendant)) = pids else {
+                cancel.cancel();
+                drop(stream);
+                let _ = std::fs::write(&release_file, "release");
+                return Err("direct group fixture never reached real root-exit/EOF".into());
+            };
+            // SAFETY: signal0 only observes the original controlled descendant.
+            let descendant_live = unsafe { libc::kill(descendant, 0) } == 0;
+            let capacity_while_live = capacity.available_permits();
+            let early = tokio::time::timeout(Duration::from_millis(20), stream.next())
+                .await
+                .ok();
+            let completed_before_group = early.is_some();
+            if early.is_some() || mode == "natural" {
+                std::fs::write(&release_file, "release")?;
+            } else if mode == "cancel" {
+                cancel.cancel();
+            } else {
+                tokio::time::sleep_until(
+                    started
+                        .checked_add(Duration::from_millis(2200))
+                        .ok_or("fixture deadline overflow")?,
+                )
+                .await;
+                std::fs::write(&release_file, "release")?;
+            }
+            let mut completion = match early {
+                Some(Some(ToolStreamEvent::Complete(result))) => Some(result),
+                _ => None,
+            };
+            let drained = tokio::time::timeout(Duration::from_secs(5), async {
+                while let Some(event) = stream.next().await {
+                    if let ToolStreamEvent::Complete(result) = event {
+                        completion = Some(result);
+                    }
+                }
+            })
+            .await;
+            if drained.is_err() {
+                cancel.cancel();
+                // SAFETY: kill only the original group captured from this fixture's own leader.
+                let _ = unsafe { libc::kill(-leader, libc::SIGKILL) };
+                let _ = std::fs::write(&release_file, "release");
+            }
+            drop(stream);
+            for _ in 0..200 {
+                if original_direct_group_absent(u32::try_from(leader).ok()) {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            let closed = original_direct_group_absent(u32::try_from(leader).ok());
+            std::fs::remove_file(script)?;
+            std::fs::remove_dir_all(root)?;
+            assert!(descendant_live && closed);
+            assert_eq!(capacity_while_live, 0);
+            assert!(
+                !completed_before_group,
+                "root wait/EOF released direct native capacity"
+            );
+            assert!(drained.is_ok());
+            let result = completion.ok_or("direct owner lost its original completion")?;
+            match mode {
+                "natural" => assert!(result.success),
+                "cancel" => assert!(
+                    result
+                        .failure
+                        .is_some_and(|failure| failure.category == ToolFailureCategory::Cancelled)
+                ),
+                _ => assert!(
+                    result
+                        .failure
+                        .is_some_and(|failure| failure.category == ToolFailureCategory::Timeout)
+                ),
+            }
+            assert_eq!(capacity.available_permits(), 1);
+        }
+        Ok(())
     }
-    use echo_core::sandbox::{ExecutionResult, IsolationLevel};
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn foreground_native_capacity_waits_for_original_physical_cleanup()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        use std::sync::atomic::{AtomicBool, AtomicI32, AtomicUsize, Ordering};
+        struct Admission {
+            capacity: Arc<tokio::sync::Semaphore>,
+            calls: AtomicUsize,
+            first_pid: Arc<AtomicI32>,
+            overlapped: AtomicBool,
+        }
+        impl echo_core::tools::NativeExecutionResourceAdmission for Admission {
+            fn admit<'a>(
+                &'a self,
+                cancel: &'a echo_core::agent::CancellationToken,
+                deadline: Instant,
+            ) -> BoxFuture<
+                'a,
+                std::result::Result<
+                    echo_core::tools::InvocationResourceGuard,
+                    echo_core::tools::NativeExecutionAdmissionError,
+                >,
+            > {
+                Box::pin(async move {
+                    use echo_core::tools::NativeExecutionAdmissionError;
+                    let permit = tokio::select! {
+                        biased;
+                        _ = cancel.cancelled() => return Err(NativeExecutionAdmissionError::Cancelled),
+                        _ = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)) => return Err(NativeExecutionAdmissionError::Deadline),
+                        permit = self.capacity.clone().acquire_owned() => permit.map_err(|_| NativeExecutionAdmissionError::Closed)?,
+                    };
+                    if self.calls.fetch_add(1, Ordering::SeqCst) > 0 {
+                        let pid = self.first_pid.load(Ordering::SeqCst);
+                        if pid > 0 {
+                            // SAFETY: signal 0 checks the process group of this exact fixture child.
+                            self.overlapped
+                                .store(unsafe { libc::kill(-pid, 0) } == 0, Ordering::SeqCst);
+                        }
+                    }
+                    Ok(echo_core::tools::InvocationResourceGuard::new(permit))
+                })
+            }
+        }
+        let script = create_test_script(
+            "native-owner",
+            "#!/bin/sh\necho $$ > \"$1\"\nprintf started\nsleep 30\n",
+        );
+        let pid_file = script.with_extension("pid");
+        let capacity = Arc::new(tokio::sync::Semaphore::new(1));
+        let first_pid = Arc::new(AtomicI32::new(0));
+        let admission = Arc::new(Admission {
+            capacity: capacity.clone(),
+            calls: AtomicUsize::new(0),
+            first_pid: first_pid.clone(),
+            overlapped: AtomicBool::new(false),
+        });
+        let context = ToolContext {
+            native_execution_admission: Some(admission.clone()),
+            ..ToolContext::default()
+        };
+        let tool = ShellTool::new_permissive();
+        let params = [(
+            "command".to_string(),
+            serde_json::json!(format!("{} {}", script.display(), pid_file.display())),
+        )]
+        .into();
+        let mut first = tool.execute_stream_with_context(params, &context).await?;
+        let event = tokio::time::timeout(Duration::from_secs(3), first.next()).await?;
+        assert!(matches!(event, Some(ToolStreamEvent::Output { .. })));
+        first_pid.store(
+            std::fs::read_to_string(&pid_file)?.trim().parse()?,
+            Ordering::SeqCst,
+        );
+        assert_eq!(capacity.available_permits(), 0);
+        let second_params = [(
+            "command".to_string(),
+            serde_json::json!("echo second-native-effect"),
+        )]
+        .into();
+        let second = tool.execute_stream_with_context(second_params, &context);
+        tokio::pin!(second);
+        let blocked = tokio::time::timeout(Duration::from_millis(20), second.as_mut())
+            .await
+            .is_err();
+        drop(first);
+        let mut second = tokio::time::timeout(Duration::from_secs(3), second.as_mut()).await??;
+        let mut completion = None;
+        while let Some(event) = second.next().await {
+            if let ToolStreamEvent::Complete(result) = event {
+                completion = Some(result);
+            }
+        }
+        assert!(
+            blocked,
+            "second foreground command entered before the first receiver detached"
+        );
+        assert!(
+            completion.is_some_and(
+                |result| result.success && result.output.contains("second-native-effect")
+            )
+        );
+        assert_eq!(admission.calls.load(Ordering::SeqCst), 2);
+        assert!(
+            !admission.overlapped.load(Ordering::SeqCst),
+            "second admission overlapped the first real process group"
+        );
+        assert!(context.resource_guards.is_empty());
+        assert_eq!(capacity.available_permits(), 1);
+        std::fs::remove_file(script)?;
+        std::fs::remove_file(pid_file)?;
+        Ok(())
+    }
+
+    use echo_core::sandbox::{ExecutionResult, IsolationLevel, SandboxStreamFailure};
     use echo_core::tools::cell::{
         CommandCellArtifactStatus, CommandCellDelta, CommandCellError, CommandCellLaunchReceipt,
         CommandCellObservationLease, CommandCellPhase, CommandCellSnapshot, CommandCellWaitReason,
@@ -1351,6 +1827,171 @@ mod tests {
     use echo_core::tools::{ToolContext, ToolOutputChannel, ToolStreamEvent};
     use futures::StreamExt;
     use std::collections::HashMap;
+
+    struct BufferedFailureSandbox {
+        error: Mutex<Option<echo_core::error::ReactError>>,
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl SandboxExecutor for BufferedFailureSandbox {
+        fn name(&self) -> &str {
+            "buffered-failure-fixture"
+        }
+        fn isolation_level(&self) -> IsolationLevel {
+            IsolationLevel::None
+        }
+        fn is_available(&self) -> BoxFuture<'_, bool> {
+            Box::pin(async { true })
+        }
+        fn execute(&self, _command: SandboxCommand) -> BoxFuture<'_, Result<ExecutionResult>> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+            let error = self
+                .error
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .take();
+            Box::pin(async move {
+                match error {
+                    Some(error) => Err(error),
+                    None => Err(std::io::Error::other("fixture operation was replayed").into()),
+                }
+            })
+        }
+    }
+
+    fn failure_shell(
+        error: echo_core::error::ReactError,
+    ) -> (ShellTool, Arc<std::sync::atomic::AtomicUsize>) {
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let tool = ShellTool::new().with_sandbox(Arc::new(BufferedFailureSandbox {
+            error: Mutex::new(Some(error)),
+            calls: calls.clone(),
+        }));
+        (tool, calls)
+    }
+
+    #[tokio::test]
+    async fn sandbox_error_facts_preserve_buffered_declarations() -> Result<()> {
+        for expected in [
+            ToolFailure::new(ToolFailureCategory::PartialSideEffect)
+                .with_postcondition("inspect original target")
+                .with_retry_after(17),
+            ToolFailure::new(ToolFailureCategory::Unavailable),
+            ToolFailure::new(ToolFailureCategory::Transient)
+                .retryable()
+                .with_retry_after(9)
+                .with_idempotency_key("stable-fixture"),
+            ToolFailure::new(ToolFailureCategory::Permanent)
+                .with_side_effect(ToolSideEffect::Confirmed)
+                .with_postcondition("effect completed"),
+        ] {
+            let error = ToolError::RemoteFailure {
+                tool: "fixture_backend".to_string(),
+                message: "original operation failed".to_string(),
+                http_status: None,
+                failure: Box::new(expected.clone()),
+            }
+            .into();
+            let (tool, calls) = failure_shell(error);
+            let parameters =
+                HashMap::from([("command".to_string(), serde_json::json!("printf fixture"))]);
+            let result = tool
+                .execute_with_context(parameters, &ToolContext::default())
+                .await?;
+            assert!(!result.success);
+            assert_eq!(result.failure, Some(expected));
+            assert_eq!(calls.load(std::sync::atomic::Ordering::Acquire), 1);
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn sandbox_error_facts_keep_unclassified_effects_possible() -> Result<()> {
+        let error = std::io::Error::new(
+            std::io::ErrorKind::BrokenPipe,
+            "response lost after execution",
+        )
+        .into();
+        let (tool, calls) = failure_shell(error);
+        let parameters =
+            HashMap::from([("command".to_string(), serde_json::json!("printf fixture"))]);
+        let result = tool
+            .execute_with_context(parameters, &ToolContext::default())
+            .await?;
+        assert!(!result.success);
+        assert_eq!(
+            result.failure,
+            Some(ToolFailure::new(ToolFailureCategory::PartialSideEffect))
+        );
+        assert_eq!(calls.load(std::sync::atomic::Ordering::Acquire), 1);
+        Ok(())
+    }
+
+    struct FailedStreamSandbox(SandboxStreamFailure);
+    impl SandboxExecutor for FailedStreamSandbox {
+        fn name(&self) -> &str {
+            "failed-stream-fixture"
+        }
+        fn isolation_level(&self) -> IsolationLevel {
+            IsolationLevel::None
+        }
+        fn is_available(&self) -> BoxFuture<'_, bool> {
+            Box::pin(async { true })
+        }
+        fn supports_streaming(&self) -> bool {
+            true
+        }
+        fn execute(&self, _command: SandboxCommand) -> BoxFuture<'_, Result<ExecutionResult>> {
+            Box::pin(async {
+                Err(std::io::Error::other("fixture uses the original stream path").into())
+            })
+        }
+        fn execute_stream<'a>(
+            &'a self,
+            _command: SandboxCommand,
+        ) -> BoxFuture<'a, Result<Pin<Box<dyn Stream<Item = SandboxStreamEvent> + Send + 'a>>>>
+        {
+            let failure = self.0.clone();
+            Box::pin(async move {
+                let stream: Pin<Box<dyn Stream<Item = SandboxStreamEvent> + Send + 'a>> =
+                    Box::pin(futures::stream::once(async move {
+                        SandboxStreamEvent::Failed { failure }
+                    }));
+                Ok(stream)
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn sandbox_error_facts_preserve_failed_stream_effects() -> Result<()> {
+        for (failure, category) in [
+            (
+                SandboxStreamFailure::Cancelled {
+                    message: "cancelled after stream creation".into(),
+                },
+                ToolFailureCategory::Cancelled,
+            ),
+            (
+                SandboxStreamFailure::IoError {
+                    message: "reader lost after stream creation".into(),
+                },
+                ToolFailureCategory::Permanent,
+            ),
+        ] {
+            let tool = ShellTool::new().with_sandbox(Arc::new(FailedStreamSandbox(failure)));
+            let parameters =
+                HashMap::from([("command".to_string(), serde_json::json!("printf fixture"))]);
+            let result = tool
+                .execute_with_context(parameters, &ToolContext::default())
+                .await?;
+            assert!(!result.success);
+            assert_eq!(
+                result.failure,
+                Some(ToolFailure::new(category).with_side_effect(ToolSideEffect::Possible))
+            );
+        }
+        Ok(())
+    }
 
     struct TestSandbox;
 
@@ -1391,6 +2032,7 @@ mod tests {
     #[derive(Default)]
     struct CapturingCellRegistry {
         request: Mutex<Option<CommandCellRequest>>,
+        pending: bool,
     }
 
     impl CommandCellRegistry for CapturingCellRegistry {
@@ -1403,7 +2045,11 @@ mod tests {
                 .request
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(request);
-            Box::pin(async {
+            let pending = self.pending;
+            Box::pin(async move {
+                if pending {
+                    return std::future::pending().await;
+                }
                 let accepted_at = chrono::Utc::now();
                 Ok(CommandCellLaunchReceipt {
                     cell_id: "captured-cell".to_string(),
@@ -1461,6 +2107,37 @@ mod tests {
         fn shutdown(&self) -> BoxFuture<'_, std::result::Result<(), CommandCellError>> {
             Box::pin(async { Ok(()) })
         }
+    }
+
+    #[tokio::test]
+    async fn dropped_background_launch_with_no_parent_token_withdraws_admission() -> Result<()> {
+        let registry = Arc::new(CapturingCellRegistry {
+            request: Mutex::new(None),
+            pending: true,
+        });
+        let tool = ShellTool::new().with_cell_launcher(registry.clone());
+        let context = ToolContext::default();
+        let result = tokio::time::timeout(
+            std::time::Duration::from_millis(20),
+            tool.execute_with_context(
+                HashMap::from([
+                    ("command".to_string(), serde_json::json!("echo admission")),
+                    ("background".to_string(), serde_json::json!(true)),
+                ]),
+                &context,
+            ),
+        )
+        .await;
+        assert!(result.is_err());
+        let request = registry.request.lock().unwrap_or_else(|e| e.into_inner());
+        assert!(
+            request
+                .as_ref()
+                .and_then(|r| r.admission.cancel.as_ref())
+                .is_some_and(|token| token.is_cancelled())
+        );
+        assert!(request.as_ref().is_some_and(|r| r.cancel.is_none()));
+        Ok(())
     }
 
     #[test]

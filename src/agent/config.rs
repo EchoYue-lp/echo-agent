@@ -24,10 +24,19 @@ pub struct AgentConfig {
     pub(crate) run_budget: echo_core::agent::RunBudgetPolicy,
     /// Resolved provider/model capabilities that affect harness behavior.
     pub(crate) model_profile: Option<echo_core::llm::capabilities::ModelProfileResolution>,
+    /// 模型HTTP传输模式；与Agent公开方法返回String还是事件流相互独立。
+    pub(crate) model_streaming: bool,
     /// Tool allowlist (empty = no restriction, all registered tools can be called)
     pub(crate) allowed_tools: Vec<String>,
     /// Whether to allow registering and calling business tools (e.g., math, weather, etc.)
     pub(crate) enable_tool: bool,
+    #[cfg(feature = "files")]
+    pub(crate) file_system: Option<Arc<dyn echo_core::tools::filesystem::FileSystem>>,
+    /// 可选远端内容搜索接缝，只交给标准工具包里的 `grep`。`None`（默认）
+    /// 时 grep 保持本机遍历，工具定义与本机行为都不变。
+    #[cfg(feature = "files")]
+    pub(crate) content_search_provider:
+        Option<Arc<dyn echo_core::tools::search::ContentSearchProvider>>,
     /// Restrict custom registration, invocation visibility, and execution to
     /// read-only capabilities.
     pub(crate) readonly_tools: bool,
@@ -83,8 +92,6 @@ pub struct AgentConfig {
     pub(crate) llm_retry_delay_ms: u64,
     /// On tool execution failure, feed the error back to the LLM instead of failing the Agent directly (default true)
     pub(crate) tool_error_feedback: bool,
-    /// Enable chain-of-thought (CoT) system prompt injection (default false).
-    pub(crate) enable_cot: bool,
     /// Require that a file be explicitly read (via `read_file`) before any
     /// write/edit/delete operation on it. When enabled, tools like
     /// `apply_patch` and other file mutation tools will reject paths
@@ -149,11 +156,11 @@ pub struct AgentConfig {
     /// Applications may shorten this default without changing effect identity.
     pub(crate) persistence_settlement_timeout: std::time::Duration,
 
-    /// Whether the verifier (Critic) is enabled for final_answer validation.
+    /// Whether the verifier (Critic) is enabled for final response validation.
     pub(crate) verifier_enabled: bool,
     /// Minimum score (0.0-10.0) required for the verifier to pass.
     pub(crate) verifier_min_score: f64,
-    /// Maximum number of verifier retry attempts before accepting the answer.
+    /// Critic拒绝后的最大修正次数；耗尽仍是拒绝，不是默认接受。
     pub(crate) verifier_max_retries: usize,
 }
 
@@ -175,8 +182,13 @@ impl AgentConfig {
             max_iterations: 100,
             run_budget: echo_core::agent::RunBudgetPolicy::default(),
             model_profile: None,
+            model_streaming: true,
             allowed_tools: Vec::new(),
             enable_tool: false,
+            #[cfg(feature = "files")]
+            file_system: None,
+            #[cfg(feature = "files")]
+            content_search_provider: None,
             readonly_tools: false,
             command_cells: None,
             enable_human_in_loop: false,
@@ -198,7 +210,6 @@ impl AgentConfig {
             llm_max_retries: 3,
             llm_retry_delay_ms: 500,
             tool_error_feedback: true,
-            enable_cot: false,
             force_read_before_edit: false,
             plan_mode: false,
             _reasoning_effort: "medium".to_string(),
@@ -237,16 +248,13 @@ impl AgentConfig {
         Self::new(model_name, "assistant", system_prompt)
             .enable_tool(false)
             .enable_memory(false)
-            .enable_cot(false)
     }
 
-    /// Create a standard Agent (tools + chain-of-thought enabled)
+    /// 创建启用工具的标准 Agent；原生 reasoning 由模型配置决定。
     ///
     /// Suitable for most Agent scenarios.
     pub fn standard(model_name: &str, agent_name: &str, system_prompt: &str) -> Self {
-        Self::new(model_name, agent_name, system_prompt)
-            .enable_tool(true)
-            .enable_cot(true)
+        Self::new(model_name, agent_name, system_prompt).enable_tool(true)
     }
 
     /// Create a full-featured Agent (tools, memory, planning)
@@ -256,21 +264,18 @@ impl AgentConfig {
         Self::new(model_name, agent_name, system_prompt)
             .enable_tool(true)
             .enable_memory(true)
-            .enable_cot(true)
     }
 
     /// Enable all features (tools, memory) - Builder chain call version
     pub fn with_full_features(mut self) -> Self {
         self.enable_tool = true;
         self.enable_memory = true;
-        self.enable_cot = true;
         self
     }
 
-    /// Enable basic tool features (tools + chain-of-thought) - Builder chain call version
+    /// 启用基本工具能力。
     pub fn with_tools(mut self) -> Self {
         self.enable_tool = true;
-        self.enable_cot = true;
         self
     }
 
@@ -306,6 +311,28 @@ impl AgentConfig {
     /// immediately) and the `wait` / `stop_cell` / `list_cells` tools are
     /// registered. Share one registry across a parent agent and its subagents
     /// so they all observe the same cells.
+    #[cfg(feature = "files")]
+    pub fn file_system(
+        mut self,
+        file_system: Arc<dyn echo_core::tools::filesystem::FileSystem>,
+    ) -> Self {
+        self.file_system = Some(file_system);
+        self
+    }
+
+    /// 注入可选的远端内容搜索提供者，标准工具包会把它交给 `grep`。
+    ///
+    /// `None` 是默认值，也是“不接入”的唯一表达：grep 继续本机遍历，
+    /// 工具 schema 与输出格式都不受影响。
+    #[cfg(feature = "files")]
+    pub fn content_search_provider(
+        mut self,
+        provider: Option<Arc<dyn echo_core::tools::search::ContentSearchProvider>>,
+    ) -> Self {
+        self.content_search_provider = provider;
+        self
+    }
+
     pub fn command_cells(
         mut self,
         cells: std::sync::Arc<dyn echo_core::tools::cell::CommandCellRegistry>,
@@ -560,6 +587,13 @@ impl AgentConfig {
         self
     }
 
+    /// 选择模型HTTP传输；默认流式，显式false调用同一LlmClient的chat。
+    /// 该选项不改变execute/chat或事件流入口的生命周期和返回类型。
+    pub fn model_streaming(mut self, enabled: bool) -> Self {
+        self.model_streaming = enabled;
+        self
+    }
+
     /// Set LLM retry initial delay
     ///
     /// # Parameters
@@ -646,14 +680,6 @@ impl AgentConfig {
         self.token_limit
     }
 
-    /// Check if chain-of-thought (CoT) is enabled
-    ///
-    /// # Returns
-    /// `true` if CoT is enabled, `false` if disabled
-    pub fn is_cot_enabled(&self) -> bool {
-        self.enable_cot
-    }
-
     /// Check if long-term memory is enabled
     ///
     /// # Returns
@@ -710,18 +736,6 @@ impl AgentConfig {
         &self.agent_name
     }
 
-    /// Enable or disable chain-of-thought (CoT)
-    ///
-    /// # Parameters
-    /// * `enabled` - `true` to enable CoT, `false` to disable
-    ///
-    /// # Description
-    /// When CoT is enabled, the Agent injects CoT-related instructions into the system prompt
-    pub fn enable_cot(mut self, enabled: bool) -> Self {
-        self.enable_cot = enabled;
-        self
-    }
-
     /// Enable or disable long-term memory
     ///
     /// # Parameters
@@ -768,7 +782,7 @@ impl AgentConfig {
         self
     }
 
-    /// Enable or disable the verifier (Critic) for final_answer validation.
+    /// Enable or disable the verifier (Critic) for final response validation.
     pub fn verifier_enabled(mut self, enabled: bool) -> Self {
         self.verifier_enabled = enabled;
         self
@@ -982,7 +996,6 @@ mod tests {
         assert_eq!(config.get_model_name(), "qwen3-max");
         assert!(!config.is_tool_enabled());
         assert!(!config.is_memory_enabled());
-        assert!(!config.is_cot_enabled());
     }
 
     #[test]
@@ -990,7 +1003,6 @@ mod tests {
         let config = AgentConfig::standard("qwen3-max", "agent1", "You are helpful");
 
         assert!(config.is_tool_enabled());
-        assert!(config.is_cot_enabled());
     }
 
     #[test]
@@ -999,7 +1011,6 @@ mod tests {
 
         assert!(config.is_tool_enabled());
         assert!(config.is_memory_enabled());
-        assert!(config.is_cot_enabled());
     }
 
     #[test]
@@ -1011,7 +1022,6 @@ mod tests {
             .enable_human_in_loop(true)
             .enable_subagent(true)
             .enable_memory(true)
-            .enable_cot(false)
             .llm_max_retries(5)
             .llm_retry_delay_ms(1000)
             .tool_error_feedback(false);
@@ -1022,7 +1032,6 @@ mod tests {
         assert!(config.is_human_in_loop_enabled());
         assert!(config.is_subagent_enabled());
         assert!(config.is_memory_enabled());
-        assert!(!config.is_cot_enabled());
         assert_eq!(config.get_llm_max_retries(), 5);
         assert_eq!(config.get_llm_retry_delay_ms(), 1000);
         assert!(!config.get_tool_error_feedback());
@@ -1085,7 +1094,6 @@ mod tests {
 
         assert!(config.is_tool_enabled());
         assert!(config.is_memory_enabled());
-        assert!(config.is_cot_enabled());
     }
 
     #[test]
@@ -1093,7 +1101,6 @@ mod tests {
         let config = AgentConfig::new("model", "agent", "prompt").with_tools();
 
         assert!(config.is_tool_enabled());
-        assert!(config.is_cot_enabled());
     }
 
     #[test]

@@ -1,7 +1,8 @@
-//! demo42_browser_mcp.rs —— Playwright MCP 浏览器集成演示
+//! demo42_playwright_mcp.rs —— Playwright MCP 浏览器集成演示
 //!
 //! 展示 echo-agent 通过 MCP 配置文件连接 Playwright MCP 服务端，
 //! 使用浏览器自动化能力（导航、快照、截图、点击等）。
+//! 原生状态只作只读投影，真实 EOF 后才展示最终答案；用量来自 LlmUsage。
 //!
 //! # 架构
 //!
@@ -28,11 +29,13 @@
 //! cp examples/mcp.json.example mcp.json
 //!
 //! # 2. 运行示例
-//! cargo run -p echo-agent-learning --example demo42_browser_mcp --features mcp
+//! cargo run -p echo-agent-learning --example demo42_playwright_mcp --features mcp
 //! ```
 
 mod support;
 
+use echo_agent::agent::{AgentOutputProjection, AssistantPhase, ExecutionStatusKind};
+use echo_agent::error::{AgentError, AgentTerminalKind, ReactError};
 use echo_agent::mcp::McpConfigFile;
 use echo_agent::prelude::*;
 use futures::StreamExt;
@@ -119,30 +122,88 @@ async fn demo_agent_browser_task(_config: &McpConfigFile) -> echo_agent::error::
     // 使用 execute_stream 获取实时事件
     let mut stream = agent.execute_stream(task).await?;
     let mut tool_calls = 0usize;
-    let mut final_answer = String::new();
     let mut tool_errors = 0usize;
+    let owner_run = agent.current_run_id();
+    let mut output = AgentOutputProjection::default();
+    let mut first_error = None;
+    let mut unresolved = None::<ReactError>;
+    let same_source = |error: &ReactError, projection: &AgentOutputProjection| {
+        matches!(error, ReactError::ExecutionNotSettled { run_id, execution_id }
+            if owner_run.as_deref() == Some(run_id.as_str())
+                && execution_id.as_deref().is_some()
+                && execution_id.as_deref() == projection.execution_id())
+    };
 
+    // 工具错误、取消或最终通知都不提前 drop 原 stream。
     while let Some(event) = stream.next().await {
-        match event? {
-            AgentEvent::Token(_) => {
-                // Token 流式输出，这里不实时显示以避免刷屏
+        let observed = match event {
+            Err(error @ ReactError::ExecutionNotSettled { .. }) => {
+                // 未结算观察不是终态；foreign 观察不会被这条 source 的完成覆盖。
+                if unresolved
+                    .as_ref()
+                    .is_none_or(|prior| same_source(prior, &output))
+                {
+                    unresolved = Some(error);
+                }
+                Ok(())
             }
-            AgentEvent::ThinkStart => {
-                print!("\n🤔 思考中...");
+            Ok(AgentEvent::ExecutionStatus(status)) => {
+                output.observe_status(&status).map(|changed| {
+                    if changed
+                        && matches!(
+                            status.status,
+                            ExecutionStatusKind::Settled
+                                | ExecutionStatusKind::Failed
+                                | ExecutionStatusKind::Cancelled
+                        )
+                        && unresolved
+                            .as_ref()
+                            .is_some_and(|prior| same_source(prior, &output))
+                    {
+                        unresolved = None;
+                    }
+                    if let Some(error) = output.terminal_failure() {
+                        first_error.get_or_insert(error);
+                    }
+                })
             }
-            AgentEvent::ThinkEnd {
+            Ok(AgentEvent::AssistantMessage { block }) => {
+                output.observe_block(&block).map(|delta| {
+                    if let Some(delta) = delta {
+                        // 浏览器示例保留末尾一次展示答案；推理/进度独立显示，不打印重放密文。
+                        match delta.block.phase {
+                            AssistantPhase::Reasoning if !delta.text.is_empty() => {
+                                println!("\n[推理] {}", delta.text)
+                            }
+                            AssistantPhase::Commentary if !delta.text.is_empty() => {
+                                println!("\n[进度] {}", delta.text)
+                            }
+                            _ => {}
+                        }
+                    }
+                })
+            }
+            Ok(AgentEvent::LlmUsage {
+                model,
                 prompt_tokens,
                 completion_tokens,
-            } => {
-                println!(
-                    " (prompt={}, completion={})",
-                    prompt_tokens, completion_tokens
-                );
+                total_tokens,
+                usage_reported,
+                ..
+            }) => {
+                if usage_reported {
+                    println!(
+                        "\n[LLM 用量] model={model}, prompt={prompt_tokens}, completion={completion_tokens}, total={total_tokens}"
+                    );
+                } else {
+                    println!("\n[LLM 用量] model={model}，上游未报告用量");
+                }
+                Ok(())
             }
-            AgentEvent::ToolCall { invocation, .. } => {
+            Ok(AgentEvent::ToolCall { invocation, .. }) => {
                 let name = invocation.name;
                 let args = invocation.args;
-                tool_calls += 1;
+                tool_calls = tool_calls.saturating_add(1);
                 println!("\n🔧 调用工具: {}", name);
                 let args_str = serde_json::to_string_pretty(&args).unwrap_or_default();
                 // 只显示前 200 字符的参数
@@ -151,8 +212,9 @@ async fn demo_agent_browser_task(_config: &McpConfigFile) -> echo_agent::error::
                 if args_str.chars().count() > 200 {
                     println!("   ... (参数过长，已截断)");
                 }
+                Ok(())
             }
-            AgentEvent::ToolResult { name, result, .. } => {
+            Ok(AgentEvent::ToolResult { name, result, .. }) => {
                 if result.success {
                     let preview: String = result.output.chars().take(800).collect();
                     println!("\n✅ 工具返回: {}", name);
@@ -162,27 +224,43 @@ async fn demo_agent_browser_task(_config: &McpConfigFile) -> echo_agent::error::
                         println!("   ... (共 {} 字符)", output_chars);
                     }
                 } else {
-                    tool_errors += 1;
+                    tool_errors = tool_errors.saturating_add(1);
                     println!("\n❌ 工具错误: {}", name);
                     println!("   错误: {}", result.error.unwrap_or(result.output));
                 }
+                Ok(())
             }
-            AgentEvent::FinalAnswer(answer) => {
-                final_answer = answer.clone();
-                println!("\n═══════════════════════════════════════════════════════");
-                println!("最终答案:");
-                println!("{}", answer);
-                println!("═══════════════════════════════════════════════════════\n");
+            Ok(AgentEvent::FinalAnswer(answer)) => output.confirm_answer(&answer),
+            Ok(AgentEvent::Error { failure, .. }) => Err(match failure.terminal_kind {
+                AgentTerminalKind::Cancelled => AgentError::Cancelled(failure.message).into(),
+                AgentTerminalKind::TimedOut => AgentError::Timeout(failure.message).into(),
+                AgentTerminalKind::PermissionDenied => {
+                    AgentError::PermissionDenied(failure.message).into()
+                }
+                _ => ReactError::Other(failure.message),
+            }),
+            Ok(AgentEvent::Cancelled) => {
+                Err(AgentError::Cancelled("原生 Agent source 已取消".into()).into())
             }
-            AgentEvent::Cancelled => {
-                println!("\n⚠️  Agent 执行被取消\n");
-                break;
-            }
-            _ => {
-                // 其他事件暂时忽略
-            }
+            Err(error) => Err(error),
+            _ => Ok(()),
+        };
+        if let Err(error) = observed {
+            first_error.get_or_insert(error);
         }
     }
+    if let Some(error) = unresolved {
+        return Err(error);
+    }
+    if let Some(error) = first_error {
+        return Err(error);
+    }
+    let final_answer = output.finish()?;
+
+    println!("\n═══════════════════════════════════════════════════════");
+    println!("最终答案:");
+    println!("{final_answer}");
+    println!("═══════════════════════════════════════════════════════\n");
 
     if tool_calls == 0 || final_answer.trim().is_empty() || tool_errors > 0 {
         return Err(echo_agent::error::ReactError::Other(format!(

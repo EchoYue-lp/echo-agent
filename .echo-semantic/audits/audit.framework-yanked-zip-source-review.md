@@ -24,6 +24,21 @@ challenges:
     - docs/adr/0089-non-yanked-media-dependencies.md
     evidence_refs:
     - evidence.framework-yanked-zip-repair
+  post-merge-source-adoption-and-exact-main-ci:
+    revision: 51726454985fd6f064b21a7e9c539e22d494c987
+    source_refs:
+    - Cargo.toml
+    - Cargo.lock
+    - echo-tools/Cargo.toml
+    - echo-tools/tests/zip9_media_compat.rs
+    - vendor/README.md
+    - vendor/registry-origins.toml
+    - scripts/generate-vendored-media-audit-lock.py
+    - scripts/tests/test_vendored_media_audit_lock.py
+    - .github/workflows/rust-ci.yml
+    - docs/adr/0089-non-yanked-media-dependencies.md
+    evidence_refs:
+    - evidence.framework-yanked-zip-repair
 ---
 
 # ZIP source-adaptation independent review
@@ -86,3 +101,40 @@ The later four-file EOF-only import normalization removes exactly four terminal 
 ## Full execution evidence increment
 
 The current evidence binds actual7110 execution: prescribed6+independent17 all0, complete raw SHA/bytes, all1763 input maps identical, compiler diagnostics0. Main Rust results3622/0/3 retain the original three opt-in tests and exclude the two repeated child-process result rows. New records do not rereview449 imported files or infer exact mainCI/consumer success. The independent final evidence review is limited to these execution/source-identity records and the Issue188 backlink; source and accepted contracts are unchanged.
+
+
+## Post-merge qualification — independent rereview
+
+The top-level revision and original challenge retain the actual7110 review and
+execution epoch. Only the new named challenge observes the later exact main
+`51726454985fd6f064b21a7e9c539e22d494c987`; the Evidence's original observation
+is not refreshed. The pending-main paragraphs above are historical, while the
+new source-adoption/CI section is the review input for this increment.
+
+The writer's checks found PR190 merged as9886502, exactly29 semantic-only
+candidate-to-squash differences, retained ZIP repair sources on the later main,
+and its actual lock/workflow successors. Main→c3b changes only the two contract
+documents. Read-only remote queries found run39984523075 completed/success with
+all seven same-head jobs, including dependency-policy; Issue188/189 remain open.
+The independent review must challenge a mistaken whole-source equivalence,
+relabeling of old6+17 as current execution, wrong CI head/status, and accidental
+closure/risk acceptance of the unavailable-history Finding.
+
+Independent reviewer `/root/review_framework_adr` reviewed the three-file
+post-merge increment read-only on 2026-10-24 and returned PASS, C0/I0/M0. The
+review input was frozen patch SHA-256
+`d4967ea0917e4bf2f824de7b9248d9264584f57f0a942e55db15b5e226cc4344`
+on base `c3b56b4ee8a73565e6a2a621b9a7ddfb644ed3aa`; that patch still kept the
+Finding open. The reviewer independently checked the Git adoption/ancestry,
+lock and retained repair sources, and queried PR190 and the exact-main run and
+jobs, including successful dependency-policy scanning steps. The reviewer
+confirmed the original three-link chain and byte-identical Issue189 Finding.
+The conclusion explicitly supports local resolved settlement after this real
+rereview is recorded and the normal semantic checks pass. This record is added
+after that review, not misrepresented as part of the reviewed patch; the final
+state/record increment receives a separate read-only confirmation before commit.
+The candidate ledger's earlier PASS0 is a different review and is not reused as
+the formal rereview. External Issue188 remains open and requires a separate action.
+No new local Rust/scanner run, real SDK/CLI consumer acceptance, registry
+publication, comprehensive imported-code audit or historical-tree recovery is
+claimed. The current contribution changes only the three existing ZIP objects.

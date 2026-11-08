@@ -30,7 +30,6 @@ use crate::skills::SkillRegistry;
 use crate::skills::hooks::HookRegistry;
 #[cfg(feature = "subagent")]
 use crate::tools::builtin::agent_dispatch::AgentDispatchTool;
-use crate::tools::builtin::answer::FinalAnswerTool;
 use crate::tools::builtin::cell_tools::{ListCellsTool, StopCellTool, WaitCellTool};
 #[cfg(feature = "human-loop")]
 use crate::tools::builtin::human_in_loop::HumanInLoop;
@@ -75,20 +74,20 @@ mod extract;
 pub(crate) use extract::PreparedResponseFormat;
 mod lifecycle;
 pub mod run;
+#[cfg(test)]
+mod store_authority_tests;
 pub mod structured;
 pub(crate) mod subsystems;
 #[cfg(test)]
 mod tests;
-// ── Built-in tool name constants ────────────────────────────────────────────────
-
-pub(crate) const TOOL_FINAL_ANSWER: &str = "final_answer";
-
 /// Returns `true` if the LLM error is worth retrying (network, timeout, rate-limit, server 5xx).
 pub(crate) fn is_retryable_llm_error(err: &ReactError) -> bool {
     match err {
         ReactError::Llm(e) => match e.as_ref() {
             LlmError::NetworkError(_) => true,
             LlmError::ApiError { status, .. } => *status == 429 || *status >= 500,
+            LlmError::ProviderError { retryable, .. } => *retryable,
+            LlmError::IncompleteResponse { .. } => false,
             _ => false,
         },
         _ => false,
@@ -124,61 +123,6 @@ pub(crate) fn merge_model_profile_resolution(
 }
 
 // ── ReactAgent struct ───────────────────────────────────────────────────────────
-
-#[derive(Clone, Default)]
-pub(crate) struct LegacyExternalContextSnapshot {
-    pub conversation_id: Option<String>,
-    pub current_run_id: Option<String>,
-    pub turn_id: Option<String>,
-    pub execution_id: Option<String>,
-    pub isolation_id: Option<String>,
-    pub message_id: Option<String>,
-    pub cancel: Option<std::sync::Arc<tokio_util::sync::CancellationToken>>,
-    pub trace_sink: Option<echo_core::tools::TraceSinkFn>,
-    pub delegation_policy: Option<echo_core::tools::NestedDelegationPolicy>,
-    pub resource_guards: Vec<echo_core::tools::InvocationResourceGuard>,
-}
-
-impl LegacyExternalContextSnapshot {
-    #[cfg(feature = "subagent")]
-    fn is_empty(&self) -> bool {
-        self.conversation_id.is_none()
-            && self.current_run_id.is_none()
-            && self.turn_id.is_none()
-            && self.execution_id.is_none()
-            && self.isolation_id.is_none()
-            && self.message_id.is_none()
-            && self.cancel.is_none()
-            && self.trace_sink.is_none()
-            && self.delegation_policy.is_none()
-            && self.resource_guards.is_empty()
-    }
-
-    #[cfg(feature = "subagent")]
-    fn to_runtime_context(
-        &self,
-        conversation_id: Option<String>,
-    ) -> Option<echo_core::tools::ExternalRunContext> {
-        let effective_conversation_id = self.conversation_id.clone().or(conversation_id);
-        if self.is_empty() && effective_conversation_id.is_none() {
-            return None;
-        }
-        Some(echo_core::tools::ExternalRunContext {
-            conversation_id: effective_conversation_id,
-            run_id: self.current_run_id.clone(),
-            turn_id: self.turn_id.clone(),
-            execution_id: self.execution_id.clone(),
-            isolation_id: self.isolation_id.clone(),
-            message_id: self.message_id.clone(),
-            cancel: self.cancel.clone(),
-            trace_sink: self.trace_sink.clone(),
-            delegation_policy: self.delegation_policy,
-            resource_guards: self.resource_guards.clone(),
-            subagent_lineage: None,
-            uplink: None,
-        })
-    }
-}
 
 /// ReAct (Reasoning + Acting) Agent implementation.
 ///
@@ -233,38 +177,6 @@ pub struct ReactAgent {
     pub(crate) diagnostic_delivery_observer:
         Option<Arc<dyn crate::audit::DiagnosticDeliveryObserver>>,
 
-    /// Product/business run ID propagated into tools and projections.
-    current_run_id: std::sync::Mutex<Option<String>>,
-
-    /// Unique trace invocation ID used only by the framework run store.
-    current_trace_run_id: std::sync::Mutex<Option<String>>,
-
-    /// 外部 run 级上下文（跨 spawn 安全，值传递）。
-    ///
-    /// `tokio::task_local!` 不会跨 `tokio::spawn` 继承——subagent 在框架层
-    /// 的 dispatch_fork spawn 里执行时，应用层经 task_local 注入的 run_id /
-    /// cancel / trace_sink 全部丢失。这里改用 Mutex 字段承载
-    /// （set_external_context 设置，pipeline 构造 ToolContext 时读取），是跨
-    /// spawn 安全的值传递通路。
-    external_context_epoch: std::sync::Mutex<()>,
-    external_conversation_id: std::sync::Mutex<Option<String>>,
-    external_cancel: std::sync::Mutex<Option<std::sync::Arc<tokio_util::sync::CancellationToken>>>,
-    external_trace_sink: std::sync::Mutex<Option<echo_core::tools::TraceSinkFn>>,
-    external_delegation_policy: std::sync::Mutex<Option<echo_core::tools::NestedDelegationPolicy>>,
-    external_resource_guards: std::sync::Mutex<Vec<echo_core::tools::InvocationResourceGuard>>,
-    /// Stable execution id (`{task_id}:{attempt}`) set by the app layer before
-    /// dispatching a subagent, so `SubagentEvent.execution_id` carries a stable
-    /// identifier instead of bridge-side temp allocation. Carried as a Mutex
-    /// field (same cross-spawn pattern as the other external_* fields).
-    external_execution_id: std::sync::Mutex<Option<String>>,
-    /// Stable identity for reusable worktree/workspace isolation resources.
-    external_isolation_id: std::sync::Mutex<Option<String>>,
-    external_turn_id: std::sync::Mutex<Option<String>>,
-    /// Chat message id that triggered the run, forwarded to
-    /// `SubagentEvent::DispatchStarted.message_id` so the frontend can pin a
-    /// subagent stream to the right chat message block.
-    external_message_id: std::sync::Mutex<Option<String>>,
-
     /// Optional tool execution pipeline. When absent, the standard pipeline is used.
     pub(crate) tool_execution_pipeline: Option<Arc<run::pipeline::ToolExecutionPipeline>>,
 
@@ -273,7 +185,7 @@ pub struct ReactAgent {
     /// Used by the read-before-edit enforcement when `config.force_read_before_edit`
     /// is true. Entries are evicted when they exceed the TTL (30 min) or when
     /// the set exceeds `MAX_READ_FILES`.
-    pub(crate) recently_read_files: Arc<std::sync::Mutex<HashMap<String, std::time::Instant>>>,
+    pub(crate) recently_read_files: Arc<std::sync::Mutex<crate::agent::snapshot::FileReadHistory>>,
 
     /// Serializes all execution (chat, execute, stream) on this agent.
     ///
@@ -360,10 +272,6 @@ impl ReactAgent {
         self.turn_steer_mailbox
             .steer_tracked(expected_turn_id, message)
     }
-
-    /// Chain-of-thought preamble auto-injected before tool calls.
-    const COT_INSTRUCTION: &'static str =
-        "Before calling any tool, briefly describe your analysis and execution plan.";
 
     /// Create a new ReAct Agent instance.
     ///
@@ -566,7 +474,11 @@ impl ReactAgent {
             .unwrap_or_default();
 
         // ── Core tools ─────────────────────────────────────────────
-        tool_manager.register(Box::new(FinalAnswerTool));
+        // Final answers are produced by the native assistant-message path
+        // after Guard/Critic/Stop/persistence settlement. The former
+        // `final_answer` control tool is intentionally not registered for new
+        // executions; old transcripts remain readable through compatibility
+        // adapters only.
         let task_revision_service = Arc::new(echo_orchestration::tasks::TaskRevisionService::new(
             Arc::new(echo_orchestration::tasks::InMemoryRevisionedTaskStore::new()),
             Arc::new(echo_orchestration::tasks::DefaultTaskToolPolicy::default()),
@@ -695,11 +607,19 @@ impl ReactAgent {
                     store: store.clone(),
                 },
             );
-            let dispatch_tool = AgentDispatchTool::new(
-                subagent_executor.clone(),
-                config.agent_name.clone(),
-                CancellationToken::new(),
-            )
+            let dispatch_tool = if config.readonly_tools {
+                AgentDispatchTool::read_only(
+                    subagent_executor.clone(),
+                    config.agent_name.clone(),
+                    CancellationToken::new(),
+                )
+            } else {
+                AgentDispatchTool::new(
+                    subagent_executor.clone(),
+                    config.agent_name.clone(),
+                    CancellationToken::new(),
+                )
+            }
             .with_parent_context(factory);
             tool_manager.register(Box::new(dispatch_tool));
         }
@@ -738,6 +658,7 @@ impl ReactAgent {
                 #[cfg(feature = "subagent")]
                 subagent_executor,
                 skill_registry: SkillRegistry::new(),
+                default_skill_source: None,
                 progressive_skill_registry: None,
                 hook_registry,
                 #[cfg(feature = "mcp")]
@@ -780,18 +701,6 @@ impl ReactAgent {
             turn_steer_mailbox: Arc::new(crate::agent::steer::TurnSteerMailbox::default()),
             run_store: None,
             diagnostic_delivery_observer: None,
-            current_run_id: std::sync::Mutex::new(None),
-            current_trace_run_id: std::sync::Mutex::new(None),
-            external_context_epoch: std::sync::Mutex::new(()),
-            external_conversation_id: std::sync::Mutex::new(None),
-            external_cancel: std::sync::Mutex::new(None),
-            external_trace_sink: std::sync::Mutex::new(None),
-            external_delegation_policy: std::sync::Mutex::new(None),
-            external_resource_guards: std::sync::Mutex::new(Vec::new()),
-            external_execution_id: std::sync::Mutex::new(None),
-            external_isolation_id: std::sync::Mutex::new(None),
-            external_turn_id: std::sync::Mutex::new(None),
-            external_message_id: std::sync::Mutex::new(None),
             tool_execution_pipeline: None,
             recently_read_files: Arc::new(std::sync::Mutex::new(HashMap::new())),
             mutable_system_prompt: std::sync::RwLock::new(None),
@@ -914,11 +823,8 @@ impl ReactAgent {
         // what provider-side prompt caching (DeepSeek KVCache, Anthropic
         // prompt cache, OpenAI prefix cache) keys on — any change to it
         // invalidates the entire cache.
-        let mut prompt = if config.enable_tool && config.enable_cot {
-            format!("{}\n\n{}", base.trim_end(), Self::COT_INSTRUCTION,)
-        } else {
-            base.to_string()
-        };
+        // 普通进度与原生 reasoning 由模型/provider明确区分，不注入强制分析提示。
+        let mut prompt = base.to_string();
 
         if let Some(suffix) = config
             .model_profile
@@ -970,13 +876,23 @@ impl ReactAgent {
     fn register_feature_gated_tools(config: &AgentConfig, tool_manager: &mut ToolManager) {
         if config.enable_tool {
             use echo_core::tools::ToolPack;
-            let pack = config.command_cells.as_ref().map_or_else(
+            #[allow(unused_mut)]
+            let mut pack = config.command_cells.as_ref().map_or_else(
                 echo_tools::StandardToolPack::new,
                 |cells| {
                     echo_tools::StandardToolPack::new()
                         .with_command_cells(std::sync::Arc::clone(cells))
                 },
             );
+            #[cfg(feature = "files")]
+            if let Some(file_system) = &config.file_system {
+                pack = pack.with_file_system(std::sync::Arc::clone(file_system));
+            }
+            #[cfg(feature = "files")]
+            {
+                // 提供者只转交给 `grep`；`None` 时保持标准工具包原状。
+                pack = pack.with_content_search_provider(config.content_search_provider.clone());
+            }
             if config.readonly_tools {
                 pack.install_read_only(tool_manager);
             } else {
@@ -1304,34 +1220,35 @@ impl ReactAgent {
         &self.calibrated_tokenizer
     }
 
-    /// Inject a custom long-term memory Store (replaces the injection channel only; does not re-register tools).
+    /// 仅替换自动注入使用的 Store；保留现有工具注册。
     ///
-    /// Also rewires L3 compression promotion to the same Store so evicted context
-    /// and future recall queries stay on one backing store. This synchronous
-    /// setter is best called during construction; if the context lock is held,
-    /// use [`Self::install_store`] from async code.
-    pub fn set_store(&mut self, store: Arc<dyn Store>) {
-        self.memory.store = Some(store.clone());
-        if let Ok(mut ctx) = self.memory.context.try_lock() {
-            if let Some(layer_manager) = &self.memory_layer_manager {
-                ctx.set_memory_promoter(Arc::new(
-                    crate::memory_promoter::StoreMemoryPromoter::new(layer_manager.clone()),
-                ));
-            } else {
-                ctx.remove_memory_promoter();
-            }
+    /// 已有 layer manager 时必须传入其持有的同一 Store。
+    /// 身份不符或 context 正忙时返回错误，不发布部分变化；异步调用可用
+    /// [`Self::install_store`] 等待 context 锁。
+    pub fn set_store(&mut self, store: Arc<dyn Store>) -> Result<()> {
+        self.validate_memory_store_authority(&store)?;
+        let mut context = self.memory.context.try_lock().map_err(|_| {
+            ReactError::Other(
+                "ContextManager is busy; use install_store from an async context".into(),
+            )
+        })?;
+        if let Some(layer_manager) = &self.memory_layer_manager {
+            context.set_memory_promoter(Arc::new(
+                crate::memory_promoter::StoreMemoryPromoter::new(layer_manager.clone()),
+            ));
         } else {
-            tracing::warn!(
-                "Could not acquire ContextManager lock to set memory promoter; \
-                 use install_store() from an async context if the agent is already running"
-            );
+            context.remove_memory_promoter();
         }
+        self.memory.store = Some(store);
+        Ok(())
     }
 
-    /// Async variant of [`Self::set_store`] that safely rewires L3 promotion
-    /// after the agent has started running.
-    pub async fn install_store(&mut self, store: Arc<dyn Store>) {
-        self.memory.store = Some(store.clone());
+    /// [`Self::set_store`] 的异步版本；等待锁期间不发布 Store 变化。
+    ///
+    /// 不同 manager Store 立即返回错误；取得锁后到 promoter 与 Store
+    /// 发布完成之间没有 await，取消等待不会留下部分切换。
+    pub async fn install_store(&mut self, store: Arc<dyn Store>) -> Result<()> {
+        self.validate_memory_store_authority(&store)?;
         let mut context = self.memory.context.lock().await;
         if let Some(layer_manager) = &self.memory_layer_manager {
             context.set_memory_promoter(Arc::new(
@@ -1340,6 +1257,22 @@ impl ReactAgent {
         } else {
             context.remove_memory_promoter();
         }
+        self.memory.store = Some(store);
+        Ok(())
+    }
+
+    // 四个安装入口共用 ADR 0070 的身份约束，避免 recall、writer 与公开
+    // Store 分裂。此处只校验，不变更 manager 或工具注册。
+    fn validate_memory_store_authority(&self, store: &Arc<dyn Store>) -> Result<()> {
+        if let Some(layer_manager) = &self.memory_layer_manager
+            && !Arc::ptr_eq(store, layer_manager.store())
+        {
+            return Err(ReactError::Other(
+                "MemoryLayerManager owns a different Store; replace the manager to change memory storage"
+                    .into(),
+            ));
+        }
+        Ok(())
     }
 
     /// Replace the context-compression memory promoter.
@@ -1376,14 +1309,7 @@ impl ReactAgent {
     /// # }
     /// ```
     pub fn set_memory_store(&mut self, store: Arc<dyn Store>) -> Result<()> {
-        if let Some(layer_manager) = &self.memory_layer_manager
-            && !Arc::ptr_eq(&store, layer_manager.store())
-        {
-            return Err(ReactError::Other(
-                "MemoryLayerManager owns a different Store; replace the manager to change memory storage"
-                    .into(),
-            ));
-        }
+        self.validate_memory_store_authority(&store)?;
         let mut context = self.memory.context.try_lock().map_err(|_| {
             ReactError::Other(
                 "ContextManager is busy; use install_memory_store from an async context".into(),
@@ -1416,14 +1342,7 @@ impl ReactAgent {
     /// `try_lock`, so the `MemoryPromoter` and tool registrations always
     /// take effect — no silent fallback.
     pub async fn install_memory_store(&mut self, store: Arc<dyn Store>) -> Result<()> {
-        if let Some(layer_manager) = &self.memory_layer_manager
-            && !Arc::ptr_eq(&store, layer_manager.store())
-        {
-            return Err(ReactError::Other(
-                "MemoryLayerManager owns a different Store; replace the manager to change memory storage"
-                    .into(),
-            ));
-        }
+        self.validate_memory_store_authority(&store)?;
         let mut context = self.memory.context.lock().await;
         let ns = crate::evolution::layer::WARM_NAMESPACE
             .iter()
@@ -1784,6 +1703,13 @@ impl ReactAgent {
     /// Set the sandbox manager to provide secure isolation for skill script execution.
     pub fn set_sandbox_manager(&mut self, manager: Arc<SandboxManager>) {
         self.set_sandbox_executor(manager);
+    }
+
+    /// Clone the immutable file target selected for this host. `None` retains
+    /// native local behavior; callers must not infer the current GUI selection.
+    #[cfg(feature = "files")]
+    pub fn file_system(&self) -> Option<Arc<dyn echo_core::tools::filesystem::FileSystem>> {
+        self.config.file_system.clone()
     }
 
     /// Set an application-supplied sandbox executor. This is the generic
@@ -2182,45 +2108,94 @@ impl ReactAgent {
     /// restores them into the context manager.
     ///
     /// Returns checkpoint metadata if a checkpoint was found and restored, or
-    /// `None` if no state store is configured or no checkpoint exists. Legacy
-    /// plan data remains in the returned record but is not restored into ReAct.
+    /// `None` if no state store is configured or no checkpoint exists.
     pub async fn resume_from_state_store(&self) -> Result<Option<crate::state::AgentCheckpoint>> {
         self.validate_persistence_configuration()?;
-        let _execution_guard = self.execution_mutex.lock().await;
-        let snapshot = crate::agent::snapshot::AgentRunSnapshot::from_agent(self);
-        if let Some(settlement) = snapshot.reconcile_pending_transcript_projection().await?
-            && settlement.status != crate::memory::TranscriptProjectionSettlementStatus::Settled
-        {
-            return Err(crate::agent::snapshot::transcript_settlement_admission_error(&settlement));
-        }
-        let Some(runtime_state_id) = self.config.conversation_id.clone() else {
-            tracing::debug!("resume_from_state_store: no conversation_id configured");
-            return Ok(None);
+        // 此操作首次真实admission；未有业务run也保原lease/锁/资源，不捏造run id。
+        let (mut lease, cancel) = self.close_authority.admit(None)?;
+        let invocation = echo_core::agent::AgentInvocationContext {
+            cancel: Some(cancel.clone()),
+            ..Default::default()
         };
-        let previous_hydration = self
-            .begin_runtime_state_hydration(Some(&runtime_state_id))
-            .await;
-        self.clear_runtime_snapshots();
-        let checkpoint = self.resume_from_state_store_id(&runtime_state_id).await?;
-        if checkpoint.is_some() {
-            self.commit_runtime_state_hydration(Some(&runtime_state_id))
-                .await;
-        } else {
-            *self.memory.runtime_state_hydration.lock().await = previous_hydration;
+        let execution = self.execution_mutex.clone().lock_owned().await;
+        if cancel.is_cancelled() {
+            return Err(crate::error::ReactError::Other(
+                "Agent close cancelled recovery before preparation".to_string(),
+            ));
         }
-        Ok(checkpoint)
+        lease.mark_started();
+        let mut snapshot =
+            crate::agent::snapshot::AgentRunSnapshot::from_agent_with_invocation(self, &invocation);
+        let mut owner =
+            run::stream_channel::ReactStreamTurnOwner::preparation(&snapshot, lease, execution);
+        snapshot.trace_run_id = self
+            .start_scoped_trace_run(
+                "[resume checkpoint]",
+                None,
+                snapshot.config.conversation_id.as_deref(),
+                None,
+                None,
+            )
+            .await;
+        let result = async {
+            if let Some(settlement) = snapshot.reconcile_pending_transcript_projection().await?
+                && settlement.status != crate::memory::TranscriptProjectionSettlementStatus::Settled
+            {
+                return Err(
+                    crate::agent::snapshot::transcript_settlement_admission_error(&settlement),
+                );
+            }
+            let Some(runtime_state_id) = self.config.conversation_id.clone() else {
+                tracing::debug!("resume_from_state_store: no conversation_id configured");
+                return Ok(None);
+            };
+            let previous_hydration = self
+                .begin_runtime_state_hydration(Some(&runtime_state_id))
+                .await;
+            self.clear_runtime_snapshots();
+            let checkpoint = self
+                .resume_from_state_store_id(&runtime_state_id, &snapshot)
+                .await?;
+            if checkpoint.is_some() {
+                self.commit_runtime_state_hydration(Some(&runtime_state_id))
+                    .await;
+            } else {
+                *self.memory.runtime_state_hydration.lock().await = previous_hydration;
+            }
+            Ok(checkpoint)
+        }
+        .await;
+        if !matches!(
+            &result,
+            Err(crate::error::ReactError::ExecutionNotSettled { .. })
+        ) {
+            snapshot
+                .finalize_run(
+                    if result.is_ok() {
+                        crate::trace::RunStatus::Completed
+                    } else {
+                        crate::trace::RunStatus::Failed
+                    },
+                    None,
+                    result.as_ref().err().map(ToString::to_string).as_deref(),
+                )
+                .await;
+        }
+        owner.observe_preparation_result(&result);
+        result
     }
 
     pub(crate) async fn resume_from_state_store_id(
         &self,
         runtime_state_id: &str,
+        snapshot: &crate::agent::snapshot::AgentRunSnapshot,
     ) -> Result<Option<crate::state::AgentCheckpoint>> {
         let scope_id = self
             .config
             .conversation_id
             .as_deref()
             .unwrap_or(runtime_state_id);
-        self.resume_from_state_store_scope(scope_id, runtime_state_id)
+        self.resume_from_state_store_scope(scope_id, runtime_state_id, Some(snapshot))
             .await
     }
 
@@ -2228,6 +2203,7 @@ impl ReactAgent {
         &self,
         scope_id: &str,
         runtime_state_id: &str,
+        trace_snapshot: Option<&crate::agent::snapshot::AgentRunSnapshot>,
     ) -> Result<Option<crate::state::AgentCheckpoint>> {
         self.validate_persistence_configuration()?;
         let Some(ref store) = self.memory.state_store else {
@@ -2235,19 +2211,16 @@ impl ReactAgent {
         };
 
         let managed = self.memory.conversation_store.is_some();
-        let (checkpoint, runtime_version) = if managed {
+        let (checkpoint, runtime_version) = if managed
+            || store.runtime_state_capability()
+                == crate::state::RuntimeStateCapability::RevisionedV1
+        {
             let timeout = std::time::Duration::from_secs(10);
             let context = crate::memory::PersistenceCallContext::with_timeout(timeout)?;
-            let loaded = tokio::time::timeout(
-                timeout,
-                store.load_runtime_state_with_context(context, scope_id, runtime_state_id),
-            )
-            .await
-            .map_err(|_| {
-                echo_core::error::RuntimeStateError::DeadlineExceeded(
-                    "runtime state hydration".to_string(),
-                )
-            })??;
+            // 同一Store load也可能修复scope，await真实结算；deadline由原context传播。
+            let loaded = store
+                .load_runtime_state_with_context(context, scope_id, runtime_state_id)
+                .await?;
             match loaded {
                 Some(state) => (state.checkpoint, Some(state.version)),
                 None => (None, Some(crate::state::RuntimeStateVersion::Absent)),
@@ -2302,12 +2275,15 @@ impl ReactAgent {
                 );
             }
 
-            self.record_trace_event(crate::trace::RunEvent::CheckpointResumed {
-                conversation_id: runtime_state_id.to_string(),
-                completed_tool_call_ids: completed_tool_call_ids.clone(),
-                checkpoint_timestamp: cp.timestamp,
-            })
-            .await;
+            if let Some(snapshot) = trace_snapshot {
+                snapshot
+                    .record_event(crate::trace::RunEvent::CheckpointResumed {
+                        conversation_id: runtime_state_id.to_string(),
+                        completed_tool_call_ids: completed_tool_call_ids.clone(),
+                        checkpoint_timestamp: cp.timestamp,
+                    })
+                    .await;
+            }
             tracing::info!(
                 conversation_id = runtime_state_id,
                 message_count = msg_count,
@@ -2393,51 +2369,6 @@ impl ReactAgent {
     }
 
     // ── Trace / run recording ─────────────────────────────────────────────────
-
-    /// Record a trace event to the current run (if a run store is attached).
-    /// Also publishes trace lifecycle to global event bus for audit subscribers.
-    pub(crate) async fn record_trace_event(&self, mut event: crate::trace::RunEvent) {
-        let run_id = self
-            .current_trace_run_id
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone();
-        event.apply_retention(&echo_core::utils::retention::ContentRetentionPolicy::default());
-        if let (Some(store), Some(run_id)) = (&self.run_store, &run_id)
-            && let Err(e) = store.append_event(run_id, event).await
-        {
-            self.report_diagnostic_delivery_failure(crate::audit::DiagnosticDeliveryFailure::new(
-                crate::audit::DiagnosticRecordKind::Trace,
-                crate::audit::DiagnosticDeliveryOperation::Append,
-                Some(run_id.clone()),
-                e.to_string(),
-            ));
-        }
-    }
-
-    pub(crate) async fn start_legacy_trace_run(
-        &self,
-        input: &str,
-        legacy: &LegacyExternalContextSnapshot,
-    ) -> Option<String> {
-        let trace_run_id = self
-            .start_scoped_trace_run(
-                input,
-                legacy.current_run_id.as_deref(),
-                legacy
-                    .conversation_id
-                    .as_deref()
-                    .or(self.config.conversation_id.as_deref()),
-                legacy.turn_id.as_deref(),
-                legacy.execution_id.as_deref(),
-            )
-            .await;
-        *self
-            .current_trace_run_id
-            .lock()
-            .unwrap_or_else(|error| error.into_inner()) = trace_run_id.clone();
-        trace_run_id
-    }
 
     /// Start a trace run without mutating the agent-wide product run id.
     pub(crate) async fn start_scoped_trace_run(
@@ -2608,13 +2539,11 @@ impl ReactAgent {
                 .first()
                 .map(|d| d.name.clone())
                 .unwrap_or_else(|| "default".to_string());
-            let legacy = self.capture_legacy_external_context();
-            let cancel = legacy
-                .cancel
-                .as_ref()
-                .map(|token| token.as_ref().child_token())
-                .unwrap_or_default();
-            let runtime_context = legacy.to_runtime_context(self.config.conversation_id.clone());
+            let cancel = CancellationToken::new();
+            let runtime_context = Some(echo_core::tools::ExternalRunContext {
+                conversation_id: self.config.conversation_id.clone(),
+                ..Default::default()
+            });
 
             let req = DispatchRequest {
                 agent_name,
@@ -2684,13 +2613,11 @@ impl ReactAgent {
 
         let mode = ExecutionMode::Fork;
         let inheritance = crate::agent::subagent::context::ContextInheritance::fresh_default();
-        let legacy = self.capture_legacy_external_context();
-        let cancel = legacy
-            .cancel
-            .as_ref()
-            .map(|token| token.as_ref().child_token())
-            .unwrap_or_default();
-        let runtime_context = legacy.to_runtime_context(self.config.conversation_id.clone());
+        let cancel = CancellationToken::new();
+        let runtime_context = Some(echo_core::tools::ExternalRunContext {
+            conversation_id: self.config.conversation_id.clone(),
+            ..Default::default()
+        });
         let req = DispatchRequest {
             agent_name: target.to_string(),
             task: task.to_string(),
@@ -2768,7 +2695,10 @@ impl ReactAgent {
             parent_label,
             cancel,
             depth,
-            self.build_runtime_context(),
+            Some(echo_core::tools::ExternalRunContext {
+                conversation_id: self.config.conversation_id.clone(),
+                ..Default::default()
+            }),
         )
         .await
     }
@@ -2776,9 +2706,8 @@ impl ReactAgent {
     /// Delegate a task with an explicit runtime context.
     ///
     /// This is the concurrency-safe product-layer entry point: callers that
-    /// already have a TaskRuntime context should pass it as a value on the
-    /// dispatch request instead of first writing it into this agent's shared
-    /// external-context fields. Multiple parallel dispatches can then carry
+    /// already have a TaskRuntime context pass its complete value on the
+    /// dispatch request. Multiple parallel dispatches can then carry
     /// different execution ids without overwriting each other.
     #[cfg(feature = "subagent")]
     pub async fn delegate_to_agent_with_parent_context_and_cancel(
@@ -2893,6 +2822,28 @@ impl ReactAgent {
     }
 
     #[cfg(feature = "subagent")]
+    fn target_delegation_policy(
+        depth: u32,
+        runtime_context: Option<&echo_core::tools::ExternalRunContext>,
+    ) -> Result<echo_core::tools::NestedDelegationPolicy> {
+        use crate::agent::subagent::executor::DispatchRequest;
+
+        if let Some(policy) = runtime_context.and_then(|context| context.delegation_policy) {
+            // 此入口的 depth 已指向目标 actor；完整策略与旧参数必须指向同一层，
+            // 不能重计一次派发，也不能用 legacy 默认上限覆盖调用方冻结的策略。
+            if u32::from(policy.delegate_depth) != depth {
+                return Err(echo_core::error::ReactError::Other(format!(
+                    "Subagent delegation depth mismatch: runtime policy {}, argument {depth}",
+                    policy.delegate_depth
+                )));
+            }
+            Ok(policy)
+        } else {
+            Ok(DispatchRequest::policy_from_depth(depth))
+        }
+    }
+
+    #[cfg(feature = "subagent")]
     #[allow(clippy::too_many_arguments)]
     async fn delegate_to_agent_with_prompt_payload_inner(
         &self,
@@ -2909,6 +2860,8 @@ impl ReactAgent {
     ) -> Result<crate::agent::subagent::SubagentResult> {
         use crate::agent::subagent::executor::DispatchRequest;
         use crate::agent::subagent::types::ExecutionMode;
+
+        let delegation_policy = Self::target_delegation_policy(depth, runtime_context.as_ref())?;
 
         // Verify the target agent exists in the registry
         let agents = self.tools.subagent_registry.list_available().await;
@@ -2940,7 +2893,7 @@ impl ReactAgent {
             cancel,
             parent_agent: parent_label.to_string(),
             parent_context,
-            delegation_policy: DispatchRequest::policy_from_depth(depth),
+            delegation_policy,
             runtime_context,
             message: None,
             prompt_payload,
@@ -2982,7 +2935,10 @@ impl ReactAgent {
             parent_label,
             cancel,
             depth,
-            self.build_runtime_context(),
+            Some(echo_core::tools::ExternalRunContext {
+                conversation_id: self.config.conversation_id.clone(),
+                ..Default::default()
+            }),
         )
         .await
     }
@@ -3129,6 +3085,8 @@ impl ReactAgent {
         use crate::agent::subagent::executor::DispatchRequest;
         use crate::agent::subagent::types::ExecutionMode;
 
+        let delegation_policy = Self::target_delegation_policy(depth, runtime_context.as_ref())?;
+
         let agents = self.tools.subagent_registry.list_available().await;
         if !agents.iter().any(|d| d.name == target) {
             return Err(echo_core::error::ReactError::Other(format!(
@@ -3157,7 +3115,7 @@ impl ReactAgent {
             cancel,
             parent_agent: parent_label.to_string(),
             parent_context,
-            delegation_policy: DispatchRequest::policy_from_depth(depth),
+            delegation_policy,
             runtime_context,
             message: Some(message),
             prompt_payload,
@@ -3175,175 +3133,6 @@ impl ReactAgent {
             self.tools.subagent_executor.dispatch(req).await?
         };
         Ok(result)
-    }
-
-    pub(crate) fn capture_legacy_external_context(&self) -> LegacyExternalContextSnapshot {
-        let _epoch = self
-            .external_context_epoch
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        LegacyExternalContextSnapshot {
-            conversation_id: self
-                .external_conversation_id
-                .lock()
-                .unwrap_or_else(|error| error.into_inner())
-                .clone(),
-            current_run_id: self
-                .current_run_id
-                .lock()
-                .unwrap_or_else(|error| error.into_inner())
-                .clone(),
-            turn_id: self
-                .external_turn_id
-                .lock()
-                .unwrap_or_else(|error| error.into_inner())
-                .clone(),
-            execution_id: self
-                .external_execution_id
-                .lock()
-                .unwrap_or_else(|error| error.into_inner())
-                .clone(),
-            isolation_id: self
-                .external_isolation_id
-                .lock()
-                .unwrap_or_else(|error| error.into_inner())
-                .clone(),
-            message_id: self
-                .external_message_id
-                .lock()
-                .unwrap_or_else(|error| error.into_inner())
-                .clone(),
-            cancel: self
-                .external_cancel
-                .lock()
-                .unwrap_or_else(|error| error.into_inner())
-                .clone(),
-            trace_sink: self
-                .external_trace_sink
-                .lock()
-                .unwrap_or_else(|error| error.into_inner())
-                .clone(),
-            delegation_policy: *self
-                .external_delegation_policy
-                .lock()
-                .unwrap_or_else(|error| error.into_inner()),
-            resource_guards: self
-                .external_resource_guards
-                .lock()
-                .unwrap_or_else(|error| error.into_inner())
-                .clone(),
-        }
-    }
-
-    pub(crate) fn capture_current_trace_run_id(&self) -> Option<String> {
-        self.current_trace_run_id
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .clone()
-    }
-
-    fn swap_legacy_external_context(
-        &self,
-        next: LegacyExternalContextSnapshot,
-    ) -> LegacyExternalContextSnapshot {
-        let _epoch = self
-            .external_context_epoch
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        let LegacyExternalContextSnapshot {
-            conversation_id,
-            current_run_id,
-            turn_id,
-            execution_id,
-            isolation_id,
-            message_id,
-            cancel,
-            trace_sink,
-            delegation_policy,
-            resource_guards,
-        } = next;
-        LegacyExternalContextSnapshot {
-            conversation_id: std::mem::replace(
-                &mut *self
-                    .external_conversation_id
-                    .lock()
-                    .unwrap_or_else(|error| error.into_inner()),
-                conversation_id,
-            ),
-            current_run_id: std::mem::replace(
-                &mut *self
-                    .current_run_id
-                    .lock()
-                    .unwrap_or_else(|error| error.into_inner()),
-                current_run_id,
-            ),
-            turn_id: std::mem::replace(
-                &mut *self
-                    .external_turn_id
-                    .lock()
-                    .unwrap_or_else(|error| error.into_inner()),
-                turn_id,
-            ),
-            execution_id: std::mem::replace(
-                &mut *self
-                    .external_execution_id
-                    .lock()
-                    .unwrap_or_else(|error| error.into_inner()),
-                execution_id,
-            ),
-            isolation_id: std::mem::replace(
-                &mut *self
-                    .external_isolation_id
-                    .lock()
-                    .unwrap_or_else(|error| error.into_inner()),
-                isolation_id,
-            ),
-            message_id: std::mem::replace(
-                &mut *self
-                    .external_message_id
-                    .lock()
-                    .unwrap_or_else(|error| error.into_inner()),
-                message_id,
-            ),
-            cancel: std::mem::replace(
-                &mut *self
-                    .external_cancel
-                    .lock()
-                    .unwrap_or_else(|error| error.into_inner()),
-                cancel,
-            ),
-            trace_sink: std::mem::replace(
-                &mut *self
-                    .external_trace_sink
-                    .lock()
-                    .unwrap_or_else(|error| error.into_inner()),
-                trace_sink,
-            ),
-            delegation_policy: std::mem::replace(
-                &mut *self
-                    .external_delegation_policy
-                    .lock()
-                    .unwrap_or_else(|error| error.into_inner()),
-                delegation_policy,
-            ),
-            resource_guards: std::mem::replace(
-                &mut *self
-                    .external_resource_guards
-                    .lock()
-                    .unwrap_or_else(|error| error.into_inner()),
-                resource_guards,
-            ),
-        }
-    }
-
-    /// 从当前 agent 的 external_* 字段构造 ExternalRunContext（透传给 subagent）。
-    ///
-    /// 这样主 agent 委派 subagent、subagent 委派 sub-subagent 时,run context 自动继承
-    /// （嵌套自然继承)。没有标识且没有资源 guard 时返回 None。
-    #[cfg(feature = "subagent")]
-    fn build_runtime_context(&self) -> Option<echo_core::tools::ExternalRunContext> {
-        let context = self.capture_legacy_external_context();
-        context.to_runtime_context(self.config.conversation_id.clone())
     }
 
     /// Build parent context using an explicit inheritance policy.
@@ -3432,31 +3221,7 @@ impl Agent for ReactAgent {
     }
 
     fn current_run_id(&self) -> Option<String> {
-        self.current_run_id
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone()
-    }
-
-    fn set_external_context(&self, ctx: &echo_core::tools::ExternalRunContext) {
-        let previous = self.swap_legacy_external_context(LegacyExternalContextSnapshot {
-            conversation_id: ctx.conversation_id.clone(),
-            current_run_id: ctx.run_id.clone(),
-            turn_id: ctx.turn_id.clone(),
-            execution_id: ctx.execution_id.clone(),
-            isolation_id: ctx.isolation_id.clone(),
-            message_id: ctx.message_id.clone(),
-            cancel: ctx.cancel.clone(),
-            trace_sink: ctx.trace_sink.clone(),
-            delegation_policy: ctx.delegation_policy,
-            resource_guards: ctx.resource_guards.clone(),
-        });
-        drop(previous);
-    }
-
-    fn clear_external_context(&self) {
-        let previous = self.swap_legacy_external_context(LegacyExternalContextSnapshot::default());
-        drop(previous);
+        self.turn_steer_mailbox.current_run_id()
     }
 
     fn set_working_dir(&self, path: Option<std::path::PathBuf>) {
@@ -3706,17 +3471,13 @@ impl Agent for ReactAgent {
 
     /// Get the list of tool definitions (name, description, parameter schema).
     fn tool_definitions(&self) -> Vec<crate::llm::types::ToolDefinition> {
-        let definitions = match self.llm_config.as_ref() {
+        match self.llm_config.as_ref() {
             Some(config) => self
                 .tools
                 .tool_manager
                 .get_tool_definitions_for_modalities(&config.input_modalities),
             None => self.tools.tool_manager.get_tool_definitions(),
-        };
-        definitions
-            .into_iter()
-            .filter(|d| d.function.name != TOOL_FINAL_ANSWER)
-            .collect()
+        }
     }
 
     fn disabled_tool_names(&self) -> std::collections::HashSet<String> {
@@ -4055,3 +3816,19 @@ impl ReactAgent {
         })
     }
 }
+
+// NEW_API_ONLY：附到src/agent/react/mod.rs的测试范围；仅测试原predicate，不修改重试循环。
+#[cfg(test)]
+mod incomplete_response_retry_contract_tests {
+    #[test]
+    fn incomplete_observation_never_enters_existing_retry_kernel() {
+        let error =
+            crate::error::ReactError::Llm(Box::new(crate::error::LlmError::IncompleteResponse {
+                partial: Box::new(crate::llm::types::Message::assistant("partial".into())),
+            }));
+        assert!(!super::is_retryable_llm_error(&error));
+    }
+}
+
+#[cfg(test)]
+mod store_authority_before_tests;

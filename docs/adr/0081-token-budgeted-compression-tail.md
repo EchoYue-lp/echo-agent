@@ -74,3 +74,32 @@ opt-in config and restores the old constructors; transcript history is retained.
 Regression coverage includes an exact Chinese request before a tool batch,
 whole recent turns, a split active turn, oversized input, repeated summary and
 incremental passes, protected budget accounting and pre-transform cancellation.
+
+## 补充决策：必要投影与最终请求的可用性
+
+有界引用能够避免将完整材料永久塞入 protected context，但读取引用必须在当前真实
+请求中可用。原 best-effort 投影失败后继续的策略仍适合可选观察，不能代表所有输入
+都是可选。框架因而在原 `PreModelContextProjector` 增加默认 false 的 `is_required`
+与默认成功的 `validate_model_request`，复用原 compact/think 错误消费点和有限执行
+生命周期。后者在最终请求构建后读取该请求与实际 artifact 配置，只核验、不改写。
+
+候选比较：全局将旧投影错误变 fatal 会破坏原可选消费者；应用共享失败标志、文本
+marker 解析或第二 validator 会脱离原 run 与调用；只确认注册表里存在 reader 会漏掉
+本次工具上界或 final-only 的移除。所选默认方法保留未采用者行为，把必须性留给调用方。
+
+选择 required 的失败沿既有 `AgentFailure.code` 传递
+`required_context_unavailable`，不新增错误枚举、SDK 协议、store 或执行器。
+原取消与物理未结算仍走自己的 typed 通道，不冒充来源缺失。应用用原暂停/恢复服务
+消费该代码；框架不认识产品 TaskRun 或 NeedsInput。
+
+本次已核实的一手模式依据是
+[LangChain 官方 middleware](https://docs.langchain.com/oss/python/langchain/middleware/custom.md)
+允许显式调用 handler、重试或重新抛出失败。将其用于必要输入失败阻断、可选输入
+显式降级，是结合本项目既有错误和上下文边界的推论；该文档没有本项目同名 API，
+也没有替本项目决定所有投影均为必要输入。
+
+验证包括 optional 失败旧行为、required 错误停止、取消/未结算保留，以及在真实
+最终请求中工具被移除时停止而模型零调用；本轮四项框架定向回归已实际通过。
+EKO 的正式任务与普通聊天也已通过具名的缺失来源暂停、恢复及硬工具上界回归。
+这些结果不代表完整有效要求、全部 consumer、SDK、全量 feature 矩阵或 main 已合格；
+产品来源身份、作用域与版本仍由应用自身的实际 consumer 证据负责。

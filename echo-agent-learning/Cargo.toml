@@ -10,15 +10,13 @@ description = "Learning lessons, runnable examples, and public-facade contracts 
 [features]
 default = []
 full = [
-    "acp", "a2a", "mcp", "lsp", "telemetry", "human-loop", "topology", "subagent",
+    "acp", "mcp", "telemetry", "human-loop", "topology", "subagent",
     "web", "media", "data", "sqlite", "channels", "git", "database", "rag",
     "chart", "content-guard", "project-rules", "shell", "files", "research",
     "eval", "improve", "statistics", "testing",
 ]
 acp = ["echo_agent/acp", "dep:agent-client-protocol"]
-a2a = ["echo_agent/a2a"]
 mcp = ["echo_agent/mcp"]
-lsp = ["echo_agent/lsp"]
 telemetry = ["echo_agent/telemetry"]
 human-loop = ["echo_agent/human-loop"]
 topology = ["echo_agent/topology"]
@@ -103,9 +101,6 @@ required-features = ["content-guard"]
 name = "demo20_audit"
 required-features = ["human-loop"]
 [[example]]
-name = "demo23_a2a"
-required-features = ["a2a"]
-[[example]]
 name = "demo27_sqlite_memory"
 required-features = ["sqlite"]
 [[example]]
@@ -140,7 +135,7 @@ name = "demo48_personal_assistant"
 required-features = ["sqlite", "subagent"]
 [[example]]
 name = "demo49_research_agent"
-required-features = ["sqlite", "web", "files"]
+required-features = ["sqlite", "web", "files", "subagent"]
 [[example]]
 name = "demo58_git_worktree"
 required-features = ["git"]

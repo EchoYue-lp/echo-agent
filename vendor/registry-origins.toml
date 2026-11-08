@@ -9,9 +9,9 @@ manifest = "vendor/rust_xlsxwriter-0.82.0/Cargo.toml"
 
 [[package]]
 name = "calamine"
-version = "0.36.1"
-checksum = "5fa68281b1a76b54a62156474adb06bb380a67e07dd60656e3217152b42183f3"
-manifest = "vendor/calamine-0.36.1/Cargo.toml"
+version = "0.38.0"
+checksum = "f431b67cba6122a1f7d26b7adafc71bbdf07026095fe811f5efc025d8748e1d8"
+manifest = "vendor/calamine-0.38.0/Cargo.toml"
 
 [[package]]
 name = "docx-rs"

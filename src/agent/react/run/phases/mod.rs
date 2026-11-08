@@ -5,7 +5,7 @@
 //! reviewable, the per-iteration work is split into focused phase functions:
 //!
 //! ```text
-//! prepare_turn  →  ┌─ run_compact ─→ run_think ─→ ┬─ run_tools (verifier-pass → finalize_completed_run)
+//! prepare_turn  →  ┌─ run_compact ─→ run_think ─→ ┬─ run_tools (回填结果后继续原循环)
 //!                  │                              ├─ verify_final_text (verifier-pass → emit_final_text)
 //!                  │                              └─ NoResponse → finalize_no_response
 //!                  └─ (loop continues …)         max_iterations exhausted → finalize_max_iterations
@@ -21,7 +21,6 @@
 use crate::agent::AgentEvent;
 use crate::agent::snapshot::AgentRunSnapshot;
 use crate::llm::types::{Message, ResponseFormat};
-use std::collections::HashMap;
 
 pub(crate) mod compact;
 pub(crate) mod finalize;
@@ -29,6 +28,27 @@ pub(crate) mod prepare;
 pub(crate) mod think;
 pub(crate) mod tools;
 pub(crate) mod verify;
+
+/// 必要输入不可用是可由应用恢复的执行拒绝，不是物理未结算观察。
+/// 使用原 typed failure envelope 的 code 扩点；取消和未结算仍保留原通道。
+pub(crate) fn required_context_failure_event(
+    snap: &AgentRunSnapshot,
+    error: crate::error::ReactError,
+) -> crate::error::Result<AgentEvent> {
+    let observed = crate::error::AgentFailure::try_from(&error)?;
+    if cancellation_requested(snap)
+        || observed.terminal_kind == crate::error::AgentTerminalKind::Cancelled
+    {
+        return Err(crate::error::AgentError::Cancelled(
+            "required context interrupted".to_string(),
+        )
+        .into());
+    }
+    Ok(AgentEvent::error_message(
+        "required_context_unavailable",
+        error.to_string(),
+    ))
+}
 
 pub(crate) fn cancellation_requested(snap: &AgentRunSnapshot) -> bool {
     snap.cancel_token
@@ -60,19 +80,49 @@ pub(crate) async fn wait_for_cancellation(snap: &AgentRunSnapshot) {
 }
 
 pub(crate) fn pre_model_block_terminal(
-    format: Option<&ResponseFormat>,
+    _format: Option<&ResponseFormat>,
     source: &str,
     reason: String,
 ) -> AgentEvent {
-    if format.is_some_and(ResponseFormat::is_json) {
-        AgentEvent::Error {
-            source: source.to_string(),
-            message: reason.clone(),
-            failure: crate::error::AgentFailure::message("other", reason),
+    // 输入被拒绝是失败事实，不能通过兼容FinalAnswer投影变成成功。
+    AgentEvent::error_message(source, reason)
+}
+
+/// 只从同request/block原观察派生最后明确phase；不改raw增量，也不据工具或正文猜类型。
+pub(super) fn effective_assistant_phase(
+    blocks: &[echo_core::agent::AssistantMessageBlock],
+    block: &echo_core::agent::AssistantMessageBlock,
+) -> echo_core::agent::AssistantPhase {
+    blocks
+        .iter()
+        .rev()
+        .find(|last| {
+            last.request_id == block.request_id
+                && last.block_id == block.block_id
+                && last.phase != echo_core::agent::AssistantPhase::Unknown
+        })
+        .map(|last| last.phase)
+        .unwrap_or(echo_core::agent::AssistantPhase::Unknown)
+}
+
+/// 文字阶段按完整块事实判定，空metadata不凭空制造进度或成功。
+pub(super) fn assistant_progress_only(blocks: &[echo_core::agent::AssistantMessageBlock]) -> bool {
+    let mut has_text = false;
+    for block in blocks {
+        let phase = effective_assistant_phase(blocks, block);
+        if phase == echo_core::agent::AssistantPhase::Reasoning {
+            continue;
         }
-    } else {
-        AgentEvent::FinalAnswer(reason)
+        if !matches!(
+            phase,
+            echo_core::agent::AssistantPhase::Commentary
+                | echo_core::agent::AssistantPhase::PartialAnswer
+        ) {
+            return false;
+        }
+        has_text |= !block.delta.is_empty();
     }
+    has_text
 }
 
 // ── Loop-level mutable state ─────────────────────────────────────────
@@ -82,8 +132,8 @@ pub(crate) fn pre_model_block_terminal(
 /// `agent` and `callbacks` are read directly from `snap.config` instead of
 /// being mirrored here — they're cheap to clone and never mutated.
 pub(crate) struct LoopState {
-    /// Whether the `Stop` lifecycle hook has already been allowed to inject a
-    /// continue_reason this turn. The hook is one-shot to avoid loops.
+    /// 本执行是否已按Stop反馈继续；传入Hook上下文帮助其避免重复。
+    /// 此标记不覆盖新的block/continue，原ReAct预算决定有界终止。
     pub stop_hook_continued: bool,
     /// Number of times the verifier has rejected an answer this turn.
     pub verifier_retry_count: usize,
@@ -151,7 +201,7 @@ pub(crate) enum CompactOutcome {
 /// What `run_think` produced for this iteration.
 pub(crate) enum ThinkOutcome {
     /// Stream consumed; tool calls / content / token usage extracted.
-    Continue(ThinkOutput),
+    Continue(Box<ThinkOutput>),
     /// Channel closed mid-think.
     Abandoned,
     /// This phase already settled persistence, trace, and one terminal event.
@@ -162,14 +212,24 @@ pub(crate) enum ThinkOutcome {
 
 /// Output of the think phase, fed into the tools or verify branches.
 pub(crate) struct ThinkOutput {
+    /// 同一模型请求最后有效的完整响应观察，沿原Message传递而非事件终态。
+    pub provider_response: Option<crate::llm::types::ProviderResponseMetadata>,
     /// Plain assistant text accumulated from streaming chunks.
     pub content_buffer: String,
+    /// 完整响应形成的最终候选；显式进度/部分回答不会进入该分支。
+    pub candidate_answer: Option<String>,
+    /// provider pause_turn等完整继续边界，不能冒充成功或异常EOF。
+    pub continue_response: bool,
     /// DeepSeek/Qwen reasoning accumulated for assistant-message replay.
     pub reasoning_buffer: String,
     /// Signed/redacted reasoning blocks required for provider-valid replay.
     pub reasoning_blocks: Vec<crate::llm::types::ReasoningBlock>,
+    /// Ordered native assistant blocks retained in the durable Message.
+    pub assistant_blocks: Vec<echo_core::agent::AssistantMessageBlock>,
+    /// 已通过输出校验且实际发布的块投影；raw块仍只供协议回放。
+    pub approved_assistant_blocks: Vec<echo_core::agent::AssistantMessageBlock>,
     /// Tool calls accumulated by index → (tool_call_id, function_name, args).
-    pub tool_call_map: HashMap<u32, (String, String, String)>,
+    pub tool_call_map: super::processor::ToolCallFragments,
     /// Prompt tokens reported by the LLM.
     pub pt: usize,
     /// Completion tokens reported by the LLM.
@@ -182,15 +242,15 @@ pub(crate) struct ThinkOutput {
 pub(crate) enum IterOutcome {
     /// Verifier-fail or hook-continue: go to the next iteration.
     Continue,
-    /// Tools branch: every tool result was durably settled. The driver owns
-    /// steer/cancellation fences before selecting a final-answer candidate.
-    FinishCandidates { outputs: Vec<String> },
     /// Text-only branch: the LLM produced a content answer that passed
     /// verification. The driver invokes `phases::finalize::emit_final_text`.
     FinalText {
         answer: String,
         reasoning_content: String,
         reasoning_blocks: Vec<crate::llm::types::ReasoningBlock>,
+        assistant_blocks: Vec<echo_core::agent::AssistantMessageBlock>,
+        // 只间接存放内部大载体；最终Message仍用同一原值，不改变任何Serde形状。
+        provider_response: Option<Box<crate::llm::types::ProviderResponseMetadata>>,
     },
     /// LLM produced neither tool calls nor content. Terminal failure.
     NoResponse,
@@ -201,6 +261,33 @@ pub(crate) enum IterOutcome {
     TerminalSettled {
         outcome: crate::agent::AgentSteerTurnOutcome,
     },
+}
+
+/// 失败/未批准请求仅保存观察；正文和未执行工具片段不得进入可重放历史。
+pub(crate) async fn retain_provider_response_observation(
+    context: &std::sync::Arc<tokio::sync::Mutex<crate::compression::ContextManager>>,
+    observation: Option<&crate::llm::types::ProviderResponseMetadata>,
+) {
+    if let Some(observation) = observation {
+        context
+            .lock()
+            .await
+            .push(Message::provider_response_observation(observation.clone()));
+    }
+}
+
+pub(crate) fn incomplete_response_observation(
+    error: &crate::error::ReactError,
+) -> Option<&crate::llm::types::ProviderResponseMetadata> {
+    match error {
+        crate::error::ReactError::Llm(error) => match error.as_ref() {
+            crate::error::LlmError::IncompleteResponse { partial } => {
+                partial.provider_response.as_ref()
+            }
+            _ => None,
+        },
+        _ => None,
+    }
 }
 
 pub(crate) fn with_reasoning_content(

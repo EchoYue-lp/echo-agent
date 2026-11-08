@@ -11,7 +11,7 @@ This directory contains core concepts and technical knowledge documents for the 
 | [Agent Patterns](./agent-patterns.md) | ReAct, Plan-and-Execute, Self-Reflection, LangGraph workflow and other AI Agent core patterns |
 | [MCP Protocol](./mcp-protocol.md) | Model Context Protocol specification and echo-agent integration |
 | [Skill System](./skill-system.md) | agentskills.io specification, progressive disclosure, code-based/file-based skills |
-| [A2A Protocol](./a2a-protocol.md) | Agent-to-Agent protocol, Agent Card, task state machine |
+| [A2A退役与历史恢复](./a2a-protocol.md) | 历史协议资料与固定源码恢复；当前Framework不再提供该能力 |
 
 ---
 
@@ -31,7 +31,7 @@ This directory contains core concepts and technical knowledge documents for the 
 | Protocol | Problem Solved | Layer |
 |----------|---------------|-------|
 | **MCP** | Tool/resource access | Tool layer |
-| **A2A** | Agent-to-agent communication | Agent layer |
+| **A2A（历史）** | 通用协议背景，当前Framework已具名退役 | 历史资料 |
 | **OpenAI Functions** | LLM tool calling format | API layer |
 
 ### Abstraction Layers
@@ -40,7 +40,7 @@ This directory contains core concepts and technical knowledge documents for the 
 ┌─────────────────────────────────────────┐
 │              Application                 │
 ├─────────────────────────────────────────┤
-│  A2A Protocol (Agent-to-Agent)          │  ← Agent interop
+│  A2A（历史；当前实现已退役）              │  ← 历史协议背景
 ├─────────────────────────────────────────┤
 │  Graph Workflow / Multi-Agent           │  ← Orchestration
 ├─────────────────────────────────────────┤
@@ -70,7 +70,7 @@ This directory contains core concepts and technical knowledge documents for the 
 - [LangGraph Documentation](https://langchain-ai.github.io/langgraph/)
 - [MCP Specification](https://modelcontextprotocol.io/)
 - [agentskills.io Specification](https://agentskills.io/specification)
-- [A2A Protocol](https://github.com/google/A2A)
+- [A2A Protocol（外部历史背景，非当前Framework能力）](https://github.com/google/A2A)
 
 ### Related Frameworks
 
@@ -78,3 +78,6 @@ This directory contains core concepts and technical knowledge documents for the 
 - [CrewAI](https://www.crewai.com/) - Multi-agent orchestration framework
 - [AutoGen](https://microsoft.github.io/autogen/) - Microsoft multi-agent framework
 - [LangGraph](https://langchain-ai.github.io/langgraph/) - Graph workflow framework
+
+
+当前源码的A2A/LSP具名退役与保留ACP/MCP边界见[ADR0090](../../../adr/0090-a2a-lsp-retirement-contract.md)。

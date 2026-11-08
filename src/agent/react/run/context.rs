@@ -223,21 +223,27 @@ impl ReactAgent {
         &self,
         scope_id: &str,
         runtime_state_id: &str,
-    ) -> crate::error::Result<()> {
+    ) -> crate::error::Result<Option<crate::trace::RunEvent>> {
         let _previous_hydration = self
             .begin_runtime_state_hydration(Some(runtime_state_id))
             .await;
         self.clear_runtime_snapshots();
-        if self
-            .resume_from_state_store_scope(scope_id, runtime_state_id)
-            .await?
-            .is_none()
-        {
+        let checkpoint = self
+            .resume_from_state_store_scope(scope_id, runtime_state_id, None)
+            .await?;
+        if checkpoint.is_none() {
             self.reset_runtime_context().await;
         }
         self.commit_runtime_state_hydration(Some(runtime_state_id))
             .await;
-        Ok(())
+        match checkpoint {
+            Some(checkpoint) => Ok(Some(crate::trace::RunEvent::CheckpointResumed {
+                conversation_id: runtime_state_id.to_string(),
+                completed_tool_call_ids: checkpoint.completed_tool_call_ids()?,
+                checkpoint_timestamp: checkpoint.timestamp,
+            })),
+            None => Ok(None),
+        }
     }
 
     pub(crate) async fn begin_runtime_state_hydration(
@@ -276,19 +282,27 @@ impl ReactAgent {
     #[cfg(test)]
     pub(crate) async fn restore_thread_context(&self) -> crate::error::Result<()> {
         let runtime_state_id = self.config.conversation_id.clone();
-        self.restore_thread_context_for(runtime_state_id.as_deref(), runtime_state_id.as_deref())
-            .await
+        self.restore_thread_context_for(
+            runtime_state_id.as_deref(),
+            runtime_state_id.as_deref(),
+            None,
+        )
+        .await
     }
 
     async fn reconcile_configured_pending_projection(
         &self,
+        scope_id: Option<&str>,
         runtime_state_id: Option<&str>,
     ) -> crate::error::Result<()> {
         if self.memory.conversation_store.is_none()
             || runtime_state_id != self.config.conversation_id.as_deref()
+            || scope_id.or(runtime_state_id) != self.config.conversation_id.as_deref()
         {
             return Ok(());
         }
+        // 此处仅协调构造期的默认scope；调用级产品scope已由准入快照协调，
+        // 不能因runtime ID恰好等于配置ID而回退到错误的默认scope。
         let snapshot = crate::agent::snapshot::AgentRunSnapshot::from_agent(self);
         if let Some(settlement) = snapshot.reconcile_pending_transcript_projection().await?
             && settlement.status != crate::memory::TranscriptProjectionSettlementStatus::Settled
@@ -302,8 +316,9 @@ impl ReactAgent {
         &self,
         scope_id: Option<&str>,
         runtime_state_id: Option<&str>,
+        trace_snapshot: Option<&crate::agent::snapshot::AgentRunSnapshot>,
     ) -> crate::error::Result<()> {
-        self.reconcile_configured_pending_projection(runtime_state_id)
+        self.reconcile_configured_pending_projection(scope_id, runtime_state_id)
             .await?;
         let _previous_hydration = self.begin_runtime_state_hydration(runtime_state_id).await;
         self.clear_runtime_snapshots();
@@ -317,6 +332,7 @@ impl ReactAgent {
                     self.resume_from_state_store_scope(
                         scope_id.unwrap_or(runtime_state_id),
                         runtime_state_id,
+                        trace_snapshot,
                     )
                     .await
                 }
@@ -331,10 +347,10 @@ impl ReactAgent {
                     debug!(agent = %agent, "New session, starting from empty context");
                     self.reset_runtime_context().await;
                 }
-                Err(e) => {
-                    return Err(crate::error::ReactError::Other(format!(
-                        "Runtime checkpoint recovery failed for agent '{agent}': {e}"
-                    )));
+                Err(error) => {
+                    // 保留当前Store的typed unknown/deadline/CAS错误；字符串包装会丢失物理owner债务。
+                    tracing::debug!(agent = %agent, %error, "Runtime checkpoint recovery failed");
+                    return Err(error);
                 }
             }
         } else {
@@ -361,6 +377,7 @@ impl ReactAgent {
         self.restore_chat_context_if_cold_for(
             runtime_state_id.as_deref(),
             runtime_state_id.as_deref(),
+            None,
         )
         .await
     }
@@ -369,13 +386,14 @@ impl ReactAgent {
         &self,
         scope_id: Option<&str>,
         runtime_state_id: Option<&str>,
+        trace_snapshot: Option<&crate::agent::snapshot::AgentRunSnapshot>,
     ) -> crate::error::Result<()> {
         if self.memory.conversation_store.is_some() {
             return self
-                .restore_thread_context_for(scope_id, runtime_state_id)
+                .restore_thread_context_for(scope_id, runtime_state_id, trace_snapshot)
                 .await;
         }
-        self.reconcile_configured_pending_projection(runtime_state_id)
+        self.reconcile_configured_pending_projection(scope_id, runtime_state_id)
             .await?;
         let is_cold = {
             let context = self.memory.context.lock().await;
@@ -405,7 +423,7 @@ impl ReactAgent {
             }
         };
         if should_restore {
-            self.restore_thread_context_for(scope_id, runtime_state_id)
+            self.restore_thread_context_for(scope_id, runtime_state_id, trace_snapshot)
                 .await?;
         }
         Ok(())
@@ -629,9 +647,10 @@ impl ReactAgent {
         &self,
         mode: StreamMode,
         input: &str,
-        history: &[Message],
+        invocation: &echo_core::agent::AgentInvocationContext,
         scope_id: Option<&str>,
         runtime_state_id: Option<&str>,
+        trace_snapshot: Option<&crate::agent::snapshot::AgentRunSnapshot>,
     ) -> crate::error::Result<usize> {
         // Clear read-before-edit tracking for the new conversation turn
         // (converged with prepare_react_context; the entry layer no longer
@@ -639,11 +658,11 @@ impl ReactAgent {
         self.clear_read_files();
         match mode {
             StreamMode::Execute => {
-                self.restore_thread_context_for(scope_id, runtime_state_id)
+                self.restore_thread_context_for(scope_id, runtime_state_id, trace_snapshot)
                     .await?;
             }
             StreamMode::Chat => {
-                self.restore_chat_context_if_cold_for(scope_id, runtime_state_id)
+                self.restore_chat_context_if_cold_for(scope_id, runtime_state_id, trace_snapshot)
                     .await?;
             }
         }
@@ -660,7 +679,13 @@ impl ReactAgent {
             memory_context = Some(format_memory_context(&items));
         }
 
-        let wd = self.config.working_dir.lock().ok().and_then(|g| g.clone());
+        // 调用显式目录只覆盖本次模型投影；None必须在恢复完成后读取当前配置。
+        // trace_snapshot可能在hydrate前建立，不能用它的cwd作为None回退。
+        let history = invocation.history.as_deref().unwrap_or_default();
+        let wd = invocation
+            .working_dir
+            .clone()
+            .or_else(|| self.config.working_dir.lock().ok().and_then(|g| g.clone()));
         let ws_block = crate::agent::react::ReactAgent::build_workspace_context_block(wd.as_ref());
 
         let mut context = self.memory.context.lock().await;
@@ -668,10 +693,15 @@ impl ReactAgent {
             WORKSPACE_CONTEXT_PROJECTION,
             (!ws_block.trim().is_empty()).then(|| runtime_context_note("workspace", &ws_block)),
         );
-        context.replace_tail_projection(
-            TURN_MEMORY_CONTEXT_PROJECTION,
-            memory_context.map(|body| runtime_context_note("memory", body.as_str())),
-        );
+        // 召回是运行事实；无召回须显式失效，避免上回合的快照继续作为当前状态。
+        let note = memory_context.map(|body| runtime_context_note("memory", body.as_str()));
+        let version = crate::compression::projection_content_version(&[
+            if note.is_some() { "present" } else { "cleared" },
+            note.as_ref()
+                .and_then(|message| message.content.as_text_ref())
+                .unwrap_or_default(),
+        ]);
+        context.append_versioned_projection(TURN_MEMORY_CONTEXT_PROJECTION, version, note);
         for message in history {
             context.push(message.clone());
         }
@@ -710,19 +740,20 @@ impl ReactAgent {
         &self,
         mode: StreamMode,
         message: &Message,
-        history: &[Message],
+        invocation: &echo_core::agent::AgentInvocationContext,
         scope_id: Option<&str>,
         runtime_state_id: Option<&str>,
+        trace_snapshot: Option<&crate::agent::snapshot::AgentRunSnapshot>,
     ) -> crate::error::Result<usize> {
         // Clear read-before-edit tracking (see prepare_stream_context).
         self.clear_read_files();
         match mode {
             StreamMode::Execute => {
-                self.restore_thread_context_for(scope_id, runtime_state_id)
+                self.restore_thread_context_for(scope_id, runtime_state_id, trace_snapshot)
                     .await?;
             }
             StreamMode::Chat => {
-                self.restore_chat_context_if_cold_for(scope_id, runtime_state_id)
+                self.restore_chat_context_if_cold_for(scope_id, runtime_state_id, trace_snapshot)
                     .await?
             }
         }
@@ -743,7 +774,13 @@ impl ReactAgent {
             memory_context = Some(format_memory_context(&items));
         }
 
-        let wd = self.config.working_dir.lock().ok().and_then(|g| g.clone());
+        // 调用显式目录只覆盖本次模型投影；None必须在恢复完成后读取当前配置。
+        // trace_snapshot可能在hydrate前建立，不能用它的cwd作为None回退。
+        let history = invocation.history.as_deref().unwrap_or_default();
+        let wd = invocation
+            .working_dir
+            .clone()
+            .or_else(|| self.config.working_dir.lock().ok().and_then(|g| g.clone()));
         let ws_block = crate::agent::react::ReactAgent::build_workspace_context_block(wd.as_ref());
 
         let mut context = self.memory.context.lock().await;
@@ -751,10 +788,15 @@ impl ReactAgent {
             WORKSPACE_CONTEXT_PROJECTION,
             (!ws_block.trim().is_empty()).then(|| runtime_context_note("workspace", &ws_block)),
         );
-        context.replace_tail_projection(
-            TURN_MEMORY_CONTEXT_PROJECTION,
-            memory_context.map(|body| runtime_context_note("memory", body.as_str())),
-        );
+        // 召回是运行事实；无召回须显式失效，避免上回合的快照继续作为当前状态。
+        let note = memory_context.map(|body| runtime_context_note("memory", body.as_str()));
+        let version = crate::compression::projection_content_version(&[
+            if note.is_some() { "present" } else { "cleared" },
+            note.as_ref()
+                .and_then(|message| message.content.as_text_ref())
+                .unwrap_or_default(),
+        ]);
+        context.append_versioned_projection(TURN_MEMORY_CONTEXT_PROJECTION, version, note);
         for history_message in history {
             context.push(history_message.clone());
         }
@@ -892,7 +934,7 @@ impl crate::agent::snapshot::AgentRunSnapshot {
                 Message::system(PRE_COMPACTION_FLUSH_PROMPT.to_string()),
                 Message::user(transcript),
             ],
-            temperature: Some(0.2),
+            temperature: None,
             max_tokens: Some(2048),
             user_id: self.config.cache_user_id.clone(),
             ..Default::default()

@@ -9,6 +9,8 @@ pub mod diff;
 #[allow(clippy::module_inception)]
 pub mod files;
 #[cfg(feature = "files")]
+pub use crate::filesystem::LocalFileSystem;
+#[cfg(feature = "files")]
 pub mod glob;
 #[cfg(feature = "files")]
 pub mod grep;
@@ -19,7 +21,9 @@ pub mod repo_map;
 use std::path::{Component, Path, PathBuf};
 
 #[cfg(feature = "files")]
-use echo_core::error::{Result, ToolError};
+use echo_core::error::{ReactError, Result, ToolError};
+#[cfg(feature = "files")]
+use echo_core::tools::filesystem::FileSystem;
 
 /// Resolve a user-supplied relative/absolute path into a safe absolute path.
 ///
@@ -35,109 +39,70 @@ use echo_core::error::{Result, ToolError};
 /// override). When neither is set, behavior is unchanged from before
 /// (raw path + best-effort canonicalize).
 ///
-/// - Absolute path: normalize then (if base_dir set) verify it stays within base_dir
-/// - Relative path: expand relative to the chosen base then verify
-///
-/// After textual normalization, `std::fs::canonicalize()` is used to resolve symlinks
-/// and verify the real path stays within the allowed directory. For write operations
-/// where the target file doesn't exist yet, the parent directory is canonicalized instead.
+/// 相对路径先按所选 base 展开一次；绝对路径保原路径交 provider。
+/// selected provider 在词法归一化前解析 symlink/..，再核真实目录上界。
+/// 写目标尚不存在时，解析同 provider 的已有祖先后重建缺失后缀；
+/// 已展开的递归目录项直接验证，不重复拼接 base。
 #[cfg(feature = "files")]
 fn resolve_path(
+    file_system: &dyn FileSystem,
     tool: &str,
     path_str: &str,
     base_dir: &Option<PathBuf>,
     working_dir: Option<&Path>,
 ) -> Result<PathBuf> {
     let requested = Path::new(path_str);
+    let base = base_dir.as_deref().or(working_dir);
+    let expanded = if requested.is_relative() {
+        base.map(|base| base.join(requested))
+            .unwrap_or_else(|| requested.to_path_buf())
+    } else {
+        requested.to_path_buf()
+    };
+    resolve_path_buf(file_system, tool, &expanded, base_dir)
+}
 
-    // Effective base: construction-time base_dir takes priority (confinement);
-    // otherwise fall back to the runtime working_dir (CWD override, no confinement).
-    let effective_base: Option<PathBuf> = base_dir
-        .clone()
-        .or_else(|| working_dir.map(|p| p.to_path_buf()));
-
-    let resolved = if let Some(ref base) = effective_base {
-        let normalized_base = normalize_path(base);
-
-        // Relative path: expand with base_dir as root; absolute path: normalize directly
-        let normalized = if requested.is_absolute() {
-            normalize_path(requested)
-        } else {
-            normalize_path(&normalized_base.join(requested))
-        };
-
-        if !normalized.starts_with(&normalized_base) {
+/// 校验已展开的实际 I/O 路径，目录项不再拼接 base、不经有损 UTF-8 转换。
+/// 先让 provider 解析 symlink/..；提前词法折叠会改变实际读取对象。
+#[cfg(feature = "files")]
+fn resolve_path_buf(
+    file_system: &dyn FileSystem,
+    tool: &str,
+    expanded: &Path,
+    base_dir: &Option<PathBuf>,
+) -> Result<PathBuf> {
+    let resolved = match file_system.canonicalize(expanded) {
+        Ok(path) => path,
+        Err(ReactError::Io(_)) if base_dir.is_some() => {
+            best_effort_canonicalize(file_system, expanded)?
+                .unwrap_or_else(|| normalize_path(expanded))
+        }
+        Err(ReactError::Io(_)) => {
+            // 无显式根时保原 raw + best-effort 行为，不新增祖先范围推断。
+            let normalized = normalize_path(expanded);
+            if normalized.as_os_str().is_empty() {
+                file_system.current_dir()?
+            } else {
+                normalized
+            }
+        }
+        Err(error) => return Err(error),
+    };
+    if let Some(base) = base_dir {
+        let canonical_base =
+            best_effort_canonicalize(file_system, base)?.unwrap_or_else(|| normalize_path(base));
+        if !resolved.starts_with(&canonical_base) {
             return Err(ToolError::ExecutionFailed {
                 tool: tool.to_string(),
                 message: format!(
-                    "Path '{}' is outside the allowed working directory '{}'. \
-                     Use a relative path, or an absolute path under the working directory.",
-                    path_str,
-                    normalized_base.display()
+                    "Path '{}' resolves outside allowed directory scope '{}'",
+                    expanded.display(),
+                    canonical_base.display()
                 ),
             }
             .into());
         }
-
-        // Defense against symlink bypass: canonicalize to resolve symlinks and
-        // verify the real (resolved) path stays within the base directory.
-        match std::fs::canonicalize(&normalized) {
-            Ok(canonical) => {
-                let canonical_base = std::fs::canonicalize(&normalized_base).map_err(|e| {
-                    ToolError::ExecutionFailed {
-                        tool: tool.to_string(),
-                        message: format!("Cannot resolve base directory: {}", e),
-                    }
-                })?;
-                if !canonical.starts_with(&canonical_base) {
-                    return Err(ToolError::ExecutionFailed {
-                        tool: tool.to_string(),
-                        message: format!(
-                            "Path '{}' resolves via symlink to location outside allowed scope",
-                            path_str
-                        ),
-                    }
-                    .into());
-                }
-                canonical
-            }
-            Err(_) => {
-                // File doesn't exist yet (write operation) — canonicalize parent directory
-                if let Some(parent) = normalized.parent()
-                    && parent != Path::new("")
-                    && let Ok(canonical_parent) = std::fs::canonicalize(parent)
-                {
-                    let canonical_base = std::fs::canonicalize(&normalized_base)
-                        .unwrap_or_else(|_| normalized_base.clone());
-                    if !canonical_parent.starts_with(&canonical_base) {
-                        return Err(ToolError::ExecutionFailed {
-                            tool: tool.to_string(),
-                            message: format!(
-                                "Parent directory of '{}' resolves outside allowed scope",
-                                path_str
-                            ),
-                        }
-                        .into());
-                    }
-                    let filename = normalized.file_name().unwrap_or_default();
-                    return Ok(canonical_parent.join(filename));
-                }
-                // Fallback: return textually normalized path if parent doesn't exist
-                normalized
-            }
-        }
-    } else {
-        let normalized = normalize_path(requested);
-        // normalize_path strips "." to an empty path — use CWD as fallback
-        let normalized = if normalized.as_os_str().is_empty() {
-            std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
-        } else {
-            normalized
-        };
-        // Best-effort canonicalization when no base_dir constraint
-        std::fs::canonicalize(&normalized).unwrap_or(normalized)
-    };
-
+    }
     Ok(resolved)
 }
 
@@ -157,4 +122,91 @@ fn normalize_path(path: &Path) -> PathBuf {
         }
     }
     components.iter().collect()
+}
+
+/// Keep the existing synchronous transaction and its resource guards together.
+/// Dropping the observer does not cancel a started filesystem mutation.
+#[cfg(feature = "files")]
+fn run_file_operation<F>(
+    tool: &'static str,
+    ctx: &echo_core::tools::ToolContext,
+    operation: F,
+) -> futures::future::BoxFuture<'static, Result<echo_core::tools::ToolResult>>
+where
+    F: FnOnce() -> Result<echo_core::tools::ToolResult> + Send + 'static,
+{
+    let guards = ctx.resource_guards.clone();
+    Box::pin(async move {
+        tokio::task::spawn_blocking(move || {
+            let _guards = guards;
+            operation()
+        })
+        .await
+        .map_err(|error| ToolError::ExecutionFailed {
+            tool: tool.to_string(),
+            message: format!("File operation task failed: {error}"),
+        })?
+    })
+}
+
+#[cfg(feature = "files")]
+fn is_io_kind(error: &ReactError, kind: std::io::ErrorKind) -> bool {
+    matches!(error, ReactError::Io(inner) if inner.kind() == kind)
+}
+
+/// Add the old local diagnostic without erasing a provider's recovery facts.
+#[cfg(feature = "files")]
+fn file_error(error: ReactError, local: impl FnOnce(&std::io::Error) -> ToolError) -> ReactError {
+    match error {
+        ReactError::Io(error) => local(&error).into(),
+        error => error,
+    }
+}
+
+#[cfg(feature = "files")]
+fn best_effort_canonicalize(file_system: &dyn FileSystem, path: &Path) -> Result<Option<PathBuf>> {
+    let mut ancestor = path;
+    let mut missing = Vec::new();
+    loop {
+        let candidate = if ancestor.as_os_str().is_empty() {
+            file_system.current_dir()?
+        } else {
+            ancestor.to_path_buf()
+        };
+        match file_system.canonicalize(&candidate) {
+            Ok(mut canonical) => {
+                // 写目标尚不存在时，沿同 provider 找到真实已有祖先，再接回缺失后缀。
+                // 不先折叠 symlink/..，也不把 typed provider 错误伪装成本机缺失。
+                for component in missing.iter().rev() {
+                    canonical.push(component);
+                }
+                return Ok(Some(normalize_path(&canonical)));
+            }
+            Err(ReactError::Io(_)) => {
+                let Some(component) = ancestor.components().next_back() else {
+                    return Ok(None);
+                };
+                if matches!(component, Component::RootDir | Component::Prefix(_)) {
+                    return Ok(None);
+                }
+                let Some(parent) = ancestor.parent() else {
+                    return Ok(None);
+                };
+                missing.push(component.as_os_str().to_os_string());
+                ancestor = parent;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+#[cfg(feature = "files")]
+fn check_file_cancel(
+    cancel: Option<&echo_core::agent::CancellationToken>,
+    tool: &str,
+) -> Result<()> {
+    if cancel.is_some_and(|cancel| cancel.is_cancelled()) {
+        return Err(ToolError::Cancelled(tool.to_string()).into());
+    }
+    Ok(())
 }

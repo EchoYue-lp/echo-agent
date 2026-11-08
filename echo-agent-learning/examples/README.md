@@ -36,7 +36,6 @@ The current runnable demos are:
 - `demo18_semantic_memory.rs`
 - `demo19_guard.rs`
 - `demo20_audit.rs`
-- `demo23_a2a.rs`
 - `demo25_macros.rs`
 - `demo26_provider_factory.rs`
 - `demo27_sqlite_memory.rs`
@@ -100,7 +99,6 @@ The contract sources are:
 - `demo51_self_improvement.rs`
 - `demo53_adaptive_compression.rs`
 - `demo54_headless.rs`
-- `demo55_lsp_tools.rs`
 - `demo57_data_pipeline.rs`
 - `demo60_data_quality.rs`
 - `demo62_prompt_templates.rs`
@@ -119,3 +117,10 @@ this directory from `CARGO_MANIFEST_DIR`, so they work when invoked through
 All example code follows the repository safety rules: no `unwrap`/`expect`, no
 panic macros, no unchecked UTF-8 slicing, and Subagent-only execution-role
 terminology.
+
+
+## 具名退役的历史示例
+
+当前清单保留44个独立demo与20个确定性合同源。A2A专属demo23与LSP专属demo55已随
+已批准能力退出，旧源码可在固定pre-retirement-2026-10-24 tag只读对照；不恢复当前Cargo
+目标或把专属测试删除算作保留行为已通过。其它每个保留demo仍须在本索引恰好出现一次。

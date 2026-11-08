@@ -41,7 +41,7 @@ metadata rather than maintained as a second package registry.
 | `echo-execution` | Sandbox, Skill, and execution mechanisms | Depends on `echo_core` |
 | `echo-state` | Memory, compression, persistence, and audit implementations | Depends on `echo_core` |
 | `echo-orchestration` | Turn driver, Task, Subagent, Workflow, scheduler, and lifecycle primitives | Depends on `echo_core`; composes `echo_state` durable delivery primitives |
-| `echo-integration` | Provider, MCP, LSP, channel, and external protocol implementations | Depends on `echo_core` |
+| `echo-integration` | Provider, MCP, channel, and external protocol implementations | Depends on `echo_core` |
 | `echo-tools` | Reusable file, shell, web, data, media, database, and research Tools | Depends on core contracts and macros |
 | `echo-macros` | Compile-time Tool, callback, guard, and handler adapters | Depends on core contracts and orchestration types |
 | `echo-agent-learning` | Non-published executable consumer, examples, and documentation contracts | Consumes only the root facade |
@@ -74,7 +74,7 @@ and errors, but it must not invent a second terminal or Task graph authority.
 | Who owns Task and Subagent execution? | [Lifecycles](./lifecycles.md) | [Tasks](./09-tasks.md), [Subagent](./06-subagent.md), and [Runtime](./29-long-running-tasks.md) |
 | What is fact, checkpoint, projection, or Trace? | [Core Concepts](./concepts.md) | [Persistence Concepts](./41-persistence-concepts.md) and [Tracing](./27-tracing.md) |
 | Where are Tool and Permission effects enforced? | [Lifecycles](./lifecycles.md) | [Tools](./02-tools.md), [Human Loop](./05-human-loop.md), and [Security](./security.md) |
-| How do MCP, Hook, Skill, Plugin, and LSP evolve? | [Lifecycles](./lifecycles.md) | [MCP](./08-mcp.md), [Hooks](./23-hooks.md), [Skills](./07-skills.md), [Plugins](./32-plugin-system.md), and [LSP](./31-lsp-integration.md) |
+| MCP、Hook、Skill 与 Plugin 如何演进？ | [Lifecycles](./lifecycles.md) | [MCP](./08-mcp.md), [Hooks](./23-hooks.md), [Skills](./07-skills.md), [Plugins](./32-plugin-system.md); [LSP退役说明](./31-lsp-integration.md) |
 | How are SDK contracts derived? | [Core Concepts](./concepts.md) | [Source-first SDK](../adr/0028-source-first-multilanguage-sdk-runtime.md) and SDK scope ADRs |
 | How are effects delivered and observed? | [Lifecycles](./lifecycles.md) | [Delivery Ledger](./41-delivery-ledger.md), Outbox patterns, and [Tracing](./27-tracing.md) |
 | Where do Product Backend, Frontend, Desktop, or Device concerns live? | [Application Boundary](./39-framework-application-boundary.md) | The embedding application |
@@ -88,7 +88,7 @@ deployment control plane. Those policies belong to the embedding application.
 Framework Trace, Metrics, and Telemetry primitives provide diagnostics; startup,
 exporter, deployment, and retention policy remain explicit consumer choices.
 
-Protocol adapters also remain boundaries rather than owners. ACP, A2A,
+Protocol adapters also remain boundaries rather than owners. ACP,
 Channels, Headless, and the external SDK Host project framework behavior into different
 surfaces. Their current guarantees are defined by their detailed chapters and
 tests; this overview does not broaden them.
@@ -114,3 +114,11 @@ The documentation authority and its tradeoffs are recorded in
 - [Getting Started](./getting-started.md)
 - [Executable quickstart](../../echo-agent-learning/examples/demo00_quickstart.rs)
 - [Framework and Application Boundary](./39-framework-application-boundary.md)
+
+## 具名退役与保留owner
+
+A2A／LSP 的生产模块、feature 和出口退出；旧 `lsp.yaml` 仅保留用户原件，当前 registry／prepare
+不专门读取、冻结、hash、缓存或生成LSP诊断，不将它纳入generation身份，也不启动语言服务。
+当前边界见[ADR0105](../adr/0105-current-config-and-plugin-inputs.md)。ProjectRoot、Instruction、scope、MCP/ACP、Task/Subagent、取消、
+持久化和恢复沿原 owner。没有因 EKO 未使用而扩大删除其它合理公共 API。
+源码结构与文档同步不等于删后构建、锁、SDK正式 Git 来源、native或发布完成。

@@ -1977,9 +1977,48 @@ enum NextStep {
 mod tests {
     use super::*;
     use crate::workflow::checkpoint_store::FileCheckpointStore;
-    use echo_core::agent::AgentEvent;
-    use futures::stream;
+    use echo_core::agent::{AgentEvent, AgentInvocationContext, ExecutionStatusKind};
+    use echo_core::llm::types::Message;
     use std::sync::atomic::{AtomicBool, Ordering};
+
+    // 只编码各 fixture 的原生事实；完成由 source 明确发布，不读 final 猜结果。
+    fn source_status(execution: &str, status: ExecutionStatusKind, sequence: u64) -> AgentEvent {
+        AgentEvent::ExecutionStatus(echo_core::agent::ExecutionStatus {
+            adapter_generated: false,
+            execution_id: execution.to_string(),
+            request_id: Some("fixture-response".into()),
+            sequence,
+            phase: if status == ExecutionStatusKind::Started {
+                echo_core::agent::AgentPhase::Thinking
+            } else {
+                echo_core::agent::AgentPhase::Terminal
+            },
+            status,
+            reason: None,
+        })
+    }
+    fn source_text(text: &str, sequence: u64, complete: bool) -> AgentEvent {
+        AgentEvent::AssistantMessage {
+            block: echo_core::agent::AssistantMessageBlock {
+                provider_source: None,
+                block_id: "fixture-answer".into(),
+                request_id: "fixture-response".into(),
+                sequence,
+                phase: echo_core::agent::AssistantPhase::FinalAnswer,
+                delta: text.into(),
+                complete,
+                provider: None,
+                reasoning: None,
+            },
+        }
+    }
+    fn source_execution(invocation: &AgentInvocationContext) -> Result<String> {
+        invocation
+            .runtime
+            .as_ref()
+            .and_then(|runtime| runtime.execution_id.clone())
+            .ok_or_else(|| ReactError::Other("missing original source execution identity".into()))
+    }
 
     struct StreamingAgent;
 
@@ -1987,30 +2026,37 @@ mod tests {
         fn name(&self) -> &str {
             "streaming-agent"
         }
-
         fn model_name(&self) -> &str {
             "test"
         }
-
         fn system_prompt(&self) -> &str {
             "test"
         }
-
-        fn execute<'a>(&'a self, _task: &'a str) -> BoxFuture<'a, Result<String>> {
-            Box::pin(async { Ok("streamed answer".to_string()) })
-        }
-
-        fn execute_stream<'a>(
+        fn execute_stream_message_with_invocation_context<'a>(
             &'a self,
-            _task: &'a str,
+            message: Message,
+            _cancel: CancellationToken,
+            invocation: AgentInvocationContext,
         ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
-            Box::pin(async {
-                Ok(Box::pin(stream::iter([
-                    Ok(AgentEvent::Token("streamed ".to_string())),
-                    Ok(AgentEvent::Token("answer".to_string())),
-                    Ok(AgentEvent::FinalAnswer("streamed answer".to_string())),
-                ])) as BoxStream<'a, Result<AgentEvent>>)
+            Box::pin(async move {
+                let execution = source_execution(&invocation)?;
+                Ok(Box::pin(async_stream::stream! {
+                    let _retained = (message, invocation);
+                    yield Ok(source_status(&execution, ExecutionStatusKind::Started, 0));
+                    yield Ok(source_text("streamed ", 0, false));
+                    yield Ok(source_text("answer", 1, true));
+                    yield Ok(AgentEvent::FinalAnswer("streamed answer".to_string()));
+                    yield Ok(source_status(&execution, ExecutionStatusKind::Settled, 1));
+                }) as BoxStream<'a, Result<AgentEvent>>)
             })
+        }
+        fn chat_stream_message_with_invocation_context<'a>(
+            &'a self,
+            message: Message,
+            cancel: CancellationToken,
+            invocation: AgentInvocationContext,
+        ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
+            self.execute_stream_message_with_invocation_context(message, cancel, invocation)
         }
     }
 
@@ -2053,29 +2099,16 @@ mod tests {
             "test"
         }
 
-        fn execute<'a>(&'a self, _task: &'a str) -> BoxFuture<'a, Result<String>> {
-            Box::pin(std::future::pending())
-        }
-
-        fn execute_stream<'a>(
+        fn execute_stream_message_with_invocation_context<'a>(
             &'a self,
-            _task: &'a str,
-        ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
-            Box::pin(async {
-                Err(ReactError::Other(
-                    "workflow must use the cancellable Agent stream".to_string(),
-                ))
-            })
-        }
-
-        fn execute_stream_with_cancel<'a>(
-            &'a self,
-            _task: &'a str,
+            message: Message,
             cancel: CancellationToken,
+            invocation: AgentInvocationContext,
         ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
             let started = self.started.clone();
             let cancelled = self.cancelled.clone();
             Box::pin(async move {
+                let execution = source_execution(&invocation)?;
                 started.store(true, Ordering::SeqCst);
                 let producer = tokio::spawn(async move {
                     cancel.cancelled().await;
@@ -2084,8 +2117,11 @@ mod tests {
                 // The original producer actually closes after cancellation;
                 // EOF must join it rather than use a never-ending placeholder.
                 let events: BoxStream<'a, Result<AgentEvent>> = Box::pin(async_stream::stream! {
-                    yield Ok(AgentEvent::Token("ready".to_string()));
+                    let _retained = (message, invocation);
+                    yield Ok(source_status(&execution, ExecutionStatusKind::Started, 0));
+                    yield Ok(source_text("ready", 0, true));
                     if let Err(error) = producer.await { yield Err(ReactError::Other(format!("cancellation probe producer failed: {error}"))); }
+                    else { yield Ok(source_status(&execution, ExecutionStatusKind::Cancelled, 1)); }
                 });
                 Ok(events)
             })
@@ -3317,40 +3353,28 @@ mod tests {
         fn system_prompt(&self) -> &str {
             "test"
         }
-        fn execute<'a>(&'a self, _: &'a str) -> BoxFuture<'a, Result<String>> {
-            Box::pin(async {
-                Err(ReactError::Other(
-                    "must use original context-aware entry".into(),
-                ))
-            })
-        }
-        fn execute_stream<'a>(
+
+        fn execute_stream_message_with_invocation_context<'a>(
             &'a self,
-            _: &'a str,
-        ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
-            Box::pin(async {
-                Err(ReactError::Other(
-                    "must use original context-aware stream".into(),
-                ))
-            })
-        }
-        fn execute_stream_with_invocation_context<'a>(
-            &'a self,
-            _: &'a str,
+            message: Message,
             _: CancellationToken,
             invocation: echo_core::agent::AgentInvocationContext,
         ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
             Box::pin(async move {
-                let runtime = invocation.runtime.ok_or_else(|| {
+                let execution = source_execution(&invocation)?;
+                let runtime = invocation.runtime.clone().ok_or_else(|| {
                     ReactError::Other("missing original invocation context".into())
                 })?;
                 self.0
                     .lock()
                     .unwrap_or_else(|error| error.into_inner())
                     .push(runtime);
-                Ok(Box::pin(stream::iter([Ok(AgentEvent::FinalAnswer(
-                    "one original invocation".into(),
-                ))])) as BoxStream<'a, Result<AgentEvent>>)
+                Ok(Box::pin(async_stream::stream! {
+                    let _retained = (message, invocation);
+                    yield Ok(source_status(&execution, ExecutionStatusKind::Started, 0));
+                    yield Ok(AgentEvent::FinalAnswer("one original invocation".into()));
+                    yield Ok(source_status(&execution, ExecutionStatusKind::Settled, 1));
+                }) as BoxStream<'a, Result<AgentEvent>>)
             })
         }
     }
@@ -3543,27 +3567,12 @@ mod tests {
             fn system_prompt(&self) -> &str {
                 "test"
             }
-            fn execute<'a>(&'a self, _: &'a str) -> BoxFuture<'a, Result<String>> {
-                Box::pin(async {
-                    Err(ReactError::Other(
-                        "requires original cancellable stream".into(),
-                    ))
-                })
-            }
-            fn execute_stream<'a>(
+
+            fn execute_stream_message_with_invocation_context<'a>(
                 &'a self,
-                _: &'a str,
-            ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
-                Box::pin(async {
-                    Err(ReactError::Other(
-                        "requires original cancellation scope".into(),
-                    ))
-                })
-            }
-            fn execute_stream_with_cancel<'a>(
-                &'a self,
-                _: &'a str,
+                message: Message,
                 cancel: CancellationToken,
+                invocation: AgentInvocationContext,
             ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
                 let entered = self.entered.clone();
                 let cancelled = self.cancelled.clone();
@@ -3572,8 +3581,11 @@ mod tests {
                 let drops = self.drops.clone();
                 let path = self.path.clone();
                 Box::pin(async move {
+                    let execution = source_execution(&invocation)?;
                     let source = async_stream::stream! {
                         let _guard = SourceDrop(drops);
+                        let _retained = (message, invocation);
+                        yield Ok(source_status(&execution, ExecutionStatusKind::Started, 0));
                         let backend_entered = Arc::new(Notify::new()); let ready = backend_entered.clone();
                         let backend = tokio::spawn(async move {
                             std::fs::write(&path, "entered").map_err(|error| error.to_string())?; ready.notify_one();
@@ -3586,7 +3598,14 @@ mod tests {
                             () = cancel.cancelled() => { cancelled.notify_one(); backend.await }
                             result = backend.clone() => result,
                         };
-                        match result { Ok(()) => yield Ok(AgentEvent::FinalAnswer("closed original source".into())), Err(error) => yield Err(ReactError::Other(error)) }
+                        match result {
+                            Ok(()) if cancel.is_cancelled() => yield Ok(source_status(&execution, ExecutionStatusKind::Cancelled, 1)),
+                            Ok(()) => {
+                                yield Ok(AgentEvent::FinalAnswer("closed original source".into()));
+                                yield Ok(source_status(&execution, ExecutionStatusKind::Settled, 1));
+                            },
+                            Err(error) => yield Err(ReactError::Other(error)),
+                        }
                     };
                     Ok(Box::pin(source) as BoxStream<'a, Result<AgentEvent>>)
                 })
@@ -3949,28 +3968,17 @@ mod tests {
             fn system_prompt(&self) -> &str {
                 "test"
             }
-            fn execute<'a>(&'a self, _: &'a str) -> BoxFuture<'a, Result<String>> {
-                Box::pin(async {
-                    Err(ReactError::Other("must use original context stream".into()))
-                })
-            }
-            fn execute_stream<'a>(
+
+            fn execute_stream_message_with_invocation_context<'a>(
                 &'a self,
-                _: &'a str,
-            ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
-                Box::pin(async {
-                    Err(ReactError::Other("must bind original Node identity".into()))
-                })
-            }
-            fn execute_stream_with_invocation_context<'a>(
-                &'a self,
-                _: &'a str,
-                _: CancellationToken,
+                message: Message,
+                cancel: CancellationToken,
                 context: echo_core::agent::AgentInvocationContext,
             ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
                 Box::pin(async move {
                     let runtime = context
                         .runtime
+                        .clone()
                         .ok_or_else(|| ReactError::Other("missing runtime".into()))?;
                     let run = runtime
                         .run_id
@@ -3993,7 +4001,10 @@ mod tests {
                     let path = self.path.clone();
                     let mode = self.mode;
                     let source = async_stream::stream! {
-                        let _guard = SourceDrop(drops); let entered = Arc::new(Notify::new()); let ready = entered.clone();
+                        let _guard = SourceDrop(drops);
+                        let _retained = (message, context);
+                        yield Ok(source_status(&execution, ExecutionStatusKind::Started, 0));
+                        let entered = Arc::new(Notify::new()); let ready = entered.clone();
                         let backend = tokio::spawn(async move {
                             std::fs::write(&path, "entered").map_err(|error| error.to_string())?; ready.notify_one(); backend_release.notified().await;
                             std::fs::write(&path, "closed").map_err(|error| error.to_string())?; Ok::<(),String>(())
@@ -4007,7 +4018,14 @@ mod tests {
                         }
                         yield Err(ReactError::ExecutionNotSettled { run_id: run.clone(), execution_id: Some(execution.clone()) }); observed.notify_one();
                         if let Err(error) = backend.await { yield Err(ReactError::Other(error)); return; }
-                        if mode != 2 { yield Ok(AgentEvent::FinalAnswer("later genuine Node answer".into())); }
+                        if mode != 2 {
+                            if cancel.is_cancelled() {
+                                yield Ok(source_status(&execution, ExecutionStatusKind::Cancelled, 1));
+                            } else {
+                                yield Ok(AgentEvent::FinalAnswer("later genuine Node answer".into()));
+                                yield Ok(source_status(&execution, ExecutionStatusKind::Settled, 1));
+                            }
+                        }
                         if mode == 4 {
                             yield Err(ReactError::ExecutionNotSettled { run_id: run, execution_id: Some(execution) });
                         }

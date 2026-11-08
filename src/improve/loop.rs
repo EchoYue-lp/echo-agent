@@ -151,6 +151,10 @@ impl ImprovementLoop {
         // Stratified split by criteria type to prevent overfitting
         let (train_cases, test_cases) = Self::stratified_split(cases, self.holdout_ratio);
         let runner = EvalRunner::new(std::env::temp_dir());
+        let runner = match run_store {
+            Some(store) => runner.with_run_store(Arc::clone(store)),
+            None => runner,
+        };
 
         for i in 0..self.max_iterations {
             let iter_start = Instant::now();
@@ -393,6 +397,84 @@ mod tests {
         if first_cwd.exists() || second_cwd.exists() {
             return Err("early-stop improvement workspace was not cleaned up".to_string());
         }
+        Ok(())
+    }
+    // 候选：并入 src/improve/loop.rs 的既有 tests module，testing feature。
+    // 实际 loop→EvalRunner→AgentTurnDriver→React→原 RunStore；未编译、未运行。
+    #[tokio::test]
+    async fn improvement_loop_consumes_its_original_correlated_run_store()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        use crate::agent::{AgentHandle, ReactAgentBuilder};
+        use crate::testing::{MockLlmClient, MockTool};
+        use crate::trace::{InMemoryRunStore, RunStore};
+        let store = std::sync::Arc::new(InMemoryRunStore::new());
+        let run_store: std::sync::Arc<dyn RunStore> = store.clone();
+        let tool = MockTool::new("write_file").with_result(
+            crate::tools::ToolResult::success("wrote fixture").with_effect(
+                echo_core::tools::ToolEffect::FileEdit {
+                    path: "fixture.rs".into(),
+                },
+            ),
+        );
+        let agent = ReactAgentBuilder::new()
+            .llm_client(std::sync::Arc::new(
+                MockLlmClient::new()
+                    .then_tool_call("original-write", "write_file", "{}")
+                    .with_response("completed fixture"),
+            ))
+            .tool(Box::new(tool))
+            .with_run_store(run_store.clone())
+            .build()?;
+        let handle = AgentHandle::new(agent);
+        let cases = vec![crate::eval::EvalCase {
+            id: "source8-improve-trace".into(),
+            name: "original trace consumption".into(),
+            description: String::new(),
+            domain: None,
+            task: "run deterministic fixture".into(),
+            project_fixture: None,
+            success_criteria: crate::eval::SuccessCriteria::OutputContains {
+                substring: "DELIBERATELY_ABSENT_EXPECTATION".into(),
+            },
+            constraints: Default::default(),
+        }];
+        let config = ImprovementLoop {
+            max_iterations: 1,
+            ..ImprovementLoop::default()
+        };
+        let result = config
+            .run_async(
+                &cases,
+                move || {
+                    let handle = handle.clone();
+                    async move { handle.to_boxed_agent().await }
+                },
+                &Some(run_store.clone()),
+            )
+            .await;
+        let iteration = result.iterations.first().ok_or("iteration missing")?;
+        assert_eq!(result.iterations.len(), 1);
+        assert_eq!(
+            store.len().await,
+            1,
+            "fixture must create exactly its real trace"
+        );
+        assert_eq!(
+            iteration.critiques.len(),
+            1,
+            "failed Eval did not reach Analyzer"
+        );
+        assert!(
+            !iteration.suggestions.is_empty(),
+            "failure trace produced no suggestions"
+        );
+        let critique = iteration.critiques.first().ok_or("critique missing")?;
+        assert!(critique.issues.iter().any(|issue| matches!(
+            issue,
+            crate::improve::CritiqueIssue::WriteWithoutRead { count: 1, .. }
+        )));
+        // 原 Eval exact parent/turn/execution 和 RunStore 错误控制沿现有 tests 复用；
+        // 不生成产品 run ID，不手工往 store 填一个伪关联 Run 来使该分支可达。
         Ok(())
     }
 }

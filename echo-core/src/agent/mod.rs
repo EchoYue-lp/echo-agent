@@ -6,6 +6,7 @@ mod critic;
 mod event_envelope;
 pub mod factory;
 pub mod intervention;
+mod output_projection;
 pub mod prompt_template;
 mod types;
 
@@ -23,6 +24,7 @@ pub use event_envelope::{
     MessageId, RunId, StreamId, TurnId, envelope_event_stream, envelope_event_stream_after,
     validate_envelope_trajectory, validate_event_trajectory,
 };
+pub use output_projection::{AgentOutputProjection, AssistantTextDelta};
 pub use types::{Critique, CritiqueOutput, critique_output_schema};
 
 use crate::error::{ReactError, Result};
@@ -56,6 +58,50 @@ impl ExecutionUsage {
     /// Return the duration in milliseconds, defaulting to zero when absent.
     pub fn duration_millis(&self) -> u64 {
         self.duration_ms.unwrap_or(0)
+    }
+}
+
+/// 原模型调用的观察结果，不授予 Agent/TaskRun 终态。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelCallOutcome {
+    Completed,
+    Failed,
+    Cancelled,
+}
+
+/// 与原 provider usage 一起发布的可选客户端计时。
+///
+/// call_id 与 attempt_id 是本地调用/流身份，不能回填 ProviderOutputSource.request_id。
+/// 所有时刻为同一请求单调时钟的相对毫秒，不使用 UI 收到批准块的时刻。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelCallObservation {
+    pub call_id: String,
+    pub attempt_id: String,
+    pub outcome: ModelCallOutcome,
+    pub request_duration_ms: u64,
+    pub first_output_ms: Option<u64>,
+    pub last_output_ms: Option<u64>,
+    pub output_samples: u64,
+    pub timing_comparable: bool,
+}
+
+impl ModelCallObservation {
+    /// 只核算同一已完成尝试的可比较输出；总请求耗时不是解码分母。
+    pub fn observed_output_tokens_per_second(&self, completion_tokens: u64) -> Option<f64> {
+        if self.outcome != ModelCallOutcome::Completed
+            || !self.timing_comparable
+            || self.output_samples < 2
+            || completion_tokens == 0
+        {
+            return None;
+        }
+        let last = self.last_output_ms?;
+        if last > self.request_duration_ms {
+            return None;
+        }
+        let duration = last.checked_sub(self.first_output_ms?)?;
+        (duration > 0).then_some(completion_tokens as f64 * 1000.0 / duration as f64)
     }
 }
 
@@ -449,6 +495,14 @@ pub struct AgentInvocationContext {
     /// These exclusions are combined with agent-level defaults when the run
     /// snapshot is created. They never mutate the shared tool registry.
     pub disabled_tools: Option<std::collections::HashSet<String>>,
+    /// Nonempty hard upper bound retained until this invocation takes its
+    /// execution snapshot. Intersect the then-current tool catalog with this
+    /// set; a previously computed exclusion list cannot cover later registrations.
+    /// `None` and an empty set preserve the historical unrestricted behavior.
+    /// A nonempty set with zero registered matches still allows no tool.
+    pub allowed_tools: Option<std::collections::HashSet<String>>,
+    /// 调用级工具能力上界。ReadOnly 只会收窄已有配置，不改变共享 Agent。
+    pub tool_access: Option<crate::tools::ToolAccess>,
     /// Initial tool names whose schemas are visible to the model.
     /// `None` keeps the complete eligible tool surface visible.
     pub visible_tools: Option<std::collections::HashSet<String>>,
@@ -513,6 +567,14 @@ impl std::fmt::Debug for AgentInvocationContext {
                     .as_ref()
                     .map(std::collections::HashSet::len),
             )
+            .field(
+                "allowed_tools",
+                &self
+                    .allowed_tools
+                    .as_ref()
+                    .map(std::collections::HashSet::len),
+            )
+            .field("tool_access", &self.tool_access)
             .field("run_budget", &self.run_budget)
             .field("history_messages", &self.history.as_ref().map(Vec::len))
             .field("resource_guard_count", &self.resource_guards.len())
@@ -532,21 +594,19 @@ impl std::fmt::Debug for AgentInvocationContext {
 #[allow(clippy::large_enum_variant)]
 pub enum AgentEvent {
     // ── LLM Interaction ──────────────────────────────────────────────────────────
-    /// LLM is generating a token (streaming)
-    Token(String),
-    /// LLM reasoning started
-    ThinkStart,
-    /// LLM reasoning ended
-    ThinkEnd {
-        /// Number of prompt tokens consumed
-        prompt_tokens: usize,
-        /// Number of completion tokens consumed
-        completion_tokens: usize,
+    /// Provider-neutral assistant output block.
+    ///
+    /// The current lossless provider-neutral output contract. Block completion
+    /// is distinct from runtime settlement and task/goal completion.
+    AssistantMessage {
+        /// Stable block identity and provider/request ordering metadata.
+        block: AssistantMessageBlock,
     },
+    /// Runtime execution observation. This is not a TaskRun completion signal.
+    ExecutionStatus(ExecutionStatus),
     /// Provider-reported LLM usage for a single request.
     ///
-    /// `ThinkEnd` is kept as a compact, backward-compatible UI event. This
-    /// richer event carries cache observability. When `usage_reported` is
+    /// This event carries provider usage and cache observability. When `usage_reported` is
     /// false, the provider or gateway did not return usage metadata; callers
     /// must treat cache fields as unknown instead of a zero-percent cache hit.
     LlmUsage {
@@ -564,6 +624,9 @@ pub enum AgentEvent {
         cache_creation_prompt_tokens: usize,
         /// Whether the provider response contained usage metadata.
         usage_reported: bool,
+        /// 缺失表示该 producer 没有可证明的调用关联/计时，不得按零耗时处理。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        observation: Option<ModelCallObservation>,
     },
     /// A run budget crossed a behavior boundary.
     BudgetDecision {
@@ -690,16 +753,85 @@ pub enum AgentEvent {
     Cancelled,
 }
 
+/// Semantic phase of an assistant output block.
+///
+/// `Unknown` is intentional: adapters must not infer a phase from wording
+/// when the provider did not supply one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AssistantPhase {
+    Reasoning,
+    Commentary,
+    PartialAnswer,
+    FinalAnswer,
+    Unknown,
+}
+
+/// Lossless provider-neutral assistant block used by Framework, providers,
+/// EKO and SDK consumers.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AssistantMessageBlock {
+    /// Native source coordinates and content kind. Runtime-confirmed blocks
+    /// do not fabricate provider provenance and leave this field None.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_source: Option<crate::llm::types::ProviderOutputSource>,
+    /// Provider item/block id, or a Framework-generated stable fallback.
+    pub block_id: String,
+    /// Model request/response identity owning this block.
+    pub request_id: String,
+    /// Monotonic order within one model response.
+    pub sequence: u64,
+    /// Provider-neutral semantic phase.
+    pub phase: AssistantPhase,
+    /// Incremental text for this observation.
+    pub delta: String,
+    /// Whether the provider/runtime has completed this block.
+    pub complete: bool,
+    /// Provider identity, when known.
+    pub provider: Option<String>,
+    /// Native signed/redacted/opaque reasoning payload, if any.
+    pub reasoning: Option<crate::llm::types::ReasoningBlock>,
+}
+
+/// Runtime execution observation. This is deliberately separate from
+/// TaskRun/Agent completion and cannot publish a successful task on its own.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecutionStatusKind {
+    Started,
+    Waiting,
+    ToolPending,
+    Candidate,
+    Settled,
+    Cancelled,
+    Failed,
+}
+
+/// Stable execution status envelope shared by all consumers.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExecutionStatus {
+    /// 非原source投影的进程内标志；当前canonical消费者明确拒绝此类状态。
+    /// 不进入JSON/Message/Checkpoint合同，也不授予执行owner或物理结算资格。
+    #[serde(skip)]
+    pub adapter_generated: bool,
+    pub execution_id: String,
+    pub request_id: Option<String>,
+    pub sequence: u64,
+    pub phase: AgentPhase,
+    pub status: ExecutionStatusKind,
+    pub reason: Option<String>,
+}
+
 /// The lifecycle phase an Agent event belongs to
 ///
 /// Maps each variant of `AgentEvent` into a unified phase model for:
 /// - **State persistence**: checkpoints are only created at phase boundaries
 /// - **Frontend rendering**: route to the corresponding UI component per phase, without matching every variant
 /// - **Developer understanding**: newcomers first understand phases, then specific events
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum AgentPhase {
-    /// LLM reasoning in progress (Token → ThinkStart → ThinkEnd)
+    /// Current model step; typed assistant blocks/status carry actual progress
     Thinking,
     /// Tool execution in progress (ToolCall -> typed ToolResult)
     Acting,
@@ -731,47 +863,56 @@ impl AgentEvent {
 
     /// Whether this event ends the invocation event stream.
     pub fn is_terminal(&self) -> bool {
-        matches!(
-            self,
-            AgentEvent::FinalAnswer(_) | AgentEvent::Cancelled | AgentEvent::Error { .. }
-        )
+        self.is_execution_terminal()
+            || matches!(
+                self,
+                AgentEvent::FinalAnswer(_) | AgentEvent::Cancelled | AgentEvent::Error { .. }
+            )
     }
 
-    /// Return prompt token count for `ThinkEnd`.
+    /// 原生执行最后的物理结算事实。模型块和 FinalAnswer 确认发布仍不能代替它。
+    pub fn is_execution_terminal(&self) -> bool {
+        matches!(self, Self::ExecutionStatus(status) if matches!(status.status,
+            ExecutionStatusKind::Settled | ExecutionStatusKind::Failed | ExecutionStatusKind::Cancelled))
+    }
+
+    /// Return current provider-reported prompt tokens; absent usage remains unknown.
     pub fn prompt_tokens(&self) -> Option<usize> {
         match self {
-            AgentEvent::ThinkEnd { prompt_tokens, .. } => Some(*prompt_tokens),
-            AgentEvent::LlmUsage { prompt_tokens, .. } => Some(*prompt_tokens),
+            AgentEvent::LlmUsage {
+                prompt_tokens,
+                usage_reported: true,
+                ..
+            } => Some(*prompt_tokens),
             _ => None,
         }
     }
 
-    /// Return completion token count for `ThinkEnd`.
+    /// Return current provider-reported completion tokens.
     pub fn completion_tokens(&self) -> Option<usize> {
         match self {
-            AgentEvent::ThinkEnd {
-                completion_tokens, ..
-            } => Some(*completion_tokens),
             AgentEvent::LlmUsage {
-                completion_tokens, ..
+                completion_tokens,
+                usage_reported: true,
+                ..
             } => Some(*completion_tokens),
             _ => None,
         }
     }
 
-    /// Return total token usage for `ThinkEnd`.
+    /// Return current provider-reported total usage.
     pub fn total_tokens(&self) -> Option<usize> {
         match self {
-            AgentEvent::ThinkEnd {
-                prompt_tokens,
-                completion_tokens,
-            } => Some(prompt_tokens.saturating_add(*completion_tokens)),
-            AgentEvent::LlmUsage { total_tokens, .. } => Some(*total_tokens),
+            AgentEvent::LlmUsage {
+                total_tokens,
+                usage_reported: true,
+                ..
+            } => Some(*total_tokens),
             _ => None,
         }
     }
 
-    /// Compatibility helper for older call sites that tracked a single token count.
+    /// Total provider-reported tokens for current compact usage consumers.
     pub fn tokens_used(&self) -> Option<usize> {
         self.total_tokens()
     }
@@ -785,18 +926,18 @@ impl AgentEvent {
     /// ```
     /// use echo_core::agent::{AgentEvent, AgentPhase};
     ///
-    /// let event = AgentEvent::ThinkStart;
-    /// assert_eq!(event.phase(), AgentPhase::Thinking);
+    /// let event = AgentEvent::ToolBatchEnd;
+    /// assert_eq!(event.phase(), AgentPhase::Acting);
     ///
     /// let event = AgentEvent::FinalAnswer("done".into());
     /// assert_eq!(event.phase(), AgentPhase::Terminal);
     /// ```
     pub fn phase(&self) -> AgentPhase {
         match self {
-            AgentEvent::Token(_)
-            | AgentEvent::ThinkStart
-            | AgentEvent::ThinkEnd { .. }
-            | AgentEvent::LlmUsage { .. }
+            // provider阶段描述正文类型，不能充当执行生命周期终态。
+            AgentEvent::AssistantMessage { .. } => AgentPhase::Thinking,
+            AgentEvent::ExecutionStatus(status) => status.phase,
+            AgentEvent::LlmUsage { .. }
             | AgentEvent::BudgetDecision { .. }
             | AgentEvent::MemoryRecalled { .. }
             | AgentEvent::ContextCompressed { .. }
@@ -828,34 +969,145 @@ impl AgentEvent {
     /// ```
     /// use echo_core::agent::AgentEvent;
     ///
-    /// assert!(AgentEvent::ThinkEnd { prompt_tokens: 100, completion_tokens: 50 }.is_checkpoint());
+    /// assert!(AgentEvent::Cancelled.is_checkpoint());
     /// assert!(AgentEvent::FinalAnswer("done".into()).is_checkpoint());
-    /// assert!(!AgentEvent::Token("hello".into()).is_checkpoint());
+    /// assert!(!AgentEvent::FinalAnswer("body".into()).is_execution_terminal());
     /// ```
     pub fn is_checkpoint(&self) -> bool {
-        matches!(
-            self,
-            AgentEvent::ThinkEnd { .. }
-                | AgentEvent::ToolResult { .. }
-                | AgentEvent::ParameterError { .. }
-                | AgentEvent::ContextCompressed { .. }
-                | AgentEvent::TranscriptProjectionSettlement(_)
-                | AgentEvent::FinalAnswer(_)
-                | AgentEvent::Cancelled
-                | AgentEvent::Error { .. }
-        )
+        match self {
+            // 单块结束时整个模型响应/工具批仍可能在途，不是运行安全点。
+            AgentEvent::AssistantMessage { .. } => false,
+            AgentEvent::ExecutionStatus(status) => matches!(
+                status.status,
+                ExecutionStatusKind::Settled
+                    | ExecutionStatusKind::Cancelled
+                    | ExecutionStatusKind::Failed
+            ),
+            AgentEvent::ToolResult { .. }
+            | AgentEvent::ParameterError { .. }
+            | AgentEvent::ContextCompressed { .. }
+            | AgentEvent::TranscriptProjectionSettlement(_)
+            | AgentEvent::FinalAnswer(_)
+            | AgentEvent::Cancelled
+            | AgentEvent::Error { .. } => true,
+            _ => false,
+        }
     }
 }
 
 #[cfg(test)]
 mod accounting_tests {
-    use super::AgentEvent;
+    use super::{AgentEvent, ModelCallObservation, ModelCallOutcome};
+
+    #[test]
+    fn missing_model_observation_round_trips_without_inventing_timing()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let original = serde_json::json!({"type":"llm_usage","data":{
+            "model":"fixture","prompt_tokens":100,"completion_tokens":50,"total_tokens":150,
+            "cached_prompt_tokens":80,"cache_creation_prompt_tokens":0,"usage_reported":true
+        }});
+        let event: AgentEvent = serde_json::from_value(original.clone())?;
+        assert!(matches!(
+            &event,
+            AgentEvent::LlmUsage {
+                observation: None,
+                ..
+            }
+        ));
+        assert_eq!(serde_json::to_value(&event)?, original);
+        assert_eq!(event.tokens_used(), Some(150));
+        assert!(!event.is_execution_terminal());
+        Ok(())
+    }
+
+    #[test]
+    fn observed_speed_requires_complete_comparable_multi_sample_output()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let observation = ModelCallObservation {
+            call_id: "logical-call".into(),
+            attempt_id: "stream-attempt".into(),
+            outcome: ModelCallOutcome::Completed,
+            request_duration_ms: 2200,
+            first_output_ms: Some(200),
+            last_output_ms: Some(1200),
+            output_samples: 2,
+            timing_comparable: true,
+        };
+        assert_eq!(
+            observation.observed_output_tokens_per_second(100),
+            Some(100.0)
+        );
+        let restored: ModelCallObservation =
+            serde_json::from_value(serde_json::to_value(&observation)?)?;
+        assert_eq!(restored, observation);
+        for invalid in [
+            ModelCallObservation {
+                outcome: ModelCallOutcome::Failed,
+                ..observation.clone()
+            },
+            ModelCallObservation {
+                timing_comparable: false,
+                ..observation.clone()
+            },
+            ModelCallObservation {
+                output_samples: 1,
+                ..observation.clone()
+            },
+            ModelCallObservation {
+                first_output_ms: None,
+                ..observation.clone()
+            },
+            ModelCallObservation {
+                last_output_ms: Some(200),
+                ..observation.clone()
+            },
+            ModelCallObservation {
+                last_output_ms: Some(100),
+                ..observation.clone()
+            },
+            ModelCallObservation {
+                last_output_ms: Some(2300),
+                ..observation.clone()
+            },
+        ] {
+            assert_eq!(invalid.observed_output_tokens_per_second(100), None);
+        }
+        assert_eq!(observation.observed_output_tokens_per_second(0), None);
+        Ok(())
+    }
+
+    #[test]
+    fn native_model_final_block_is_not_execution_terminal_or_safe_point() {
+        let event = AgentEvent::AssistantMessage {
+            block: super::AssistantMessageBlock {
+                provider_source: None,
+                block_id: "final-with-pending-tools".to_string(),
+                request_id: "response".to_string(),
+                sequence: 0,
+                phase: super::AssistantPhase::FinalAnswer,
+                delta: "尚有工具待执行".to_string(),
+                complete: true,
+                provider: Some("fixture".to_string()),
+                reasoning: None,
+            },
+        };
+        assert!(!event.is_terminal());
+        assert!(!event.is_execution_terminal());
+        assert!(!event.is_checkpoint());
+        assert_eq!(event.phase(), super::AgentPhase::Thinking);
+    }
 
     #[test]
     fn total_tokens_saturates_without_panicking() {
-        let event = AgentEvent::ThinkEnd {
+        let event = AgentEvent::LlmUsage {
+            model: "fixture".into(),
             prompt_tokens: usize::MAX,
             completion_tokens: 1,
+            total_tokens: usize::MAX,
+            cached_prompt_tokens: 0,
+            cache_creation_prompt_tokens: 0,
+            usage_reported: true,
+            observation: None,
         };
         assert_eq!(event.total_tokens(), Some(usize::MAX));
         assert_eq!(event.tokens_used(), Some(usize::MAX));
@@ -985,235 +1237,148 @@ pub trait Agent: Send + Sync {
         Box::pin(async { Ok(()) })
     }
 
-    /// Execute a task and return the final answer.
-    ///
-    /// **Task-oriented**: resets/restores context, may run a planning phase
-    /// then enters the ReAct loop.
-    /// Use this for standalone, single-round tasks where the agent starts fresh
-    /// or resumes from a checkpoint.
-    ///
-    /// # ⚠️ Warning: Do NOT use for multi-turn chat UIs
-    ///
-    /// `execute()` **clears conversation history** on every call (only the
-    /// system prompt survives). Calling it in a REPL / terminal UI / chatbot loop
-    /// will make the agent "forget" all previous turns.
-    ///
-    /// **Use [`chat()`](Agent::chat) instead** for any scenario where the
-    /// agent must remember prior messages across calls.
-    ///
-    /// | Scenario | Correct method |
-    /// |---|---|
-    /// | CLI one-shot command | `execute()` ✓ |
-    /// | Workflow / pipeline node | `execute()` ✓ |
-    /// | Batch processing (independent tasks) | `execute()` ✓ |
-    /// | REPL / terminal UI / chatbot | `chat()` ✓ |
-    /// | Multi-turn dialogue | `chat()` ✓ |
-    fn execute<'a>(&'a self, task: &'a str) -> BoxFuture<'a, Result<String>>;
+    /// String convenience for a fresh execution. The current typed producer owns
+    /// input admission, context reset/restore, cancellation and physical settlement.
+    fn execute<'a>(&'a self, task: &'a str) -> BoxFuture<'a, Result<String>> {
+        Box::pin(async move {
+            let source = self
+                .execute_stream_message_with_invocation_context(
+                    Message::user(task.to_string()),
+                    CancellationToken::new(),
+                    AgentInvocationContext::default(),
+                )
+                .await?;
+            collect_canonical_agent_output(source, self.current_run_id()).await
+        })
+    }
 
-    /// Execute a task and stream lifecycle events.
-    ///
-    /// Same semantics as [`Self::execute`] but returns a stream of
-    /// [`AgentEvent`] for real-time observability.
-    ///
-    /// # ⚠️ Warning
-    ///
-    /// Clears conversation history on every call — see [`execute()`](Agent::execute)
-    /// for details. Use [`chat_stream()`](Agent::chat_stream) for multi-turn UIs.
+    /// Current raw-event convenience, backed by the same typed execution kernel.
     fn execute_stream<'a>(
         &'a self,
         task: &'a str,
-    ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>>;
+    ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
+        self.execute_stream_with_cancel(task, CancellationToken::new())
+    }
 
-    /// Execute a task with cooperative cancellation support.
-    ///
-    /// The default implementation wraps [`Self::execute_stream`] with a
-    /// cancellation-aware wrapper. Cancellation retains the original source
-    /// through physical EOF before publishing [`AgentEvent::Cancelled`]. An
-    /// unresolved source observation is propagated without a fake terminal.
-    ///
-    /// # ⚠️ Warning
-    ///
-    /// Clears conversation history on every call — see [`execute()`](Agent::execute)
-    /// for details. Use [`chat_stream_with_cancel()`](Agent::chat_stream_with_cancel)
-    /// for multi-turn UIs.
     fn execute_stream_with_cancel<'a>(
         &'a self,
         task: &'a str,
         cancel: CancellationToken,
     ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
-        Box::pin(async move {
-            let stream = self.execute_stream(task).await?;
-            Ok(cancel_aware_stream(stream, cancel))
-        })
+        self.execute_stream_message_with_invocation_context(
+            Message::user(task.to_string()),
+            cancel.clone(),
+            AgentInvocationContext {
+                cancel: Some(cancel),
+                ..Default::default()
+            },
+        )
     }
 
-    /// Execute with invocation metadata carried as one immutable value.
-    ///
-    /// The default preserves compatibility for agents that do not consume
-    /// invocation metadata.
+    /// Convert only the caller's explicit String; every invocation field stays intact.
     fn execute_stream_with_invocation_context<'a>(
         &'a self,
         task: &'a str,
         cancel: CancellationToken,
-        invocation: AgentInvocationContext,
+        mut invocation: AgentInvocationContext,
     ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
+        invocation.cancel = Some(cancel.clone());
+        self.execute_stream_message_with_invocation_context(
+            Message::user(task.to_string()),
+            cancel,
+            invocation,
+        )
+    }
+
+    /// Multi-turn String convenience. It never falls back to fresh execute semantics.
+    fn chat<'a>(&'a self, message: &'a str) -> BoxFuture<'a, Result<String>> {
         Box::pin(async move {
-            let stream = self.execute_stream_with_cancel(task, cancel).await?;
-            Ok(invocation_retaining_stream(stream, invocation))
+            let source = self
+                .chat_stream_message_with_invocation_context(
+                    Message::user(message.to_string()),
+                    CancellationToken::new(),
+                    AgentInvocationContext::default(),
+                )
+                .await?;
+            collect_canonical_agent_output(source, self.current_run_id()).await
         })
     }
 
-    /// Chat with the agent in a multi-turn conversation.
-    ///
-    /// **Conversation-oriented**: preserves existing context (no reset),
-    /// appends the user message, and runs the ReAct loop.
-    /// Use this for interactive, multi-turn dialogue where the agent
-    /// accumulates state across calls.
-    ///
-    /// **Prefer this over [`execute()`](Agent::execute)** for any UI that
-    /// sends multiple messages in sequence (REPL, terminal UI, chatbot, web chat).
-    ///
-    /// By default this delegates to [`Self::execute`]; concrete implementations
-    /// (like `ReactAgent`) override it to avoid resetting context.
-    fn chat<'a>(&'a self, message: &'a str) -> BoxFuture<'a, Result<String>> {
-        self.execute(message)
-    }
-
-    /// Chat with the agent and stream lifecycle events.
-    ///
-    /// Same semantics as [`Self::chat`] but returns a stream of
-    /// [`AgentEvent`] for real-time observability.
-    ///
-    /// **Prefer this over [`execute_stream()`](Agent::execute_stream)** for
-    /// any UI that sends multiple messages in sequence.
     fn chat_stream<'a>(
         &'a self,
         message: &'a str,
     ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
-        self.execute_stream(message)
+        self.chat_stream_with_cancel(message, CancellationToken::new())
     }
 
-    /// Chat streaming variant with cooperative cancellation support.
-    ///
-    /// The default implementation wraps [`Self::chat_stream`] with a
-    /// cancellation-aware wrapper. Cancellation retains the original source
-    /// through physical EOF before publishing [`AgentEvent::Cancelled`]. An
-    /// unresolved source observation is propagated without a fake terminal.
     fn chat_stream_with_cancel<'a>(
         &'a self,
         message: &'a str,
         cancel: CancellationToken,
     ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
-        Box::pin(async move {
-            let stream = self.chat_stream(message).await?;
-            Ok(cancel_aware_stream(stream, cancel))
-        })
+        self.chat_stream_message_with_invocation_context(
+            Message::user(message.to_string()),
+            cancel.clone(),
+            AgentInvocationContext {
+                cancel: Some(cancel),
+                ..Default::default()
+            },
+        )
     }
 
-    /// Multi-turn chat streaming with a structured multimodal message.
-    ///
-    /// Implementations must preserve the same conversational semantics as
-    /// [`Self::chat_stream_with_cancel`]: append to the existing context rather
-    /// than resetting it. The default adapts only a metadata-free plain User
-    /// text message to the legacy text method. Other message forms remain
-    /// unsupported instead of losing role, multimodal content or metadata.
     fn chat_stream_message_with_cancel<'a>(
         &'a self,
         message: Message,
         cancel: CancellationToken,
     ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
-        Box::pin(async move {
-            if let Message {
-                role: crate::llm::types::Role::User,
-                content: crate::llm::types::MessageContent::Text(text),
-                tool_calls: None,
-                name: None,
-                tool_call_id: None,
-                reasoning_content: None,
-                reasoning_blocks: None,
-            } = message
-            {
-                // The adapter owns text for as long as the legacy stream can
-                // borrow it. Legacy setup starts on first poll; its original
-                // setup error is emitted as a stream error, never a success.
-                let stream = async_stream::stream! {
-                    match self.chat_stream_with_cancel(&text, cancel).await {
-                        Ok(legacy) => {
-                            // Retain the same Result source through cleanup.
-                            // The existing wrapper preserves the first business
-                            // error and necessary later observation/confirmation.
-                            let mut legacy = retaining_source_stream(legacy, None, None);
-                            while let Some(event) = legacy.next().await { yield event; }
-                        }
-                        Err(error) => yield Err(error),
-                    }
-                };
-                return Ok(Box::pin(stream) as BoxStream<'a, Result<AgentEvent>>);
-            }
-            Err(crate::error::ReactError::Other(
-                "this agent does not implement multimodal streaming (chat_stream_message_with_cancel)"
-                    .to_string(),
-            ))
-        })
+        self.chat_stream_message_with_invocation_context(
+            message,
+            cancel.clone(),
+            AgentInvocationContext {
+                cancel: Some(cancel),
+                ..Default::default()
+            },
+        )
     }
 
-    /// Structured multi-turn chat with value-scoped invocation metadata.
-    ///
-    /// The default delegates to the existing structured chat method so
-    /// third-party agents can opt into metadata without changing semantics.
+    /// Canonical multi-turn producer. Implementations accept the whole current
+    /// Message and invocation or refuse before source admission; no text/metadata fallback.
     fn chat_stream_message_with_invocation_context<'a>(
-        &'a self,
-        message: Message,
-        cancel: CancellationToken,
-        invocation: AgentInvocationContext,
-    ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
-        Box::pin(async move {
-            let stream = self
-                .chat_stream_message_with_cancel(message, cancel)
-                .await?;
-            Ok(invocation_retaining_stream(stream, invocation))
-        })
-    }
-
-    /// Streaming task execution with cancellation (multimodal version).
-    ///
-    /// Accepts a pre-built [`Message`] so subagents dispatched via subagent
-    /// delegation can see images/files attached by the user. `ReactAgent`
-    /// overrides this to route through its real multimodal pipeline.
-    ///
-    /// The default implementation is **not supported** — agents that don't
-    /// implement multimodal streaming return an error if a multimodal task is
-    /// dispatched to them. This keeps the trait signature lifetime-safe (the
-    /// text-extracted fallback would borrow a local). Callers that need a
-    /// text fallback should extract the text themselves and use
-    /// [`execute_stream_with_cancel`](Self::execute_stream_with_cancel).
-    fn execute_stream_message_with_cancel<'a>(
         &'a self,
         _message: Message,
         _cancel: CancellationToken,
+        _invocation: AgentInvocationContext,
     ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
-        Box::pin(async move {
-            Err(crate::error::ReactError::Other(
-                "this agent does not implement multimodal streaming (execute_stream_message_with_cancel)".to_string(),
-            ))
-        })
+        Box::pin(async { Err(ReactError::Other("canonical typed chat invocation".into())) })
     }
 
-    /// Multimodal streaming with value-scoped invocation metadata.
-    ///
-    /// The default delegates to the existing multimodal method so third-party
-    /// agents remain source compatible.
-    fn execute_stream_message_with_invocation_context<'a>(
+    fn execute_stream_message_with_cancel<'a>(
         &'a self,
         message: Message,
         cancel: CancellationToken,
-        invocation: AgentInvocationContext,
     ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
-        Box::pin(async move {
-            let stream = self
-                .execute_stream_message_with_cancel(message, cancel)
-                .await?;
-            Ok(invocation_retaining_stream(stream, invocation))
+        self.execute_stream_message_with_invocation_context(
+            message,
+            cancel.clone(),
+            AgentInvocationContext {
+                cancel: Some(cancel),
+                ..Default::default()
+            },
+        )
+    }
+
+    /// Canonical fresh-execution producer. The source retains its original resources,
+    /// reports its own native status and closes physically; this default invents none.
+    fn execute_stream_message_with_invocation_context<'a>(
+        &'a self,
+        _message: Message,
+        _cancel: CancellationToken,
+        _invocation: AgentInvocationContext,
+    ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
+        Box::pin(async {
+            Err(ReactError::Other(
+                "canonical typed execute invocation".into(),
+            ))
         })
     }
 
@@ -1253,9 +1418,8 @@ pub trait Agent: Send + Sync {
     /// Inject and track one message through acceptance, model-context drain,
     /// and root-turn settlement.
     ///
-    /// Implementations that only support the legacy [`Self::steer_input`]
-    /// remain source compatible and return [`AgentSteerError::Unsupported`]
-    /// here until they can provide real lifecycle signals.
+    /// 只支持即时steer而不提供真实接纳/排空/结算信号的复用方，在此明确返回
+    /// [`AgentSteerError::Unsupported`]，不把普通消息投递冒作完整生命周期。
     fn steer_input_tracked(
         &self,
         _expected_turn_id: Option<&str>,
@@ -1264,27 +1428,12 @@ pub trait Agent: Send + Sync {
         Err(AgentSteerError::Unsupported)
     }
 
-    // ── External run context (跨 spawn 安全的值传递, 见 ExternalRunContext) ──
-
-    /// Legacy agent-wide run context setter.
-    ///
-    /// **背景**：`tokio::task_local!` 不会跨 `tokio::spawn` 继承。subagent instance
-    /// 在框架层的 `tokio::spawn`（subagent_executor.rs 的 dispatch_fork）里执行，
-    /// 应用层经 task_local 注入的 run_id / cancel / trace_sink 全部丢失。
-    /// 新代码应使用 `AgentInvocationContext` 的 value-scoped streaming methods；
-    /// 此 setter 仅为外部兼容保留。
-    fn set_external_context(&self, _ctx: &crate::tools::ExternalRunContext) {}
-
-    /// Clear context installed through the legacy setter.
-    fn clear_external_context(&self) {}
-
     /// Bind a working directory for this agent's tool calls (Sprint 8 worktree
     /// isolation). When set, every shell/file/git tool runs inside `path`
     /// (via `ToolContext.working_dir`). `None` clears it (restore default cwd).
     ///
-    /// Default: noop. New invocation paths should use
-    /// `AgentInvocationContext::working_dir`; this setter remains compatible
-    /// with callers that intentionally configure an agent-wide default.
+    /// 配置级默认工作目录仍是当前能力；本次调用的工作目录使用
+    /// `AgentInvocationContext::working_dir`，不借它注入共享运行身份。
     fn set_working_dir(&self, _path: Option<std::path::PathBuf>) {}
 
     /// Clear the bound working directory (alias for `set_working_dir(None)`).
@@ -1467,12 +1616,6 @@ impl Agent for Box<dyn Agent> {
     fn reset(&self) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
         self.as_ref().reset()
     }
-    fn set_external_context(&self, ctx: &crate::tools::ExternalRunContext) {
-        self.as_ref().set_external_context(ctx);
-    }
-    fn clear_external_context(&self) {
-        self.as_ref().clear_external_context();
-    }
     fn set_working_dir(&self, path: Option<std::path::PathBuf>) {
         self.as_ref().set_working_dir(path);
     }
@@ -1496,500 +1639,89 @@ impl Agent for Box<dyn Agent> {
     }
 }
 
-/// Wrap an agent event stream with cooperative cancellation support.
-///
-/// A cancellation event is a delivery cause, not the producer's closure
-/// receipt. Publish cancellation only after the original source's EOF.
-fn cancel_aware_stream<'a>(
-    stream: BoxStream<'a, Result<AgentEvent>>,
-    cancel: CancellationToken,
-) -> BoxStream<'a, Result<AgentEvent>> {
-    retaining_source_stream(stream, Some(cancel), None)
-}
-
-fn invocation_retaining_stream<'a>(
-    stream: BoxStream<'a, Result<AgentEvent>>,
-    invocation: AgentInvocationContext,
-) -> BoxStream<'a, Result<AgentEvent>> {
-    retaining_source_stream(stream, None, Some(invocation))
-}
-
-// Both existing wrappers retain the same source. A cancellation terminal is
-// delayed until physical EOF; if the source reported uncertainty, a later
-// original terminal must confirm its closure first. No timer or owner is added.
-fn retaining_source_stream<'a>(
-    mut stream: BoxStream<'a, Result<AgentEvent>>,
-    cancel: Option<CancellationToken>,
-    invocation: Option<AgentInvocationContext>,
-) -> BoxStream<'a, Result<AgentEvent>> {
-    let wrapped = async_stream::stream! {
-        let _invocation = invocation;
-        let mut cancel_requested = false;
-        let mut business_observed = false;
-        // A final answer projects the business result but is not a failure
-        // cause. Preserve the first later cleanup error while still draining
-        // the same original source, without replacing an earlier failure.
-        let mut failure_observed = false;
-        let mut source_observation_pending = false;
-        loop {
-            let next = if cancel_requested || business_observed {
-                stream.next().await
-            } else if let Some(cancel) = cancel.as_ref() {
-                tokio::select! {
-                    biased;
-                    next = stream.next() => next,
-                    _ = cancel.cancelled() => {
-                        cancel_requested = true;
-                        continue;
+/// Thin nonstream projection of the same producer; always drain its physical EOF.
+/// A publication or error does not authorize dropping callbacks/effects still owned by it.
+async fn collect_canonical_agent_output(
+    mut source: BoxStream<'_, Result<AgentEvent>>,
+    owner_run: Option<String>,
+) -> Result<String> {
+    let mut output = AgentOutputProjection::default();
+    let mut first_error = None;
+    let mut unresolved = None::<ReactError>;
+    while let Some(item) = source.next().await {
+        let matches_owner = |error: &ReactError, output: &AgentOutputProjection| {
+            matches!(error, ReactError::ExecutionNotSettled { run_id, execution_id }
+                if owner_run.as_deref() == Some(run_id.as_str())
+                    && execution_id.as_deref().is_some()
+                    && execution_id.as_deref() == output.execution_id())
+        };
+        let observed = match item {
+            Err(error @ ReactError::ExecutionNotSettled { .. }) => {
+                // Foreign observation remains sticky; own real terminal can clear only its exact pair.
+                if unresolved
+                    .as_ref()
+                    .is_none_or(|prior| matches_owner(prior, &output))
+                {
+                    unresolved = Some(error);
+                }
+                Ok(())
+            }
+            Ok(AgentEvent::ExecutionStatus(status)) => {
+                let checked = output.observe_status(&status);
+                match checked {
+                    Err(error) => Err(error),
+                    Ok(changed) => {
+                        if changed
+                            && matches!(
+                                status.status,
+                                ExecutionStatusKind::Settled
+                                    | ExecutionStatusKind::Failed
+                                    | ExecutionStatusKind::Cancelled
+                            )
+                            && unresolved
+                                .as_ref()
+                                .is_some_and(|prior| matches_owner(prior, &output))
+                        {
+                            unresolved = None;
+                        }
+                        if let Some(error) = output.terminal_failure() {
+                            first_error.get_or_insert(error);
+                        }
+                        Ok(())
                     }
                 }
-            } else {
-                stream.next().await
-            };
-            let Some(item) = next else { break; };
-            match &item {
-                Err(ReactError::ExecutionNotSettled { .. }) => {
-                    source_observation_pending = true;
-                    yield item;
+            }
+            Ok(AgentEvent::AssistantMessage { block }) => output.observe_block(&block).map(|_| ()),
+            Ok(AgentEvent::FinalAnswer(answer)) => output.confirm_answer(&answer),
+            Ok(AgentEvent::Error { failure, .. }) => Err(match failure.terminal_kind {
+                crate::error::AgentTerminalKind::Cancelled => {
+                    crate::error::AgentError::Cancelled(failure.message).into()
                 }
-                Ok(event) if event.is_terminal() => {
-                    let confirms_observation = source_observation_pending;
-                    source_observation_pending = false;
-                    if !cancel_requested && (!business_observed || confirms_observation) {
-                        // A confirmation after a delivered terminal is consumed
-                        // by the original drainer, not replayed as another
-                        // canonical business terminal by the normalizer.
-                        business_observed = true;
-                        failure_observed |= matches!(event, AgentEvent::Cancelled | AgentEvent::Error { .. });
-                        yield item;
-                    }
+                crate::error::AgentTerminalKind::TimedOut => {
+                    crate::error::AgentError::Timeout(failure.message).into()
                 }
-                Err(_) if !cancel_requested && !failure_observed => {
-                    business_observed = true;
-                    failure_observed = true;
-                    yield item;
+                crate::error::AgentTerminalKind::PermissionDenied => {
+                    crate::error::AgentError::PermissionDenied(failure.message).into()
                 }
-                Ok(_) if !cancel_requested && !business_observed => yield item,
-                _ => {}
+                crate::error::AgentTerminalKind::Failed => ReactError::Other(failure.message),
+            }),
+            Ok(AgentEvent::Cancelled) => {
+                Err(crate::error::AgentError::Cancelled("source cancelled".into()).into())
             }
-        }
-        if cancel_requested && !business_observed && !source_observation_pending {
-            // With prior uncertainty this projection is backed by a genuine
-            // later source terminal AND the just-observed original EOF. A
-            // cancelled token or EOF alone never clears that uncertainty.
-            yield Ok(AgentEvent::Cancelled);
-        }
-    };
-    Box::pin(wrapped)
-}
-
-#[cfg(test)]
-mod invocation_retaining_stream_tests {
-    #[tokio::test]
-    async fn structured_legacy_chat_preserves_observation_and_original_live_source() -> Result<()> {
-        use futures::FutureExt;
-        use tokio::sync::{Mutex, Notify};
-        struct SourceDrop(Arc<AtomicUsize>);
-        impl Drop for SourceDrop {
-            fn drop(&mut self) {
-                self.0.fetch_add(1, Ordering::SeqCst);
-            }
-        }
-        type Backend = futures::future::Shared<BoxFuture<'static, std::result::Result<(), String>>>;
-        struct LegacyChat {
-            release: Arc<Notify>,
-            join: Arc<Mutex<Option<Backend>>>,
-            drops: Arc<AtomicUsize>,
-            path: std::path::PathBuf,
-        }
-        impl Agent for LegacyChat {
-            fn name(&self) -> &str {
-                "legacy-live-chat"
-            }
-            fn model_name(&self) -> &str {
-                "test"
-            }
-            fn system_prompt(&self) -> &str {
-                "test"
-            }
-            fn execute<'a>(&'a self, _: &'a str) -> BoxFuture<'a, Result<String>> {
-                Box::pin(async { Ok("unused".into()) })
-            }
-            fn execute_stream<'a>(
-                &'a self,
-                _: &'a str,
-            ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
-                Box::pin(async move {
-                    let release = self.release.clone();
-                    let path = self.path.clone();
-                    let slot = self.join.clone();
-                    let drops = self.drops.clone();
-                    let source = async_stream::stream! {
-                        let _scope = SourceDrop(drops);
-                        let entered = Arc::new(Notify::new());
-                        let producer_entered = entered.clone();
-                        let backend = tokio::spawn(async move {
-                            std::fs::write(&path, "entered").map_err(|error| error.to_string())?;
-                            producer_entered.notify_one();
-                            release.notified().await;
-                            std::fs::write(&path, "closed").map_err(|error| error.to_string())?;
-                            Ok::<(), String>(())
-                        }).map(|result| result.map_err(|error| error.to_string()).and_then(|result| result)).boxed().shared();
-                        *slot.lock().await = Some(backend.clone());
-                        entered.notified().await;
-                        yield Err(ReactError::ExecutionNotSettled { run_id: "original-chat-run".into(), execution_id: Some("original-chat-attempt".into()) });
-                        if let Err(error) = backend.await { yield Err(ReactError::Other(error)); return; }
-                        yield Ok(AgentEvent::FinalAnswer("same original source".into()));
-                    };
-                    Ok(Box::pin(source) as BoxStream<'a, Result<AgentEvent>>)
-                })
-            }
-        }
-        let directory =
-            std::env::temp_dir().join(format!("echo_legacy_chat_{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&directory)?;
-        let path = directory.join("effect.txt");
-        let release = Arc::new(Notify::new());
-        let join = Arc::new(Mutex::new(None));
-        let drops = Arc::new(AtomicUsize::new(0));
-        let agent = LegacyChat {
-            release: release.clone(),
-            join: join.clone(),
-            drops: drops.clone(),
-            path: path.clone(),
+            Err(error) => Err(error),
+            Ok(_) => Ok(()),
         };
-        let mut source = agent
-            .chat_stream_message_with_invocation_context(
-                Message::user("plain user".to_string()),
-                CancellationToken::new(),
-                AgentInvocationContext::default(),
-            )
-            .await?;
-        let first = source.next().await;
-        let early = tokio::time::timeout(std::time::Duration::from_millis(20), source.next()).await;
-        let held = std::fs::read_to_string(&path).ok();
-        let early_drops = drops.load(Ordering::SeqCst);
-        release.notify_one();
-        let cleanup = match join.lock().await.take() {
-            Some(backend) => backend.await.map_err(ReactError::Other),
-            None => Err(ReactError::Other("missing original backend".into())),
-        };
-        let mut tail = Vec::new();
-        while let Some(event) = source.next().await {
-            tail.push(event);
-        }
-        let closed = std::fs::read_to_string(&path).ok();
-        let _ = std::fs::remove_dir_all(&directory);
-        cleanup?;
-        assert!(matches!(
-            first,
-            Some(Err(ReactError::ExecutionNotSettled { .. }))
-        ));
-        assert_eq!(held.as_deref(), Some("entered"));
-        assert_eq!(closed.as_deref(), Some("closed"));
-        assert!(
-            early.is_err(),
-            "legacy source ended instead of retaining its physical continuation: {early:?}"
-        );
-        assert_eq!(early_drops, 0);
-        assert!(
-            matches!(tail.as_slice(), [Ok(AgentEvent::FinalAnswer(answer))] if answer == "same original source")
-        );
-        assert_eq!(drops.load(Ordering::SeqCst), 1);
-        Ok(())
-    }
-
-    use super::*;
-    use crate::tools::InvocationResourceGuard;
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
-    struct DropCounter(Arc<AtomicUsize>);
-
-    impl Drop for DropCounter {
-        fn drop(&mut self) {
-            self.0.fetch_add(1, Ordering::SeqCst);
+        if let Err(error) = observed {
+            first_error.get_or_insert(error);
         }
     }
-
-    struct DefaultInvocationAgent;
-
-    impl Agent for DefaultInvocationAgent {
-        fn name(&self) -> &str {
-            "default-invocation"
-        }
-
-        fn model_name(&self) -> &str {
-            "test"
-        }
-
-        fn system_prompt(&self) -> &str {
-            "test"
-        }
-
-        fn execute<'a>(&'a self, _task: &'a str) -> BoxFuture<'a, Result<String>> {
-            Box::pin(async { Ok("done".to_string()) })
-        }
-
-        fn execute_stream<'a>(
-            &'a self,
-            _task: &'a str,
-        ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
-            Box::pin(async {
-                Ok(Box::pin(futures::stream::pending()) as BoxStream<'a, Result<AgentEvent>>)
-            })
-        }
-
-        fn chat_stream_message_with_cancel<'a>(
-            &'a self,
-            _message: Message,
-            _cancel: CancellationToken,
-        ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
-            Box::pin(async {
-                Ok(Box::pin(futures::stream::pending()) as BoxStream<'a, Result<AgentEvent>>)
-            })
-        }
-
-        fn execute_stream_message_with_cancel<'a>(
-            &'a self,
-            _message: Message,
-            _cancel: CancellationToken,
-        ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
-            Box::pin(async {
-                Ok(Box::pin(futures::stream::pending()) as BoxStream<'a, Result<AgentEvent>>)
-            })
-        }
+    if let Some(error) = unresolved {
+        return Err(error);
     }
-
-    fn invocation(drops: &Arc<AtomicUsize>) -> AgentInvocationContext {
-        AgentInvocationContext {
-            resource_guards: vec![InvocationResourceGuard::new(DropCounter(Arc::clone(drops)))],
-            ..AgentInvocationContext::default()
-        }
+    if let Some(error) = first_error {
+        return Err(error);
     }
-
-    #[derive(Clone, Copy, Debug)]
-    enum DefaultStreamEntry {
-        Text,
-        ChatMessage,
-        ExecuteMessage,
-    }
-
-    struct DefaultTailAgent {
-        items: std::sync::Mutex<Vec<Result<AgentEvent>>>,
-    }
-
-    impl Agent for DefaultTailAgent {
-        fn name(&self) -> &str {
-            "default-tail"
-        }
-
-        fn model_name(&self) -> &str {
-            "test"
-        }
-
-        fn system_prompt(&self) -> &str {
-            "test"
-        }
-
-        fn execute<'a>(&'a self, _: &'a str) -> BoxFuture<'a, Result<String>> {
-            Box::pin(async { Ok("unused".into()) })
-        }
-
-        fn execute_stream<'a>(
-            &'a self,
-            _: &'a str,
-        ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
-            Box::pin(async move {
-                let items = std::mem::take(
-                    &mut *self
-                        .items
-                        .lock()
-                        .unwrap_or_else(|poisoned| poisoned.into_inner()),
-                );
-                Ok(futures::stream::iter(items).boxed())
-            })
-        }
-
-        fn execute_stream_message_with_cancel<'a>(
-            &'a self,
-            _: Message,
-            cancel: CancellationToken,
-        ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
-            // Supply only the supported legacy producer. All invocation methods,
-            // including structured chat's text fallback, remain trait defaults.
-            self.execute_stream_with_cancel("structured execute", cancel)
-        }
-    }
-
-    async fn default_tail_events(
-        entry: DefaultStreamEntry,
-        items: Vec<Result<AgentEvent>>,
-    ) -> Result<Vec<Result<AgentEvent>>> {
-        let agent = DefaultTailAgent {
-            items: std::sync::Mutex::new(items),
-        };
-        let cancel = CancellationToken::new();
-        let stream = match entry {
-            DefaultStreamEntry::Text => {
-                agent
-                    .execute_stream_with_invocation_context(
-                        "text",
-                        cancel,
-                        AgentInvocationContext::default(),
-                    )
-                    .await?
-            }
-            DefaultStreamEntry::ChatMessage => {
-                agent
-                    .chat_stream_message_with_invocation_context(
-                        Message::user("chat".to_string()),
-                        cancel,
-                        AgentInvocationContext::default(),
-                    )
-                    .await?
-            }
-            DefaultStreamEntry::ExecuteMessage => {
-                agent
-                    .execute_stream_message_with_invocation_context(
-                        Message::user("execute".to_string()),
-                        cancel,
-                        AgentInvocationContext::default(),
-                    )
-                    .await?
-            }
-        };
-        Ok(stream.collect().await)
-    }
-
-    #[tokio::test]
-    async fn default_invocation_entries_preserve_first_tail_cleanup_failure() -> Result<()> {
-        for entry in [
-            DefaultStreamEntry::Text,
-            DefaultStreamEntry::ChatMessage,
-            DefaultStreamEntry::ExecuteMessage,
-        ] {
-            let events = default_tail_events(
-                entry,
-                vec![
-                    Ok(AgentEvent::FinalAnswer("done".into())),
-                    Err(ReactError::Other("first cleanup failure".into())),
-                    Err(ReactError::Other("later cleanup failure".into())),
-                ],
-            )
-            .await?;
-            assert!(
-                matches!(events.as_slice(), [Ok(AgentEvent::FinalAnswer(answer)), Err(ReactError::Other(error))]
-                    if answer == "done" && error == "first cleanup failure"),
-                "{entry:?} must retain the first cleanup failure after its final answer: {events:?}"
-            );
-        }
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn default_invocation_entries_keep_prior_failure_and_cancellation() -> Result<()> {
-        for entry in [
-            DefaultStreamEntry::Text,
-            DefaultStreamEntry::ChatMessage,
-            DefaultStreamEntry::ExecuteMessage,
-        ] {
-            for first in [
-                Err(ReactError::Other("original failure".into())),
-                Ok(AgentEvent::error_message("producer", "original failure")),
-                Ok(AgentEvent::Cancelled),
-            ] {
-                let expected = format!("{first:?}");
-                let events = default_tail_events(
-                    entry,
-                    vec![
-                        first,
-                        Err(ReactError::Other("later cleanup failure".into())),
-                    ],
-                )
-                .await?;
-                assert_eq!(events.len(), 1, "{entry:?}: {events:?}");
-                assert_eq!(format!("{:?}", events.first()), format!("Some({expected})"));
-            }
-        }
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn default_invocation_entries_keep_unsettled_identity_and_tail_failure() -> Result<()> {
-        for entry in [
-            DefaultStreamEntry::Text,
-            DefaultStreamEntry::ChatMessage,
-            DefaultStreamEntry::ExecuteMessage,
-        ] {
-            let events = default_tail_events(
-                entry,
-                vec![
-                    Ok(AgentEvent::FinalAnswer("done".into())),
-                    Err(ReactError::ExecutionNotSettled {
-                        run_id: "original-run".into(),
-                        execution_id: Some("original-attempt".into()),
-                    }),
-                    Err(ReactError::Other("cleanup failure".into())),
-                ],
-            )
-            .await?;
-            assert!(
-                matches!(events.as_slice(), [Ok(AgentEvent::FinalAnswer(_)), Err(ReactError::ExecutionNotSettled { run_id, execution_id: Some(execution_id) }), Err(ReactError::Other(error))]
-                    if run_id == "original-run" && execution_id == "original-attempt" && error == "cleanup failure"),
-                "{entry:?} lost original observation or cleanup cause: {events:?}"
-            );
-        }
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn default_text_invocation_retains_guards_until_stream_drop() -> Result<()> {
-        let drops = Arc::new(AtomicUsize::new(0));
-        let stream = DefaultInvocationAgent
-            .execute_stream_with_invocation_context(
-                "task",
-                CancellationToken::new(),
-                invocation(&drops),
-            )
-            .await?;
-        assert_eq!(drops.load(Ordering::SeqCst), 0);
-        drop(stream);
-        assert_eq!(drops.load(Ordering::SeqCst), 1);
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn default_multimodal_chat_retains_guards_until_stream_drop() -> Result<()> {
-        let drops = Arc::new(AtomicUsize::new(0));
-        let stream = DefaultInvocationAgent
-            .chat_stream_message_with_invocation_context(
-                Message::user("chat".to_string()),
-                CancellationToken::new(),
-                invocation(&drops),
-            )
-            .await?;
-        assert_eq!(drops.load(Ordering::SeqCst), 0);
-        drop(stream);
-        assert_eq!(drops.load(Ordering::SeqCst), 1);
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn default_multimodal_execute_retains_guards_until_stream_drop() -> Result<()> {
-        let drops = Arc::new(AtomicUsize::new(0));
-        let stream = DefaultInvocationAgent
-            .execute_stream_message_with_invocation_context(
-                Message::user("execute".to_string()),
-                CancellationToken::new(),
-                invocation(&drops),
-            )
-            .await?;
-        assert_eq!(drops.load(Ordering::SeqCst), 0);
-        drop(stream);
-        assert_eq!(drops.load(Ordering::SeqCst), 1);
-        Ok(())
-    }
+    output.finish()
 }
 
 /// Agent lifecycle callback interface
@@ -2024,70 +1756,35 @@ pub trait AgentCallback: Send + Sync {
         Box::pin(async {})
     }
 
-    /// Called before a tool invocation begins.
-    fn on_tool_start<'a>(
+    /// Optional current observer of the exact source tool invocation identity.
+    fn on_tool_start_with_id<'a>(
         &'a self,
         _agent: &'a str,
+        _call_id: &'a str,
         _tool: &'a str,
         _args: &'a Value,
     ) -> BoxFuture<'a, ()> {
         Box::pin(async {})
     }
 
-    /// Called before a tool invocation begins with its canonical call identity.
-    ///
-    /// The default preserves source compatibility for callbacks that only need
-    /// tool-level lifecycle notifications.
-    fn on_tool_start_with_id<'a>(
-        &'a self,
-        agent: &'a str,
-        _call_id: &'a str,
-        tool: &'a str,
-        args: &'a Value,
-    ) -> BoxFuture<'a, ()> {
-        self.on_tool_start(agent, tool, args)
-    }
-
-    /// Called after a tool invocation succeeds.
-    fn on_tool_end<'a>(
+    fn on_tool_end_with_id<'a>(
         &'a self,
         _agent: &'a str,
+        _call_id: &'a str,
         _tool: &'a str,
         _result: &'a str,
     ) -> BoxFuture<'a, ()> {
         Box::pin(async {})
     }
 
-    /// Called after a tool invocation succeeds with its canonical call identity.
-    fn on_tool_end_with_id<'a>(
-        &'a self,
-        agent: &'a str,
-        _call_id: &'a str,
-        tool: &'a str,
-        result: &'a str,
-    ) -> BoxFuture<'a, ()> {
-        self.on_tool_end(agent, tool, result)
-    }
-
-    /// Called when a tool invocation fails.
-    fn on_tool_error<'a>(
-        &'a self,
-        _agent: &'a str,
-        _tool: &'a str,
-        _err: &'a ReactError,
-    ) -> BoxFuture<'a, ()> {
-        Box::pin(async {})
-    }
-
-    /// Called after a tool invocation fails with its canonical call identity.
     fn on_tool_error_with_id<'a>(
         &'a self,
-        agent: &'a str,
+        _agent: &'a str,
         _call_id: &'a str,
-        tool: &'a str,
-        error: &'a ReactError,
+        _tool: &'a str,
+        _error: &'a ReactError,
     ) -> BoxFuture<'a, ()> {
-        self.on_tool_error(agent, tool, error)
+        Box::pin(async {})
     }
 
     /// Settle an invocation that the runtime interrupted without a captured result.
@@ -2119,237 +1816,714 @@ pub trait AgentCallback: Send + Sync {
 }
 
 #[cfg(test)]
-mod default_pure_text_chat_tests {
+mod canonical_agent_runtime_contract_tests {
     use super::*;
-    use crate::llm::types::{ContentPart, MessageContent, Role};
-    use crate::tools::InvocationResourceGuard;
-    use std::sync::{
-        Arc,
-        atomic::{AtomicUsize, Ordering},
-    };
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
 
-    struct DropProof(Arc<AtomicUsize>);
-    impl Drop for DropProof {
-        fn drop(&mut self) {
-            self.0.fetch_add(1, Ordering::SeqCst);
-        }
+    fn status(kind: ExecutionStatusKind, ordinal: u64) -> AgentEvent {
+        AgentEvent::ExecutionStatus(ExecutionStatus {
+            adapter_generated: false,
+            execution_id: "native-source".into(),
+            request_id: Some("native-request".into()),
+            sequence: ordinal,
+            phase: AgentPhase::Terminal,
+            status: kind,
+            reason: None,
+        })
+    }
+
+    struct Call {
+        chat: bool,
+        message: Message,
+        invocation: AgentInvocationContext,
     }
 
     #[derive(Default)]
-    struct LegacyTextAgent {
-        calls: AtomicUsize,
-        fail_setup: bool,
-        release_cleanup: tokio::sync::Notify,
+    struct NativeAgent {
+        calls: Arc<Mutex<Vec<Call>>>,
+        text_calls: AtomicUsize,
+        tail_failure: bool,
+        terminal_missing: bool,
     }
-    impl Agent for LegacyTextAgent {
-        fn name(&self) -> &str {
-            "legacy-text"
-        }
-        fn model_name(&self) -> &str {
-            "none"
-        }
-        fn system_prompt(&self) -> &str {
-            ""
-        }
-        fn execute<'a>(&'a self, text: &'a str) -> BoxFuture<'a, Result<String>> {
-            Box::pin(async move { Ok(text.to_string()) })
-        }
-        fn execute_stream<'a>(
+
+    impl NativeAgent {
+        fn source<'a>(
             &'a self,
-            text: &'a str,
+            chat: bool,
+            message: Message,
+            invocation: AgentInvocationContext,
         ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
-            self.chat_stream(text)
-        }
-        fn chat_stream<'a>(
-            &'a self,
-            text: &'a str,
-        ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
+            self.calls
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .push(Call {
+                    chat,
+                    message,
+                    invocation,
+                });
             Box::pin(async move {
-                self.calls.fetch_add(1, Ordering::SeqCst);
-                if self.fail_setup {
-                    return Err(ReactError::Other(
-                        "original legacy setup failure".to_string(),
-                    ));
+                let mut events = vec![
+                    Ok(status(ExecutionStatusKind::Started, 0)),
+                    Ok(AgentEvent::FinalAnswer("安全最终中文🙂".into())),
+                ];
+                if !self.terminal_missing {
+                    events.push(Ok(status(ExecutionStatusKind::Settled, 1)));
                 }
-                // Keep the borrowed original text across the caller's later poll.
-                Ok(async_stream::stream! {
-                    yield Ok(AgentEvent::Token(text.to_string()));
-                    self.release_cleanup.notified().await;
+                if self.tail_failure {
+                    events.push(Err(ReactError::Other("original tail failure".into())));
                 }
-                .boxed())
+                Ok(futures::stream::iter(events).boxed())
             })
         }
     }
 
-    #[tokio::test]
-    async fn default_pure_text_chat_owns_input_until_poll_and_retains_cancel_and_guard()
-    -> Result<()> {
-        let agent = LegacyTextAgent::default();
-        let drops = Arc::new(AtomicUsize::new(0));
-        let cancel = CancellationToken::new();
-        let context = AgentInvocationContext {
-            resource_guards: vec![InvocationResourceGuard::new(DropProof(drops.clone()))],
-            ..Default::default()
-        };
-        let mut events = agent
-            .chat_stream_message_with_invocation_context(
-                Message::user("owned 中文🌊".to_string()),
-                cancel.clone(),
-                context,
-            )
-            .await?;
-        assert_eq!(agent.calls.load(Ordering::SeqCst), 0);
-        assert_eq!(drops.load(Ordering::SeqCst), 0);
-        assert!(
-            matches!(events.next().await, Some(Ok(AgentEvent::Token(text))) if text == "owned 中文🌊")
-        );
-        assert_eq!(agent.calls.load(Ordering::SeqCst), 1);
-        cancel.cancel();
-        assert!(
-            tokio::time::timeout(std::time::Duration::from_millis(20), events.next())
-                .await
-                .is_err(),
-            "cancel terminal waits for the original producer's EOF"
-        );
-        assert_eq!(
-            drops.load(Ordering::SeqCst),
-            0,
-            "original invocation guard remains owned while cleanup is held"
-        );
-        agent.release_cleanup.notify_one();
-        assert!(matches!(
-            events.next().await,
-            Some(Ok(AgentEvent::Cancelled))
-        ));
-        assert!(events.next().await.is_none());
-        drop(events);
-        assert_eq!(drops.load(Ordering::SeqCst), 1);
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn default_pure_text_chat_setup_failure_remains_original_stream_error() -> Result<()> {
-        let agent = LegacyTextAgent {
-            fail_setup: true,
-            ..Default::default()
-        };
-        let mut events = agent
-            .chat_stream_message_with_cancel(
-                Message::user("owned".to_string()),
-                CancellationToken::new(),
-            )
-            .await?;
-        assert!(
-            matches!(events.next().await, Some(Err(ReactError::Other(message))) if message == "original legacy setup failure")
-        );
-        assert!(events.next().await.is_none());
-        assert_eq!(agent.calls.load(Ordering::SeqCst), 1);
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn default_pure_text_chat_rejects_every_nonlossless_message_without_legacy_call() {
-        let agent = LegacyTextAgent::default();
-        let mut messages = Vec::new();
-        for role in [
-            Role::System,
-            Role::Assistant,
-            Role::Tool,
-            Role::Custom("provider-role".to_string()),
-        ] {
-            messages.push(Message {
-                role,
-                ..Message::user("text".to_string())
-            });
-        }
-        messages.push(Message {
-            content: MessageContent::Empty,
-            ..Message::user("text".to_string())
-        });
-        messages.push(Message::user_multimodal(vec![ContentPart::Text {
-            text: "must not flatten".to_string(),
-        }]));
-        let mut value = Message::user("text".to_string());
-        value.name = Some(String::new());
-        messages.push(value);
-        let mut value = Message::user("text".to_string());
-        value.tool_call_id = Some(String::new());
-        messages.push(value);
-        let mut value = Message::user("text".to_string());
-        value.tool_calls = Some(Vec::new());
-        messages.push(value);
-        let mut value = Message::user("text".to_string());
-        value.reasoning_content = Some(String::new());
-        messages.push(value);
-        let mut value = Message::user("text".to_string());
-        value.reasoning_blocks = Some(Vec::new());
-        messages.push(value);
-        for message in messages {
-            let result = agent
-                .chat_stream_message_with_cancel(message, CancellationToken::new())
-                .await;
-            assert!(
-                matches!(result, Err(ReactError::Other(message)) if message.contains("does not implement multimodal streaming"))
-            );
-        }
-        assert_eq!(agent.calls.load(Ordering::SeqCst), 0);
-    }
-
-    #[derive(Default)]
-    struct StructuredOverrideAgent {
-        legacy: AtomicUsize,
-        structured: AtomicUsize,
-    }
-    impl Agent for StructuredOverrideAgent {
+    impl Agent for NativeAgent {
         fn name(&self) -> &str {
-            "structured-wins"
+            "native-current-custom"
         }
         fn model_name(&self) -> &str {
-            "none"
+            "fixture"
         }
         fn system_prompt(&self) -> &str {
             ""
         }
-        fn execute<'a>(&'a self, text: &'a str) -> BoxFuture<'a, Result<String>> {
-            Box::pin(async move { Ok(text.to_string()) })
+        // 旧required方法只为tests-first编译；新默认便利方法不得回到它们。
+        fn execute<'a>(&'a self, _: &'a str) -> BoxFuture<'a, Result<String>> {
+            self.text_calls.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async { Err(ReactError::Other("text-only entry was used".into())) })
         }
         fn execute_stream<'a>(
             &'a self,
-            _text: &'a str,
+            _: &'a str,
         ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
-            self.legacy.fetch_add(1, Ordering::SeqCst);
-            Box::pin(async { Err(ReactError::Other("legacy must not be selected".to_string())) })
+            self.text_calls.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async { Err(ReactError::Other("text-only source was used".into())) })
         }
-        fn chat_stream_message_with_cancel<'a>(
+        fn execute_stream_message_with_invocation_context<'a>(
             &'a self,
-            _message: Message,
-            _cancel: CancellationToken,
+            message: Message,
+            _: CancellationToken,
+            invocation: AgentInvocationContext,
         ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
-            self.structured.fetch_add(1, Ordering::SeqCst);
+            self.source(false, message, invocation)
+        }
+        fn chat_stream_message_with_invocation_context<'a>(
+            &'a self,
+            message: Message,
+            _: CancellationToken,
+            invocation: AgentInvocationContext,
+        ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
+            self.source(true, message, invocation)
+        }
+    }
+
+    #[tokio::test]
+    async fn canonical_default_chat_and_raw_cancel_route_to_their_original_typed_kernels()
+    -> Result<()> {
+        let agent = NativeAgent::default();
+        assert_eq!(agent.chat("会话").await?, "安全最终中文🙂");
+        let events = agent
+            .execute_stream_with_cancel("执行", CancellationToken::new())
+            .await?
+            .collect::<Vec<_>>()
+            .await;
+        assert_eq!(events.len(), 3);
+        let calls = agent
+            .calls
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        assert_eq!(calls.len(), 2);
+        assert!(calls.first().is_some_and(
+            |call| call.chat && call.message.text_content().as_deref() == Some("会话")
+        ));
+        assert!(calls.get(1).is_some_and(
+            |call| !call.chat && call.message.text_content().as_deref() == Some("执行")
+        ));
+        assert_eq!(agent.text_calls.load(Ordering::SeqCst), 0);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn canonical_nonstream_waits_for_real_status_and_preserves_original_tail_error() {
+        let missing = NativeAgent {
+            terminal_missing: true,
+            ..Default::default()
+        };
+        assert!(missing.chat("no terminal").await.is_err());
+        let failed = NativeAgent {
+            tail_failure: true,
+            ..Default::default()
+        };
+        assert!(
+            matches!(failed.chat("tail error").await, Err(error) if error.to_string().contains("original tail failure"))
+        );
+    }
+
+    #[tokio::test]
+    async fn canonical_box_forwards_rich_message_and_every_invocation_field() -> Result<()> {
+        let mut message = Message::user("输入".into());
+        message.content = crate::llm::types::MessageContent::Parts(vec![
+            crate::llm::types::ContentPart::Text {
+                text: "中文🙂".into(),
+            },
+            crate::llm::types::ContentPart::File {
+                name: "附件.txt".into(),
+                content: "binary-safe-text".into(),
+            },
+        ]);
+        message.name = Some("native-user".into());
+        message.reasoning_blocks = Some(vec![crate::llm::types::ReasoningBlock::Signed {
+            thinking: "思考原文".into(),
+            signature: "sig".into(),
+        }]);
+        let expected =
+            serde_json::to_value(&message).map_err(|error| ReactError::Other(error.to_string()))?;
+        let agent = NativeAgent::default();
+        let invocation = AgentInvocationContext {
+            runtime: Some(crate::tools::ExternalRunContext {
+                run_id: Some("run".into()),
+                execution_id: Some("native-source".into()),
+                ..Default::default()
+            }),
+            runtime_state_id: Some("runtime-state".into()),
+            transcript_generation_id: Some("generation".into()),
+            working_dir: Some(std::path::PathBuf::from("/current/workspace")),
+            disabled_tools: Some(std::collections::HashSet::from(["shell".into()])),
+            allowed_tools: Some(std::collections::HashSet::from(["read_file".into()])),
+            visible_tools: Some(std::collections::HashSet::from(["read_file".into()])),
+            tool_access: Some(crate::tools::ToolAccess::ReadOnly),
+            history: Some(vec![Message::user("原会话".into())]),
+            run_budget: Some(RunBudgetPolicy {
+                max_model_tokens: Some(12),
+                ..Default::default()
+            }),
+            resource_guards: vec![crate::tools::InvocationResourceGuard::new(
+                "original-resource".to_string(),
+            )],
+            ..Default::default()
+        };
+        let records = Arc::clone(&agent.calls);
+        let boxed: Box<dyn Agent> = Box::new(agent);
+        let _events = boxed
+            .chat_stream_message_with_invocation_context(
+                message,
+                CancellationToken::new(),
+                invocation,
+            )
+            .await?
+            .collect::<Vec<_>>()
+            .await;
+        let calls = records.lock().unwrap_or_else(|error| error.into_inner());
+        let call = calls
+            .first()
+            .ok_or_else(|| ReactError::Other("typed source was not invoked".into()))?;
+        assert_eq!(
+            serde_json::to_value(&call.message)
+                .map_err(|error| ReactError::Other(error.to_string()))?,
+            expected
+        );
+        assert_eq!(call.invocation.resource_guards.len(), 1);
+        assert_eq!(
+            call.invocation
+                .runtime
+                .as_ref()
+                .and_then(|runtime| runtime.execution_id.as_deref()),
+            Some("native-source")
+        );
+        assert_eq!(
+            call.invocation.working_dir.as_deref(),
+            Some(std::path::Path::new("/current/workspace"))
+        );
+        assert!(
+            call.invocation
+                .visible_tools
+                .as_ref()
+                .is_some_and(|visible| visible.contains("read_file"))
+        );
+        assert_eq!(
+            call.invocation.runtime_state_id.as_deref(),
+            Some("runtime-state")
+        );
+        assert_eq!(
+            call.invocation.transcript_generation_id.as_deref(),
+            Some("generation")
+        );
+        assert_eq!(
+            call.invocation.tool_access,
+            Some(crate::tools::ToolAccess::ReadOnly)
+        );
+        assert!(call.invocation.history.as_ref().is_some_and(|history| {
+            history
+                .first()
+                .is_some_and(|message| message.text_content().as_deref() == Some("原会话"))
+        }));
+        assert!(
+            call.invocation
+                .allowed_tools
+                .as_ref()
+                .is_some_and(|allowed| allowed.contains("read_file"))
+        );
+        assert!(
+            call.invocation
+                .disabled_tools
+                .as_ref()
+                .is_some_and(|disabled| disabled.contains("shell"))
+        );
+        assert_eq!(
+            call.invocation
+                .run_budget
+                .as_ref()
+                .and_then(|budget| budget.max_model_tokens),
+            Some(12)
+        );
+        Ok(())
+    }
+
+    struct UnscopedOnly(Arc<AtomicUsize>);
+    impl Agent for UnscopedOnly {
+        fn name(&self) -> &str {
+            "unscoped"
+        }
+        fn model_name(&self) -> &str {
+            "fixture"
+        }
+        fn system_prompt(&self) -> &str {
+            ""
+        }
+        fn execute<'a>(&'a self, _: &'a str) -> BoxFuture<'a, Result<String>> {
+            Box::pin(async { Ok("unscoped".into()) })
+        }
+        fn execute_stream<'a>(
+            &'a self,
+            _: &'a str,
+        ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
+            self.0.fetch_add(1, Ordering::SeqCst);
             Box::pin(async {
                 Ok(futures::stream::iter([Ok(AgentEvent::FinalAnswer(
-                    "structured-original".to_string(),
+                    "must not synthesize native status".into(),
                 ))])
                 .boxed())
             })
         }
     }
     #[tokio::test]
-    async fn default_pure_text_chat_invocation_keeps_existing_structured_override() -> Result<()> {
-        let agent = StructuredOverrideAgent::default();
-        let mut events = agent
-            .chat_stream_message_with_invocation_context(
-                Message::user("plain user".to_string()),
-                CancellationToken::new(),
-                AgentInvocationContext::default(),
-            )
-            .await?;
+    async fn canonical_default_refuses_unsupported_invocation_before_starting_unscoped_source() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let agent = UnscopedOnly(calls.clone());
+        let invocation = AgentInvocationContext {
+            history: Some(vec![Message::user("must retain".into())]),
+            ..Default::default()
+        };
+        let result = agent
+            .execute_stream_with_invocation_context("current", CancellationToken::new(), invocation)
+            .await;
         assert!(
-            matches!(events.next().await, Some(Ok(AgentEvent::FinalAnswer(answer))) if answer == "structured-original")
+            matches!(result, Err(ReactError::Other(message)) if message.contains("canonical typed"))
         );
-        assert!(events.next().await.is_none());
-        assert_eq!(agent.structured.load(Ordering::SeqCst), 1);
-        assert_eq!(agent.legacy.load(Ordering::SeqCst), 0);
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+}
+
+#[cfg(test)]
+mod canonical_physical_source_tests {
+    use super::*;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    struct OwnerGuard(Arc<AtomicUsize>);
+    impl Drop for OwnerGuard {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+    struct Source {
+        entered: tokio::sync::Notify,
+        release: tokio::sync::Notify,
+        drops: Arc<AtomicUsize>,
+    }
+    impl Agent for Source {
+        fn name(&self) -> &str {
+            "physical-source"
+        }
+        fn model_name(&self) -> &str {
+            "fixture"
+        }
+        fn system_prompt(&self) -> &str {
+            ""
+        }
+        fn execute<'a>(&'a self, _: &'a str) -> BoxFuture<'a, Result<String>> {
+            Box::pin(async { Err(ReactError::Other("unscoped".into())) })
+        }
+        fn execute_stream<'a>(
+            &'a self,
+            _: &'a str,
+        ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
+            Box::pin(async { Err(ReactError::Other("unscoped".into())) })
+        }
+        fn chat_stream_message_with_invocation_context<'a>(
+            &'a self,
+            _: Message,
+            cancel: CancellationToken,
+            _: AgentInvocationContext,
+        ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
+            Box::pin(async move {
+                let source = async_stream::stream! {
+                    let _guard=OwnerGuard(self.drops.clone());
+                    yield Ok(AgentEvent::ExecutionStatus(ExecutionStatus{adapter_generated:false,execution_id:"original".into(),request_id:Some("request".into()),sequence:0,phase:AgentPhase::Thinking,status:ExecutionStatusKind::Started,reason:None}));
+                    if !cancel.is_cancelled(){yield Ok(AgentEvent::FinalAnswer("安全回答".into()));}
+                    let kind=if cancel.is_cancelled(){ExecutionStatusKind::Cancelled}else{ExecutionStatusKind::Settled};
+                    yield Ok(AgentEvent::ExecutionStatus(ExecutionStatus{adapter_generated:false,execution_id:"original".into(),request_id:Some("request".into()),sequence:1,phase:AgentPhase::Terminal,status:kind,reason:None}));
+                    self.entered.notify_one();
+                    self.release.notified().await;
+                };
+                Ok(Box::pin(source) as BoxStream<'a, Result<AgentEvent>>)
+            })
+        }
+    }
+    #[tokio::test]
+    async fn canonical_nonstream_does_not_release_original_owner_before_physical_eof() -> Result<()>
+    {
+        let drops = Arc::new(AtomicUsize::new(0));
+        let agent = Source {
+            entered: tokio::sync::Notify::new(),
+            release: tokio::sync::Notify::new(),
+            drops: drops.clone(),
+        };
+        let mut result = Box::pin(agent.chat("current"));
+        assert!(futures::poll!(result.as_mut()).is_pending());
+        agent.entered.notified().await;
+        assert_eq!(drops.load(Ordering::SeqCst), 0);
+        agent.release.notify_one();
+        assert_eq!(result.await?, "安全回答");
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+        Ok(())
+    }
+    #[tokio::test]
+    async fn canonical_cancel_stream_keeps_original_status_and_eof_instead_of_inventing_completion()
+    -> Result<()> {
+        let drops = Arc::new(AtomicUsize::new(0));
+        let agent = Source {
+            entered: tokio::sync::Notify::new(),
+            release: tokio::sync::Notify::new(),
+            drops: drops.clone(),
+        };
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        let mut source = agent.chat_stream_with_cancel("cancel", cancel).await?;
+        let started = source
+            .next()
+            .await
+            .transpose()?
+            .ok_or_else(|| ReactError::Other("missing start".into()))?;
+        let terminal = source
+            .next()
+            .await
+            .transpose()?
+            .ok_or_else(|| ReactError::Other("missing terminal".into()))?;
+        assert!(
+            matches!(started,AgentEvent::ExecutionStatus(status) if status.execution_id=="original"&&!status.adapter_generated)
+        );
+        assert!(
+            matches!(terminal,AgentEvent::ExecutionStatus(status) if status.execution_id=="original"&&status.status==ExecutionStatusKind::Cancelled&&!status.adapter_generated)
+        );
+        let mut eof = Box::pin(source.next());
+        assert!(futures::poll!(eof.as_mut()).is_pending());
+        agent.entered.notified().await;
+        assert_eq!(drops.load(Ordering::SeqCst), 0);
+        agent.release.notify_one();
+        assert!(eof.await.is_none());
+        drop(source);
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod canonical_source_observation_tests {
+    use super::*;
+    struct ObservedSource {
+        run: &'static str,
+        execution: &'static str,
+        kind: ExecutionStatusKind,
+        tail_error: bool,
+    }
+    impl Agent for ObservedSource {
+        fn name(&self) -> &str {
+            "current-observed-source"
+        }
+        fn model_name(&self) -> &str {
+            "fixture"
+        }
+        fn system_prompt(&self) -> &str {
+            ""
+        }
+        fn current_run_id(&self) -> Option<String> {
+            Some("original-run".into())
+        }
+        fn execute<'a>(&'a self, _: &'a str) -> BoxFuture<'a, Result<String>> {
+            Box::pin(async { Err(ReactError::Other("unscoped".into())) })
+        }
+        fn execute_stream<'a>(
+            &'a self,
+            _: &'a str,
+        ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
+            Box::pin(async { Err(ReactError::Other("unscoped".into())) })
+        }
+        fn chat_stream_message_with_invocation_context<'a>(
+            &'a self,
+            _: Message,
+            _: CancellationToken,
+            _: AgentInvocationContext,
+        ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
+            Box::pin(async move {
+                let status = |kind, sequence| {
+                    AgentEvent::ExecutionStatus(ExecutionStatus {
+                        adapter_generated: false,
+                        execution_id: "original-source".into(),
+                        request_id: Some("request".into()),
+                        sequence,
+                        phase: AgentPhase::Terminal,
+                        status: kind,
+                        reason: Some("original first cause".into()),
+                    })
+                };
+                let mut items = vec![
+                    Ok(status(ExecutionStatusKind::Started, 0)),
+                    Err(ReactError::ExecutionNotSettled {
+                        run_id: self.run.into(),
+                        execution_id: Some(self.execution.into()),
+                    }),
+                ];
+                if self.kind == ExecutionStatusKind::Settled {
+                    items.push(Ok(AgentEvent::FinalAnswer("safe current".into())));
+                }
+                items.push(Ok(status(self.kind.clone(), 1)));
+                if self.tail_error {
+                    items.push(Err(ReactError::Other("later tail cause".into())));
+                }
+                Ok(futures::stream::iter(items).boxed())
+            })
+        }
+    }
+    #[tokio::test]
+    async fn canonical_matching_source_observation_resolves_only_at_its_real_terminal_and_eof()
+    -> Result<()> {
+        let agent = ObservedSource {
+            run: "original-run",
+            execution: "original-source",
+            kind: ExecutionStatusKind::Settled,
+            tail_error: false,
+        };
+        assert_eq!(agent.chat("request").await?, "safe current");
+        Ok(())
+    }
+    #[tokio::test]
+    async fn canonical_foreign_execution_or_run_observation_is_not_cleared_by_own_settlement() {
+        for (run, execution) in [
+            ("foreign-run", "original-source"),
+            ("original-run", "foreign-source"),
+        ] {
+            let agent = ObservedSource {
+                run,
+                execution,
+                kind: ExecutionStatusKind::Settled,
+                tail_error: false,
+            };
+            assert!(
+                matches!(agent.chat("request").await,Err(ReactError::ExecutionNotSettled{run_id,execution_id:Some(id)}) if run_id==run&&id==execution)
+            );
+        }
+    }
+    #[tokio::test]
+    async fn canonical_original_failed_or_cancelled_status_precedes_late_tail_error() {
+        for kind in [ExecutionStatusKind::Failed, ExecutionStatusKind::Cancelled] {
+            let agent = ObservedSource {
+                run: "original-run",
+                execution: "original-source",
+                kind: kind.clone(),
+                tail_error: true,
+            };
+            let result = agent.chat("request").await;
+            match kind {
+                ExecutionStatusKind::Cancelled => assert!(
+                    matches!(result,Err(ReactError::Agent(error)) if matches!(*error,crate::error::AgentError::Cancelled(ref text) if text=="original first cause"))
+                ),
+                _ => assert!(
+                    matches!(result,Err(error) if error.to_string().contains("original first cause")&&!error.to_string().contains("later tail cause"))
+                ),
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod canonical_declared_execute_contract_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    // 只在新trait默认方法声明存在后编译；不把它冒作旧required接口下的tests-first。
+    struct TypedExecuteOnly(AtomicUsize);
+    impl Agent for TypedExecuteOnly {
+        fn name(&self) -> &str {
+            "current-execute-only"
+        }
+        fn model_name(&self) -> &str {
+            "fixture"
+        }
+        fn system_prompt(&self) -> &str {
+            ""
+        }
+        fn execute_stream_message_with_invocation_context<'a>(
+            &'a self,
+            message: Message,
+            _cancel: CancellationToken,
+            invocation: AgentInvocationContext,
+        ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
+            Box::pin(async move {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                assert_eq!(message.text_content().as_deref(), Some("当前执行"));
+                assert!(invocation.history.is_none());
+                let status = |kind, sequence| {
+                    AgentEvent::ExecutionStatus(ExecutionStatus {
+                        adapter_generated: false,
+                        execution_id: "execute-source".into(),
+                        request_id: Some("execute-request".into()),
+                        sequence,
+                        phase: AgentPhase::Terminal,
+                        status: kind,
+                        reason: None,
+                    })
+                };
+                Ok(futures::stream::iter([
+                    Ok(status(ExecutionStatusKind::Started, 0)),
+                    Ok(AgentEvent::FinalAnswer("当前完成".into())),
+                    Ok(status(ExecutionStatusKind::Settled, 1)),
+                ])
+                .boxed())
+            })
+        }
+        fn chat_stream_message_with_invocation_context<'a>(
+            &'a self,
+            _message: Message,
+            _cancel: CancellationToken,
+            _invocation: AgentInvocationContext,
+        ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
+            Box::pin(async { Err(ReactError::Other("execute crossed into chat".into())) })
+        }
+    }
+    #[tokio::test]
+    async fn canonical_default_execute_uses_current_execute_source_without_string_override()
+    -> Result<()> {
+        let agent = TypedExecuteOnly(AtomicUsize::new(0));
+        assert_eq!(agent.execute("当前执行").await?, "当前完成");
+        assert_eq!(agent.0.load(Ordering::SeqCst), 1);
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod canonical_typed_error_projection_tests {
+    use super::*;
+    use crate::error::{AgentError, AgentFailure, AgentTerminalKind};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    struct Guard(Arc<AtomicUsize>);
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+    struct Source {
+        failure: AgentFailure,
+        entered: tokio::sync::Notify,
+        release: tokio::sync::Notify,
+        drops: Arc<AtomicUsize>,
+    }
+    impl Agent for Source {
+        fn name(&self) -> &str {
+            "typed-error-source"
+        }
+        fn model_name(&self) -> &str {
+            "fixture"
+        }
+        fn system_prompt(&self) -> &str {
+            ""
+        }
+        fn chat_stream_message_with_invocation_context<'a>(
+            &'a self,
+            _message: Message,
+            _cancel: CancellationToken,
+            _invocation: AgentInvocationContext,
+        ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
+            Box::pin(async move {
+                let failure = self.failure.clone();
+                let status = |kind, sequence| {
+                    AgentEvent::ExecutionStatus(ExecutionStatus {
+                        adapter_generated: false,
+                        execution_id: "typed-error-source".into(),
+                        request_id: Some("typed-error-request".into()),
+                        sequence,
+                        phase: AgentPhase::Terminal,
+                        status: kind,
+                        reason: Some("later native failure".into()),
+                    })
+                };
+                let source = async_stream::stream! {
+                    let _guard = Guard(self.drops.clone());
+                    yield Ok(status(ExecutionStatusKind::Started, 0));
+                    yield Ok(AgentEvent::Error { source: "fixture".into(), message: failure.message.clone(), failure });
+                    yield Ok(status(ExecutionStatusKind::Failed, 1));
+                    yield Err(ReactError::Other("later raw cleanup failure".into()));
+                    self.entered.notify_one();
+                    self.release.notified().await;
+                };
+                Ok(Box::pin(source) as BoxStream<'a, Result<AgentEvent>>)
+            })
+        }
+    }
+    #[tokio::test]
+    async fn canonical_default_string_keeps_typed_error_reason_through_tail_and_physical_eof()
+    -> Result<()> {
+        for kind in [
+            AgentTerminalKind::TimedOut,
+            AgentTerminalKind::PermissionDenied,
+        ] {
+            let original = match kind {
+                AgentTerminalKind::TimedOut => AgentError::Timeout("original typed cause".into()),
+                AgentTerminalKind::PermissionDenied => {
+                    AgentError::PermissionDenied("original typed cause".into())
+                }
+                _ => return Err(ReactError::Other("invalid typed-error fixture".into())),
+            };
+            let failure = AgentFailure::try_from(&ReactError::Agent(Box::new(original)))?;
+            let expected_source_message = failure.message.clone();
+            let drops = Arc::new(AtomicUsize::new(0));
+            let agent = Source {
+                failure,
+                entered: tokio::sync::Notify::new(),
+                release: tokio::sync::Notify::new(),
+                drops: drops.clone(),
+            };
+            let mut result = Box::pin(agent.chat("current"));
+            assert!(futures::poll!(result.as_mut()).is_pending());
+            agent.entered.notified().await;
+            assert_eq!(drops.load(Ordering::SeqCst), 0);
+            agent.release.notify_one();
+            let result = result.await;
+            let kept_original_kind_and_reason = match (kind, result) {
+                (AgentTerminalKind::TimedOut, Err(ReactError::Agent(error))) => {
+                    matches!(error.as_ref(), AgentError::Timeout(reason) if reason == &expected_source_message)
+                }
+                (AgentTerminalKind::PermissionDenied, Err(ReactError::Agent(error))) => {
+                    matches!(error.as_ref(), AgentError::PermissionDenied(reason) if reason == &expected_source_message)
+                }
+                _ => false,
+            };
+            assert!(kept_original_kind_and_reason);
+            assert_eq!(drops.load(Ordering::SeqCst), 1);
+        }
         Ok(())
     }
 }

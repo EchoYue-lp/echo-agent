@@ -22,7 +22,7 @@ use crate::mcp::McpServerEntry;
 use crate::mcp::{McpClient, McpConfigFile, McpServerConfig, McpServerId, McpTargetChange};
 use crate::skills::external::SkillDescriptor;
 use crate::skills::external::activate_tool::ActivateSkillTool;
-use crate::skills::external::loader::{DiscoveryScope, SkillLoader};
+use crate::skills::external::loader::{DiscoveryScope, SkillFileSource, SkillLoader};
 use crate::skills::external::resource_tool::ReadSkillResourceTool;
 use crate::skills::external::run_script_tool::RunSkillScriptTool;
 use crate::skills::{Skill, SkillInfo};
@@ -36,22 +36,22 @@ use tracing::{info, warn};
 const SKILL_CATALOG_PROJECTION: &str = "echo-agent:skill-catalog";
 
 enum SkillRegistration {
-    Filesystem(SkillDescriptor),
-    Prepared(crate::skills::external::SkillDocument),
+    Filesystem(SkillDescriptor, SkillFileSource),
+    Prepared(crate::skills::external::SkillDocument, SkillFileSource),
 }
 
 impl SkillRegistration {
     fn descriptor(&self) -> &SkillDescriptor {
         match self {
-            Self::Filesystem(descriptor) => descriptor,
-            Self::Prepared(document) => document.descriptor(),
+            Self::Filesystem(descriptor, _) => descriptor,
+            Self::Prepared(document, _) => document.descriptor(),
         }
     }
 
     fn set_registration_source(&mut self, source: &str) {
         match self {
-            Self::Filesystem(descriptor) => descriptor.source = Some(source.to_string()),
-            Self::Prepared(document) => document.set_registration_source(source),
+            Self::Filesystem(descriptor, _) => descriptor.source = Some(source.to_string()),
+            Self::Prepared(document, _) => document.set_registration_source(source),
         }
     }
 }
@@ -483,32 +483,64 @@ impl ReactAgent {
     ) -> Result<(ForceCompressStats, Option<CompressionCheckpoint>)> {
         self.fire_lifecycle_hook(crate::skills::hooks::HookEvent::PreCompact, Some("manual"))
             .await;
-        let snapshot = crate::agent::snapshot::AgentRunSnapshot::from_agent(self);
-        let mut prepared = snapshot.prepare_manual_context_compaction().await?;
-        let (stats, checkpoint) = prepared
-            .context_mut()?
-            .force_compress_with_options(focus, 40, cancel)
-            .await?;
-        prepared.commit(None).await?;
-        let (protected_message_count, protected_context_tokens) = {
-            let context = self.memory.context.lock().await;
-            (
-                context.protected_message_count(),
-                context.protected_token_estimate(),
+        let mut snapshot = crate::agent::snapshot::AgentRunSnapshot::from_agent(self);
+        // 手动压缩独立拥有当前trace值；不追加到另一次调用的共享trace缓存。
+        snapshot.trace_run_id = self
+            .start_scoped_trace_run(
+                "[manual context compression]",
+                None,
+                snapshot.config.conversation_id.as_deref(),
+                None,
+                None,
             )
-        };
-        self.record_trace_event(crate::trace::RunEvent::ContextCompression {
-            source: "manual".to_string(),
-            before_messages: stats.before_count,
-            after_messages: stats.after_count,
-            before_tokens: stats.before_tokens,
-            after_tokens: stats.after_tokens,
-            protected_context_tokens,
-            protected_message_count,
-        })
+            .await;
+        let result = async {
+            let mut prepared = snapshot.prepare_manual_context_compaction().await?;
+            let (stats, checkpoint) = prepared
+                .context_mut()?
+                .force_compress_with_options(focus, 40, cancel)
+                .await?;
+            prepared.commit(None).await?;
+            let (protected_message_count, protected_context_tokens) = {
+                let context = self.memory.context.lock().await;
+                (
+                    context.protected_message_count(),
+                    context.protected_token_estimate(),
+                )
+            };
+            snapshot
+                .record_event(crate::trace::RunEvent::ContextCompression {
+                    source: "manual".to_string(),
+                    before_messages: stats.before_count,
+                    after_messages: stats.after_count,
+                    before_tokens: stats.before_tokens,
+                    after_tokens: stats.after_tokens,
+                    protected_context_tokens,
+                    protected_message_count,
+                })
+                .await;
+            self.fire_post_compact_hook("manual", &stats).await;
+            Ok((stats, checkpoint))
+        }
         .await;
-        self.fire_post_compact_hook("manual", &stats).await;
-        Ok((stats, checkpoint))
+        // typed unknown不是物理结算；观察trace不能替原操作写终态。
+        if !matches!(
+            &result,
+            Err(crate::error::ReactError::ExecutionNotSettled { .. })
+        ) {
+            snapshot
+                .finalize_run(
+                    if result.is_ok() {
+                        crate::trace::RunStatus::Completed
+                    } else {
+                        crate::trace::RunStatus::Failed
+                    },
+                    None,
+                    result.as_ref().err().map(ToString::to_string).as_deref(),
+                )
+                .await;
+        }
+        result
     }
 
     /// List all registered tool names
@@ -920,18 +952,102 @@ impl ReactAgent {
     ///
     /// The LLM can then decide which skills to activate on demand.
     pub async fn discover_skills(&mut self, scopes: &[DiscoveryScope]) -> Result<Vec<String>> {
-        self.discover_skills_inner(scopes, None).await
+        self.discover_skills_inner(scopes, None, None, None).await
+    }
+
+    /// Discover project/explicit directories in a bound target namespace.
+    /// User scope retains local I/O; its commands never inherit this executor.
+    /// Ordinary `load_skills_from_dir` remains a local directory API.
+    pub async fn discover_skills_with_source(
+        &mut self,
+        scopes: &[DiscoveryScope],
+        file_system: Arc<dyn echo_core::tools::filesystem::FileSystem>,
+        executor: Option<Arc<dyn crate::sandbox::SandboxExecutor>>,
+    ) -> Result<Vec<String>> {
+        self.discover_skills_inner(
+            scopes,
+            None,
+            Some(SkillFileSource::new(file_system, executor)),
+            None,
+        )
+        .await
+    }
+
+    /// Discover bound project/Custom Skills while retaining the caller's
+    /// existing local executor for User scopes. Each descriptor captures its
+    /// admitted source in the original registry; this creates no new executor.
+    pub async fn discover_skills_with_sources(
+        &mut self,
+        scopes: &[DiscoveryScope],
+        file_system: Arc<dyn echo_core::tools::filesystem::FileSystem>,
+        executor: Option<Arc<dyn crate::sandbox::SandboxExecutor>>,
+        local_executor: Option<Arc<dyn crate::sandbox::SandboxExecutor>>,
+    ) -> Result<Vec<String>> {
+        self.discover_skills_inner(
+            scopes,
+            None,
+            Some(SkillFileSource::new(file_system, executor)),
+            Some(SkillFileSource::local(local_executor)),
+        )
+        .await
+    }
+
+    /// Set the definition-time origin used by ordinary Skill registration.
+    /// Project discovery can still supply its own explicit target source.
+    /// This reuses the caller's resources; later host executor replacement
+    /// cannot move already-registered Skills to another environment.
+    pub fn set_default_skill_source(&mut self, source: SkillFileSource) {
+        self.tools.default_skill_source = Some(source);
+    }
+
+    /// Clone the effective definition source, without consulting a GUI current
+    /// project or creating an executor.
+    pub fn default_skill_source(&self) -> SkillFileSource {
+        self.local_skill_source()
+    }
+
+    fn local_skill_source(&self) -> SkillFileSource {
+        if let Some(source) = &self.tools.default_skill_source {
+            return source.clone();
+        }
+        #[cfg(feature = "files")]
+        if self
+            .config
+            .file_system
+            .as_ref()
+            .is_some_and(|files| !files.paths_are_native())
+        {
+            // A host's target executor must not receive a user/global file.
+            return SkillFileSource::local(None);
+        }
+        SkillFileSource::local(self.tools.sandbox_manager.clone())
     }
 
     async fn discover_skills_inner(
         &mut self,
         scopes: &[DiscoveryScope],
         plugin: Option<(&str, &crate::plugin::PluginVariables)>,
+        explicit_source: Option<SkillFileSource>,
+        explicit_local_source: Option<SkillFileSource>,
     ) -> Result<Vec<String>> {
         let mut loader = match &self.skill_load_policy {
             Some(policy) => SkillLoader::new().with_policy(policy.clone()),
             None => SkillLoader::new(),
         };
+        let local_source = explicit_local_source.unwrap_or_else(|| self.local_skill_source());
+        loader = loader.with_local_sandbox(local_source.sandbox());
+        #[cfg(feature = "files")]
+        if let Some(file_system) = &self.config.file_system {
+            loader = loader.with_project_source(SkillFileSource::new(
+                file_system.clone(),
+                self.tools.sandbox_manager.clone(),
+            ));
+        }
+        if let Some(source) = explicit_source {
+            loader = loader
+                .with_project_source(source.clone())
+                .with_custom_source(source);
+        }
         if let Some((_, variables)) = plugin {
             loader = loader.with_plugin_variables(variables.clone());
         }
@@ -951,7 +1067,13 @@ impl ReactAgent {
 
         let registrations = descriptors
             .into_iter()
-            .map(SkillRegistration::Filesystem)
+            .map(|descriptor| {
+                let source = loader
+                    .get_file_source(&descriptor.name)
+                    .cloned()
+                    .unwrap_or_default();
+                SkillRegistration::Filesystem(descriptor, source)
+            })
             .collect();
         self.register_skill_descriptors(registrations, plugin, true)
             .await
@@ -1044,22 +1166,34 @@ impl ReactAgent {
                         &skill_dir,
                         hooks_def.clone(),
                     );
+                    let file_source = match &registration {
+                        SkillRegistration::Filesystem(_, source) => source,
+                        SkillRegistration::Prepared(_, source) => source,
+                    };
+                    hook_reg.bind_source_executor(
+                        &crate::skills::hooks::HookSource::Skill(
+                            registration.descriptor().name.clone(),
+                        ),
+                        &skill_dir,
+                        file_source.sandbox(),
+                        !file_source.is_local(),
+                    );
                 }
 
                 let name = registration.descriptor().name.clone();
                 names.push(name.clone());
                 match registration {
-                    SkillRegistration::Prepared(document) => {
+                    SkillRegistration::Prepared(document, source) => {
                         self.tools
                             .skill_registry
-                            .register_prepared(document.clone());
-                        reg.register_prepared(document);
+                            .register_prepared_with_source(document.clone(), source.clone());
+                        reg.register_prepared_with_source(document, source);
                     }
-                    SkillRegistration::Filesystem(descriptor) => {
+                    SkillRegistration::Filesystem(descriptor, source) => {
                         self.tools
                             .skill_registry
-                            .register_descriptor(descriptor.clone());
-                        reg.register_descriptor(descriptor);
+                            .register_descriptor_with_source(descriptor.clone(), source.clone());
+                        reg.register_descriptor_with_source(descriptor, source);
                     }
                 }
                 if let Some((source, variables)) = plugin {
@@ -1181,7 +1315,18 @@ impl ReactAgent {
     /// Register or replace one file-backed descriptor across the catalog and
     /// progressive tool definition views.
     pub async fn register_skill_descriptor(&mut self, descriptor: SkillDescriptor) -> Result<()> {
-        self.replace_skill_registration(SkillRegistration::Filesystem(descriptor))
+        self.register_skill_descriptor_with_source(descriptor, self.local_skill_source())
+            .await
+    }
+
+    /// Admit an existing descriptor with the caller's original file/execution
+    /// source, preserving the same catalog, policy and activation authority.
+    pub async fn register_skill_descriptor_with_source(
+        &mut self,
+        descriptor: SkillDescriptor,
+        source: SkillFileSource,
+    ) -> Result<()> {
+        self.replace_skill_registration(SkillRegistration::Filesystem(descriptor, source))
             .await
     }
 
@@ -1191,7 +1336,17 @@ impl ReactAgent {
         &mut self,
         document: crate::skills::external::SkillDocument,
     ) -> Result<()> {
-        self.replace_skill_registration(SkillRegistration::Prepared(document))
+        self.register_prepared_skill_with_source(document, self.local_skill_source())
+            .await
+    }
+
+    /// Admit a prepared document without discarding its resource/script origin.
+    pub async fn register_prepared_skill_with_source(
+        &mut self,
+        document: crate::skills::external::SkillDocument,
+        source: SkillFileSource,
+    ) -> Result<()> {
+        self.replace_skill_registration(SkillRegistration::Prepared(document, source))
             .await
     }
 
@@ -1212,7 +1367,9 @@ impl ReactAgent {
     ) -> Result<Vec<String>> {
         let registrations = skills
             .iter()
-            .map(|skill| SkillRegistration::Prepared(skill.document().clone()))
+            .map(|skill| {
+                SkillRegistration::Prepared(skill.document().clone(), self.local_skill_source())
+            })
             .collect();
         self.register_skill_descriptors(registrations, Some((source, variables)), true)
             .await
@@ -1325,7 +1482,13 @@ impl ReactAgent {
         let names = self
             .skill_descriptors()
             .into_iter()
-            .filter(|descriptor| descriptor.location.starts_with(&skills_dir))
+            .filter(|descriptor| {
+                self.tools
+                    .skill_registry
+                    .file_source(&descriptor.name)
+                    .is_local()
+                    && descriptor.location.starts_with(&skills_dir)
+            })
             .map(|descriptor| descriptor.name)
             .collect::<Vec<_>>();
         self.unregister_skill_names(&names).await;
@@ -1353,6 +1516,8 @@ impl ReactAgent {
         self.discover_skills_inner(
             &[DiscoveryScope::Custom(skills_dir.into())],
             Some((source, variables)),
+            None,
+            None,
         )
         .await
     }
@@ -1909,6 +2074,15 @@ impl ReactAgent {
         self.tools.mcp_manager.get_client(name)
     }
 
+    /// 读取以完整owner身份为键的当前MCP连接快照；不增加连接或注册状态。
+    ///
+    /// 保留Direct与插件的同名连接。返回值证明连接归属，不证明同名工具注册
+    /// 在自定义replace_tool之后仍是原adapter；调用方不得据此提升执行许可。
+    #[cfg(feature = "mcp")]
+    pub fn mcp_clients_by_id(&self) -> std::collections::HashMap<McpServerId, Arc<McpClient>> {
+        self.tools.mcp_manager.get_clients_by_id()
+    }
+
     #[cfg(feature = "mcp")]
     /// List all connected MCP server names
     ///
@@ -2214,11 +2388,7 @@ mod tests {
         let mut agent = ReactAgent::new(config);
         let store = Arc::new(crate::trace::InMemoryRunStore::new());
         agent.set_run_store(store.clone());
-        let legacy = agent.capture_legacy_external_context();
-        let trace_run_id = agent
-            .start_legacy_trace_run("manual compress", &legacy)
-            .await
-            .ok_or_else(|| crate::error::ReactError::Other("trace run missing".to_string()))?;
+
         agent
             .memory
             .context
@@ -2227,6 +2397,12 @@ mod tests {
             .push(Message::user("manual compression input".to_string()));
 
         let _ = agent.force_compress_context().await?;
+        let traces = crate::trace::RunStore::list_all(store.as_ref(), 10).await?;
+        let trace_run_id = traces
+            .first()
+            .ok_or_else(|| crate::error::ReactError::Other("manual trace missing".into()))?
+            .run_id
+            .clone();
         let run = store
             .load(&trace_run_id)
             .await?
@@ -2235,6 +2411,78 @@ mod tests {
             event,
             crate::trace::RunEvent::ContextCompression { source, .. } if source == "manual"
         )));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn manual_compression_unknown_keeps_typed_identity_and_unfinished_trace()
+    -> crate::error::Result<()> {
+        struct UnsettledCompressor(Arc<std::sync::atomic::AtomicUsize>);
+        impl ContextCompressor for UnsettledCompressor {
+            fn compress(
+                &self,
+                _input: echo_core::compression::CompressionInput,
+            ) -> futures::future::BoxFuture<
+                '_,
+                crate::error::Result<echo_core::compression::CompressionOutput>,
+            > {
+                self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Box::pin(async {
+                    Err(crate::error::ReactError::ExecutionNotSettled {
+                        run_id: "manual-physical-owner".into(),
+                        execution_id: Some("manual-attempt".into()),
+                    })
+                })
+            }
+        }
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let traces = Arc::new(crate::trace::InMemoryRunStore::new());
+        let mut agent = ReactAgent::new(AgentConfig::minimal("test-model", "helper"));
+        agent.set_run_store(traces.clone());
+        agent
+            .set_compressor(UnsettledCompressor(calls.clone()))
+            .await;
+        agent
+            .memory
+            .context
+            .lock()
+            .await
+            .push(Message::user("unsettled current compression input".into()));
+        let before = agent.get_messages().await;
+        let error = agent.force_compress_context().await.err().ok_or_else(|| {
+            crate::error::ReactError::Other("unknown compression returned success".into())
+        })?;
+        assert!(
+            matches!(error, crate::error::ReactError::ExecutionNotSettled { run_id, execution_id }
+            if run_id == "manual-physical-owner" && execution_id.as_deref() == Some("manual-attempt"))
+        );
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(
+            agent
+                .get_messages()
+                .await
+                .iter()
+                .map(Message::text_content)
+                .collect::<Vec<_>>(),
+            before.iter().map(Message::text_content).collect::<Vec<_>>()
+        );
+        let recorded = traces.list_all(10).await?;
+        let id = &recorded
+            .first()
+            .ok_or_else(|| crate::error::ReactError::Other("unknown trace missing".into()))?
+            .run_id;
+        let run = traces
+            .load(id)
+            .await?
+            .ok_or_else(|| crate::error::ReactError::Other("unknown trace body missing".into()))?;
+        assert_eq!(run.status, crate::trace::RunStatus::Running);
+        assert!(run.finished_at.is_none());
+        assert!(run.error.is_none());
+        assert!(
+            !run.events
+                .iter()
+                .any(|event| matches!(event, crate::trace::RunEvent::ContextCompression { .. }))
+        );
         Ok(())
     }
 
@@ -2395,6 +2643,51 @@ mod tests {
         agent.add_tools(receipt.tools);
         agent.sync_mcp_resource_tools();
         agent.setup_hook_mcp_executor().await;
+        Ok(())
+    }
+
+    #[cfg(feature = "mcp")]
+    #[tokio::test]
+    async fn mcp_client_snapshot_preserves_owners_and_original_client_identity()
+    -> crate::error::Result<()> {
+        let mut agent = ReactAgent::new(AgentConfig::minimal("test-model", "helper"));
+        let direct_id = crate::mcp::McpServerId::direct("shared");
+        let first_id = crate::mcp::McpServerId::plugin("plugin-a", "shared");
+        let second_id = crate::mcp::McpServerId::plugin("plugin-b", "shared");
+        let direct = failing_close_client("shared", 0).await?;
+        let first = failing_close_client("shared", 0).await?;
+        let second = failing_close_client("shared", 0).await?;
+        registered_target(&mut agent, "shared", &direct).await?;
+        registered_owned_target(&mut agent, &first_id, &first).await?;
+        registered_owned_target(&mut agent, &second_id, &second).await?;
+
+        let captured = agent.mcp_clients_by_id();
+        assert_eq!(captured.len(), 3);
+        for (id, client) in [
+            (&direct_id, &direct),
+            (&first_id, &first),
+            (&second_id, &second),
+        ] {
+            assert!(
+                captured
+                    .get(id)
+                    .is_some_and(|value| Arc::ptr_eq(value, client))
+            );
+        }
+        assert!(
+            agent
+                .mcp_client("shared")
+                .is_some_and(|value| Arc::ptr_eq(&value, &direct))
+        );
+        assert!(agent.disconnect_mcp_owned(&first_id).await?);
+        let current = agent.mcp_clients_by_id();
+        assert_eq!(current.len(), 2);
+        assert!(!current.contains_key(&first_id));
+        assert!(current.contains_key(&direct_id));
+        assert!(current.contains_key(&second_id));
+        assert_eq!(captured.len(), 3);
+        assert!(agent.disconnect_mcp_owned(&second_id).await?);
+        assert!(agent.disconnect_mcp("shared").await?);
         Ok(())
     }
 
@@ -2616,6 +2909,68 @@ mod tests {
         );
         assert!(agent.tools.tool_manager.list_tools().contains(&exposed));
         assert_mcp_projections(&agent, "context", true).await;
+        Ok(())
+    }
+    #[tokio::test]
+    async fn default_skill_source_survives_host_executor_changes_and_original_registration_paths()
+    -> Result<()> {
+        let local: Arc<dyn crate::sandbox::SandboxExecutor> =
+            Arc::new(crate::sandbox::SandboxManager::local_sandbox());
+        let host: Arc<dyn crate::sandbox::SandboxExecutor> =
+            Arc::new(crate::sandbox::SandboxManager::local_sandbox());
+        let mut agent = ReactAgent::new(
+            AgentConfig::new("source-test", "source-test", "")
+                .enable_tool(false)
+                .auto_project_rules(false),
+        );
+        agent.set_default_skill_source(SkillFileSource::local(Some(local.clone())));
+        agent.set_sandbox_executor(host.clone());
+        let directory = tempfile::tempdir()?;
+        for (name, prepared) in [("local-prepared", true), ("local-descriptor", false)] {
+            let document = crate::skills::external::SkillDocument::parse_at(
+                &format!("---\nname: {name}\ndescription: source capture\n---\nlocal body\n"),
+                directory.path().join(name).join("SKILL.md"),
+            )?;
+            if prepared {
+                agent.register_prepared_skill(document).await?;
+            } else {
+                agent
+                    .register_skill_descriptor(document.descriptor().clone())
+                    .await?;
+            }
+        }
+        agent.set_sandbox_executor(host);
+        let default = agent.default_skill_source().sandbox().ok_or_else(|| {
+            crate::error::ReactError::Other("default source lost executor".into())
+        })?;
+        assert!(Arc::ptr_eq(&default, &local));
+        for name in ["local-prepared", "local-descriptor"] {
+            let recorded = agent
+                .tools
+                .skill_registry
+                .file_source(name)
+                .sandbox()
+                .ok_or_else(|| {
+                    crate::error::ReactError::Other("primary source lost executor".into())
+                })?;
+            assert!(Arc::ptr_eq(&recorded, &local));
+            let progressive = agent
+                .tools
+                .progressive_skill_registry
+                .as_ref()
+                .ok_or_else(|| {
+                    crate::error::ReactError::Other("missing progressive registry".into())
+                })?;
+            let recorded = progressive
+                .read()
+                .await
+                .file_source(name)
+                .sandbox()
+                .ok_or_else(|| {
+                    crate::error::ReactError::Other("progressive source lost executor".into())
+                })?;
+            assert!(Arc::ptr_eq(&recorded, &local));
+        }
         Ok(())
     }
 }

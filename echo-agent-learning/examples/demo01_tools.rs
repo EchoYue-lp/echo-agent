@@ -61,7 +61,7 @@ async fn main() -> Result<()> {
 
 可用工具：add / subtract / multiply / divide - 执行数学计算
 
-完成后通过 final_answer 报告结果。
+完成后以原生正文报告结果。
 "#;
 
     let mut agent = ReactAgentBuilder::new()

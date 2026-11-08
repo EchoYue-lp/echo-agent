@@ -154,7 +154,7 @@ impl ReactAgent {
             let response = llm_client
                 .chat(ChatRequest {
                     messages: messages.clone(),
-                    temperature: Some(0.0),
+                    temperature: None,
                     max_tokens: Some(4096),
                     response_format: Some(schema.clone()),
                     ..Default::default()
@@ -284,6 +284,21 @@ mod tests {
     use crate::testing::MockLlmClient;
     use serde_json::json;
     use std::sync::Arc;
+
+    #[tokio::test]
+    async fn implicit_temperature_is_absent_from_extraction_request() -> Result<()> {
+        let client = Arc::new(MockLlmClient::new().with_response("{}"));
+        let agent = ReactAgent::new(AgentConfig::new("mock-model", "extractor", "Extract"))
+            .with_llm_client(client.clone());
+        assert_eq!(
+            agent
+                .extract_json("Extract", ResponseFormat::JsonObject)
+                .await?,
+            json!({})
+        );
+        assert_eq!(client.all_temperatures(), vec![None]);
+        Ok(())
+    }
 
     #[tokio::test]
     async fn strict_extract_rejects_valid_json_that_violates_schema() {
