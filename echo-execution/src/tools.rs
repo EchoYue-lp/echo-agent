@@ -359,6 +359,8 @@ pub struct ToolManager {
     #[cfg(test)]
     registration_observer: Option<Arc<dyn Fn(RegistrationObservation) + Send + Sync>>,
     config: ToolExecutionConfig,
+    native_execution_admission:
+        RwLock<Option<Arc<dyn echo_core::tools::NativeExecutionResourceAdmission>>>,
     /// Write/execute semaphore (limits concurrent write/execute tools).
     semaphore: Option<Arc<Semaphore>>,
     /// Read semaphore (higher limit for concurrent read-only tools).
@@ -848,6 +850,7 @@ impl ToolManager {
             semaphore: None,
             read_semaphore: None,
             config: ToolExecutionConfig::default(),
+            native_execution_admission: RwLock::new(None),
             cached_definitions: RwLock::new(None),
             definitions_version: AtomicU64::new(0),
             result_cache: RwLock::new(HashMap::new()),
@@ -874,12 +877,33 @@ impl ToolManager {
             semaphore,
             read_semaphore,
             config,
+            native_execution_admission: RwLock::new(None),
             cached_definitions: RwLock::new(None),
             definitions_version: AtomicU64::new(0),
             result_cache: RwLock::new(HashMap::new()),
             result_cache_epoch: AtomicU64::new(0),
             budget_metrics: ToolBudgetMetrics::default(),
         }
+    }
+
+    /// 安装宿主原生资源能力；共享 manager 重复安装只替换引用，不包装工具。
+    ///
+    /// 在运行前配置；已有 attempt 保留自己的引用。执行器还须兑现独立的物理保有合同，
+    /// 未支持后端会在 workload 创建前明确失败。
+    ///
+    /// ```rust
+    /// # use std::sync::Arc;
+    /// # use echo_core::tools::NativeExecutionResourceAdmission;
+    /// # fn configure(provider: Arc<dyn NativeExecutionResourceAdmission>) {
+    /// let manager = echo_execution::tools::ToolManager::new();
+    /// manager.set_native_execution_admission(Some(provider));
+    /// # }
+    /// ```
+    pub fn set_native_execution_admission(
+        &self,
+        provider: Option<Arc<dyn echo_core::tools::NativeExecutionResourceAdmission>>,
+    ) {
+        *self.native_execution_admission.write() = provider;
     }
 
     pub fn max_concurrency(&self) -> Option<usize> {
@@ -1224,8 +1248,12 @@ impl ToolManager {
                 wait_retry_delay(Duration::from_millis(delay_ms), ctx, tool_name).await?;
             }
 
-            let owned_context = started_execution_context(ctx, drain_started);
-            let attempt_context = owned_context.as_ref().unwrap_or(ctx);
+            let mut attempt_context =
+                started_execution_context(ctx, drain_started).unwrap_or_else(|| ctx.clone());
+            if let Some(provider) = self.native_execution_admission.read().clone() {
+                attempt_context.native_execution_admission = Some(provider);
+            }
+            let attempt_context = &attempt_context;
             let execution = async {
                 if let Some(check) = admission {
                     check(tool.as_ref())?;
@@ -1246,7 +1274,7 @@ impl ToolManager {
                 if self.config.timeout_ms > 0 && !tool.manages_own_timeout() {
                     match tokio::time::timeout(
                         Duration::from_millis(self.config.timeout_ms),
-                        tool.execute_with_context(parameters.clone(), ctx),
+                        tool.execute_with_context(parameters.clone(), attempt_context),
                     )
                     .await
                     {
@@ -1254,7 +1282,8 @@ impl ToolManager {
                         Err(_) => Err(ToolError::Timeout(tool_name.to_string()).into()),
                     }
                 } else {
-                    tool.execute_with_context(parameters.clone(), ctx).await
+                    tool.execute_with_context(parameters.clone(), attempt_context)
+                        .await
                 }
             };
             let result = cancel_aware(execution, ctx, tool_name, drain_started).await;
@@ -1466,8 +1495,12 @@ impl ToolManager {
 
             let mut output_forwarded = false;
             let completed = std::sync::atomic::AtomicBool::new(false);
-            let owned_context = started_execution_context(ctx, drain_started);
-            let attempt_context = owned_context.as_ref().unwrap_or(ctx);
+            let mut attempt_context =
+                started_execution_context(ctx, drain_started).unwrap_or_else(|| ctx.clone());
+            if let Some(provider) = self.native_execution_admission.read().clone() {
+                attempt_context.native_execution_admission = Some(provider);
+            }
+            let attempt_context = &attempt_context;
             let consume_stream = async {
                 use futures::StreamExt;
 
@@ -1692,6 +1725,129 @@ mod execute_with_context_tests {
     use std::pin::Pin;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering as AtomicOrdering};
     use std::sync::{Arc, Mutex};
+
+    #[tokio::test]
+    async fn native_provider_uses_the_final_manager_and_original_attempt_timer() -> Result<()> {
+        struct NativeWaitTool(Arc<AtomicBool>);
+        impl Tool for NativeWaitTool {
+            fn name(&self) -> &str {
+                "native_wait"
+            }
+            fn description(&self) -> &str {
+                "controlled native admission wait"
+            }
+            fn parameters(&self) -> serde_json::Value {
+                serde_json::json!({"type":"object","properties":{}})
+            }
+            fn execute(
+                &self,
+                _parameters: ToolParameters,
+            ) -> futures::future::BoxFuture<'_, Result<ToolResult>> {
+                Box::pin(async {
+                    Err(ReactError::Other(
+                        "native context entry was bypassed".to_string(),
+                    ))
+                })
+            }
+            fn execute_with_context<'a>(
+                &'a self,
+                _parameters: ToolParameters,
+                context: &'a ToolContext,
+            ) -> futures::future::BoxFuture<'a, Result<ToolResult>> {
+                Box::pin(async move {
+                    self.0.store(
+                        context.native_execution_admission.is_some() && context.cancel.is_some(),
+                        AtomicOrdering::SeqCst,
+                    );
+                    let mut command = echo_core::sandbox::SandboxCommand::program("echo", vec![])
+                        .with_timeout(Duration::from_secs(5));
+                    echo_core::tools::native_execution::admit_native_execution(
+                        context,
+                        &mut command,
+                        self.name(),
+                    )
+                    .await?;
+                    Ok(ToolResult::success("unexpected native admission"))
+                })
+            }
+        }
+        struct Provider(Arc<Semaphore>);
+        impl echo_core::tools::NativeExecutionResourceAdmission for Provider {
+            fn admit<'a>(
+                &'a self,
+                _cancel: &'a tokio_util::sync::CancellationToken,
+                _deadline: std::time::Instant,
+            ) -> futures::future::BoxFuture<
+                'a,
+                std::result::Result<
+                    InvocationResourceGuard,
+                    echo_core::tools::NativeExecutionAdmissionError,
+                >,
+            > {
+                Box::pin(async move {
+                    let _permit = self
+                        .0
+                        .clone()
+                        .acquire_owned()
+                        .await
+                        .map_err(|_| echo_core::tools::NativeExecutionAdmissionError::Closed)?;
+                    // 故意在交回 guard 前停住；原 manager 取消必须撤回这一等待并释放原 permit。
+                    std::future::pending().await
+                })
+            }
+        }
+        for streaming in [false, true] {
+            let capacity = Arc::new(Semaphore::new(1));
+            let seen = Arc::new(AtomicBool::new(false));
+            let manager = ToolManager::new_with_config(ToolExecutionConfig {
+                timeout_ms: 20,
+                retry_on_fail: false,
+                max_retries: 0,
+                retry_delay_ms: 0,
+                max_concurrency: Some(1),
+                max_read_concurrency: None,
+            });
+            manager.try_register(Box::new(NativeWaitTool(seen.clone())))?;
+            let provider: Arc<dyn echo_core::tools::NativeExecutionResourceAdmission> =
+                Arc::new(Provider(capacity.clone()));
+            manager.set_native_execution_admission(Some(provider.clone()));
+            manager.set_native_execution_admission(Some(provider));
+            let input = ToolContext::default();
+            let result = if streaming {
+                manager
+                    .execute_tool_stream_with_context_draining_started(
+                        "native_wait",
+                        ToolParameters::new(),
+                        &input,
+                        None,
+                    )
+                    .await
+            } else {
+                manager
+                    .execute_tool_with_context_draining_started(
+                        "native_wait",
+                        ToolParameters::new(),
+                        &input,
+                    )
+                    .await
+            };
+            assert!(
+                matches!(result, Err(ReactError::Tool(error)) if matches!(*error, ToolError::Timeout(_)))
+            );
+            assert!(seen.load(AtomicOrdering::SeqCst));
+            assert!(input.native_execution_admission.is_none());
+            assert!(input.cancel.is_none());
+            assert_eq!(capacity.available_permits(), 1);
+            assert_eq!(
+                manager
+                    .semaphore
+                    .as_ref()
+                    .map(|semaphore| semaphore.available_permits()),
+                Some(1)
+            );
+        }
+        Ok(())
+    }
 
     /// Records the `ToolContext` it was called with, so we can verify
     /// `execute_tool_with_context` actually forwards the caller-supplied ctx.

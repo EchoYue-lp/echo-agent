@@ -863,6 +863,7 @@ fn invocation_tool_context(
             },
         ),
         script_execution_profile: None,
+        native_execution_admission: None,
         cancel: snapshot.external_cancel.clone(),
         trace_sink: snapshot.external_trace_sink.clone(),
         delegation_policy: snapshot.external_delegation_policy,

@@ -462,6 +462,19 @@ impl Tool for RunCodeTool {
                     .extend(profile.read_only_paths.iter().cloned());
             }
 
+            echo_core::tools::native_execution::admit_native_execution(
+                ctx,
+                &mut sandbox_cmd,
+                self.name(),
+            )
+            .await?;
+            sandbox_cmd.ensure_physical_resource_ownership(
+                sandbox.supports_physical_resource_ownership(),
+            )?;
+            if ctx.native_execution_admission.is_some() {
+                // cpu_time_secs 在本框架是 wall-clock 上限；不能覆盖已扣准入的原命令剩余预算。
+                limits.cpu_time_secs = None;
+            }
             match sandbox
                 .execute_with_isolation_receipt(sandbox_cmd, limits, ctx.cancel.clone())
                 .await
@@ -651,6 +664,11 @@ mod tests {
             self.isolation
         }
 
+        fn supports_physical_resource_ownership(&self) -> bool {
+            // 仅此合同记录器在所有执行入口保有原 command；不声称真实 OS/native 资格。
+            true
+        }
+
         fn is_available(&self) -> BoxFuture<'_, bool> {
             let available = self.available;
             Box::pin(async move { available })
@@ -658,8 +676,15 @@ mod tests {
 
         fn execute(
             &self,
-            _command: SandboxCommand,
+            command: SandboxCommand,
         ) -> BoxFuture<'_, std::result::Result<ExecutionResult, ReactError>> {
+            *self
+                .seen
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(RecordedCall {
+                command,
+                limits: ResourceLimits::unrestricted(),
+            });
             let result = self.result.clone();
             let observation = self.observation.clone();
             Box::pin(async move {
@@ -750,6 +775,82 @@ mod tests {
         ]
         .into_iter()
         .collect()
+    }
+
+    #[tokio::test]
+    async fn native_admission_preserves_original_code_executor_isolation_and_unknown_guard()
+    -> Result<()> {
+        struct Admission(Arc<tokio::sync::Semaphore>);
+        impl echo_core::tools::NativeExecutionResourceAdmission for Admission {
+            fn admit<'a>(
+                &'a self,
+                cancel: &'a CancellationToken,
+                deadline: std::time::Instant,
+            ) -> BoxFuture<
+                'a,
+                std::result::Result<
+                    echo_core::tools::InvocationResourceGuard,
+                    echo_core::tools::NativeExecutionAdmissionError,
+                >,
+            > {
+                Box::pin(async move {
+                    use echo_core::tools::NativeExecutionAdmissionError;
+                    let permit = tokio::select! {
+                        biased;
+                        _ = cancel.cancelled() => return Err(NativeExecutionAdmissionError::Cancelled),
+                        _ = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)) => return Err(NativeExecutionAdmissionError::Deadline),
+                        permit = self.0.clone().acquire_owned() => permit.map_err(|_| NativeExecutionAdmissionError::Closed)?,
+                    };
+                    Ok(echo_core::tools::InvocationResourceGuard::new(permit))
+                })
+            }
+        }
+        let capacity = Arc::new(tokio::sync::Semaphore::new(1));
+        let context = ToolContext {
+            native_execution_admission: Some(Arc::new(Admission(capacity.clone()))),
+            ..ToolContext::default()
+        };
+        // 合同控制：记录器保有原 command，并声明原 typed Unknown，不声称真实 OS 隔离。
+        let sandbox = Arc::new(RecordingSandbox {
+            isolation: IsolationLevel::OsSandbox,
+            actual_isolation: None,
+            available: true,
+            result: success_execution("unused"),
+            observation: Some((
+                "original-run".to_string(),
+                Some("original-execution".to_string()),
+            )),
+            seen: std::sync::Mutex::new(None),
+        });
+        let tool = RunCodeTool::new().with_sandbox(sandbox.clone());
+        let result = tool
+            .execute_with_context(code_params("bash", "echo effect"), &context)
+            .await;
+        assert!(
+            matches!(result, Err(ReactError::ExecutionNotSettled { run_id, execution_id })
+            if run_id == "original-run" && execution_id.as_deref() == Some("original-execution"))
+        );
+        assert_eq!(capacity.available_permits(), 0);
+        assert!(context.resource_guards.is_empty());
+        let call = sandbox
+            .seen
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take()
+            .ok_or_else(|| ReactError::Other("missing original code dispatch".to_string()))?;
+        assert_eq!(
+            call.command.minimum_isolation,
+            Some(IsolationLevel::OsSandbox)
+        );
+        assert_eq!(call.command.resource_guards.len(), 1);
+        assert!(call.command.timeout <= Duration::from_secs(60));
+        assert_eq!(
+            call.limits.cpu_time_secs, None,
+            "limits must not restart the spent command budget"
+        );
+        drop(call);
+        assert_eq!(capacity.available_permits(), 1);
+        Ok(())
     }
 
     fn script_params(language: &str, script_path: &str) -> HashMap<String, serde_json::Value> {

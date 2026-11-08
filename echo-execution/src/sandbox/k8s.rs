@@ -426,6 +426,7 @@ impl K8sSandbox {
         limits: Option<&ResourceLimits>,
         cancel: Option<Arc<CancellationToken>>,
     ) -> Result<ExecutionResult> {
+        command.ensure_physical_resource_ownership(self.supports_physical_resource_ownership())?;
         let cancel = cancel.or_else(|| command.cancel.clone());
         if limits.is_some_and(|limits| !limits.network) {
             return Err(echo_core::error::ReactError::Sandbox(Box::new(
@@ -1208,6 +1209,45 @@ impl SandboxExecutor for K8sSandbox {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn physical_resource_requirement_rejects_every_public_workload_entry_before_reservation()
+    -> Result<()> {
+        let sandbox = K8sSandbox::new(K8sConfig::default());
+        assert!(!sandbox.supports_physical_resource_ownership());
+        for entry in 0..5 {
+            let mut command = SandboxCommand::shell("echo must-not-create-workload");
+            command.require_physical_resource_ownership = true;
+            let result = match entry {
+                0 => sandbox.execute(command).await.map(|_| ()),
+                1 => sandbox
+                    .execute_with_limits(command, ResourceLimits::unrestricted())
+                    .await
+                    .map(|_| ()),
+                2 => sandbox
+                    .execute_with_limits_and_cancel(command, ResourceLimits::unrestricted(), None)
+                    .await
+                    .map(|_| ()),
+                3 => sandbox
+                    .execute_with_isolation_receipt(command, ResourceLimits::unrestricted(), None)
+                    .await
+                    .map(|_| ()),
+                _ => sandbox.execute_stream(command).await.map(|_| ()),
+            };
+            assert!(
+                matches!(result, Err(echo_core::error::ReactError::Sandbox(error))
+                if matches!(error.as_ref(), SandboxError::Unavailable(message) if message.contains("physical resource ownership"))),
+                "unsupported entry {entry} did not reject the explicit new requirement"
+            );
+            let (active, debt) = sandbox.resources.snapshot();
+            assert!(
+                active.is_empty() && debt.is_empty(),
+                "unsupported workload reserved an owner"
+            );
+        }
+        // 这是实际公开入口的本机拒绝控制，不授容器／Pod执行或清理 live 资格。
+        Ok(())
+    }
 
     #[test]
     fn only_etxtbsy_is_retryable_when_starting_kubectl() {

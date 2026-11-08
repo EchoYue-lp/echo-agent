@@ -63,6 +63,15 @@ pub trait SandboxExecutor: Send + Sync {
         false
     }
 
+    /// 是否能兑现请求的物理资源保有合同。
+    ///
+    /// 叶子须保有原 command guard 至真实终结，清理未知时保留原 owner；
+    /// 路由器须在最终每次派发（含 fallback）检查同一要求并无 workload 创建地拒绝
+    /// 未支持叶子。默认不声明支持，不能从名称、隔离等级或 guard 数量推断。
+    fn supports_physical_resource_ownership(&self) -> bool {
+        false
+    }
+
     /// Execute a command with resource limits
     fn execute_with_limits(
         &self,
@@ -217,6 +226,9 @@ pub struct SandboxCommand {
     /// before it spawns work that can outlive the observing future.
     #[serde(skip)]
     pub resource_guards: Vec<crate::tools::InvocationResourceGuard>,
+    /// 宿主新资源政策明确要求原 physical owner 保有资源。运行时要求，不是已持许可证明。
+    #[serde(skip)]
+    pub require_physical_resource_ownership: bool,
     /// Runtime-only cooperative stop request. Cancellation is not a receipt
     /// that the backend or remote effects have stopped.
     #[serde(skip)]
@@ -233,6 +245,10 @@ impl std::fmt::Debug for SandboxCommand {
             .field("timeout", &self.timeout)
             .field("stdin", &self.stdin.as_ref().map(|_| "<input>"))
             .field("resource_guard_count", &self.resource_guards.len())
+            .field(
+                "require_physical_resource_ownership",
+                &self.require_physical_resource_ownership,
+            )
             .field(
                 "cancel",
                 &self.cancel.as_ref().map(|_| "<CancellationToken>"),
@@ -253,6 +269,19 @@ pub enum CommandKind {
 }
 
 impl SandboxCommand {
+    /// 在交给实际执行器前复用同一能力检查；false 保留原行为。
+    ///
+    /// supported 必须取实际 executor 的能力声明，或已审核的原 direct owner 能力。
+    /// 不从名字／隔离／guard 数量推断；此唯一检查也不限制原 availability／cleanup 控制操作。
+    pub fn ensure_physical_resource_ownership(&self, supported: bool) -> Result<()> {
+        if self.require_physical_resource_ownership && !supported {
+            return Err(SandboxError::Unavailable(
+                "Selected execution owner does not support physical resource ownership required by the configured native execution policy".to_string(),
+            ).into());
+        }
+        Ok(())
+    }
+
     /// Create a shell command
     pub fn shell(cmd: impl Into<String>) -> Self {
         Self {
@@ -263,6 +292,7 @@ impl SandboxCommand {
             timeout: Duration::from_secs(30),
             stdin: None,
             resource_guards: Vec::new(),
+            require_physical_resource_ownership: false,
             cancel: None,
         }
     }
@@ -280,6 +310,7 @@ impl SandboxCommand {
             timeout: Duration::from_secs(30),
             stdin: None,
             resource_guards: Vec::new(),
+            require_physical_resource_ownership: false,
             cancel: None,
         }
     }
@@ -297,6 +328,7 @@ impl SandboxCommand {
             timeout: Duration::from_secs(30),
             stdin: None,
             resource_guards: Vec::new(),
+            require_physical_resource_ownership: false,
             cancel: None,
         }
     }

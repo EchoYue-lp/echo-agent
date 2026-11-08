@@ -90,6 +90,7 @@ impl fmt::Debug for CommandCellAdmission {
 #[must_use]
 pub struct CommandCellResourceLease {
     release: Option<Box<dyn FnOnce() + Send + 'static>>,
+    require_physical_resource_ownership: bool,
 }
 
 impl CommandCellResourceLease {
@@ -98,7 +99,21 @@ impl CommandCellResourceLease {
     pub fn new(release: impl FnOnce() + Send + 'static) -> Self {
         Self {
             release: Some(Box::new(release)),
+            require_physical_resource_ownership: false,
         }
+    }
+}
+
+impl CommandCellResourceLease {
+    /// 本 lease 使用新原生资源合同；原 Queued runner 必须要求 backend 兑现物理保有。
+    pub fn requiring_physical_resource_ownership(mut self) -> Self {
+        self.require_physical_resource_ownership = true;
+        self
+    }
+
+    /// 原 new 默认为 false，保留未启用新政策的调用行为。
+    pub fn requires_physical_resource_ownership(&self) -> bool {
+        self.require_physical_resource_ownership
     }
 }
 

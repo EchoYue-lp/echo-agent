@@ -1372,6 +1372,9 @@ async fn run_cell(
     // 同一个已取得的许可同时进入原 backend 的资源链。远端返回有界 Unknown
     // 时，manager/观察结束不代表原物理操作结束；原 backend 保有的 guard
     // 继续阻止配额提前释放。Mutex 只把 Send 的释放动作包装为现有 guard 所需的 Sync。
+    let require_physical_resource_ownership = product_lease
+        .as_ref()
+        .is_some_and(|lease| lease.requires_physical_resource_ownership());
     let product_guard = product_lease
         .map(|lease| echo_core::tools::InvocationResourceGuard::new(Mutex::new(lease)));
     if let Some(guard) = product_guard.as_ref() {
@@ -1428,6 +1431,7 @@ async fn run_cell(
         let mut sandbox_command = SandboxCommand::shell(command)
             .with_resource_guards(resource_guards)
             .with_cancel(Some(Arc::new(handle.cancel.clone())));
+        sandbox_command.require_physical_resource_ownership = require_physical_resource_ownership;
         if let Some(dir) = &working_dir {
             sandbox_command = sandbox_command.with_working_dir(dir);
         }
@@ -1440,6 +1444,11 @@ async fn run_cell(
             max_retained,
         )
         .await;
+    }
+
+    if require_physical_resource_ownership {
+        return CellOutcome::runtime_failure(CommandCellTerminalCause::LaunchFailed,
+            "Background direct execution does not support the configured physical resource ownership requirement; configure a supported SandboxExecutor".to_string());
     }
 
     // env_clear + allowlist: 防止把密钥泄漏给后台进程; PATH/HOME 必需,
@@ -1558,6 +1567,14 @@ async fn run_sandbox_cell(
 
     let mut stop_cause = None;
     let mut cleanup_warning_at = None;
+    if let Err(error) = sandbox_command
+        .ensure_physical_resource_ownership(sandbox.supports_physical_resource_ownership())
+    {
+        return CellOutcome::runtime_failure(
+            CommandCellTerminalCause::LaunchFailed,
+            error.to_string(),
+        );
+    }
     let mut startup = sandbox.execute_stream(sandbox_command);
     let stream = loop {
         tokio::select! {
@@ -2328,6 +2345,79 @@ mod tests {
             timeout_secs: None,
             ..Default::default()
         }
+    }
+
+    #[tokio::test]
+    async fn native_provider_keeps_accepted_receipt_but_rejects_unqualified_direct_workload()
+    -> Result<(), String> {
+        struct Admission(Arc<Semaphore>);
+        impl echo_core::tools::NativeExecutionResourceAdmission for Admission {
+            fn admit<'a>(
+                &'a self,
+                cancel: &'a CancellationToken,
+                deadline: std::time::Instant,
+            ) -> BoxFuture<
+                'a,
+                Result<
+                    echo_core::tools::InvocationResourceGuard,
+                    echo_core::tools::NativeExecutionAdmissionError,
+                >,
+            > {
+                Box::pin(async move {
+                    use echo_core::tools::NativeExecutionAdmissionError;
+                    let permit = tokio::select! {
+                        biased;
+                        _ = cancel.cancelled() => return Err(NativeExecutionAdmissionError::Cancelled),
+                        _ = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)) => return Err(NativeExecutionAdmissionError::Deadline),
+                        result = self.0.clone().acquire_owned() => result.map_err(|_| NativeExecutionAdmissionError::Closed)?,
+                    };
+                    Ok(echo_core::tools::InvocationResourceGuard::new(permit))
+                })
+            }
+        }
+        let root =
+            std::env::temp_dir().join(format!("native-cell-capability-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).map_err(|error| error.to_string())?;
+        let marker = root.join("must-not-exist");
+        let capacity = Arc::new(Semaphore::new(1));
+        let manager = BackgroundCommandManager::new(BackgroundCommandManagerConfig::default())?;
+        let mut request = request("printf effect > must-not-exist");
+        request.working_dir = Some(root.display().to_string());
+        request.timeout_secs = Some(5);
+        request.resource_admission = Some(
+            echo_core::tools::native_execution::command_cell_resource_admission(Arc::new(
+                Admission(capacity.clone()),
+            )),
+        );
+        let receipt = manager
+            .launch(request)
+            .await
+            .map_err(|error| error.to_string())?;
+        let observed = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let delta = manager.wait(&receipt.cell_id, 0, 100).await?;
+                if delta.snapshot.phase.is_terminal() {
+                    return Ok::<_, CommandCellError>(delta);
+                }
+            }
+        })
+        .await;
+        let shutdown = manager.shutdown().await;
+        let effect_exists = marker.exists();
+        std::fs::remove_dir_all(root).map_err(|error| error.to_string())?;
+        shutdown.map_err(|error| error.to_string())?;
+        let delta = observed
+            .map_err(|_| "capability rejection did not reach original terminal".to_string())?
+            .map_err(|error| error.to_string())?;
+        assert_eq!(delta.snapshot.cell_id, receipt.cell_id);
+        assert_eq!(delta.snapshot.phase, CommandCellPhase::LaunchFailed);
+        assert_eq!(delta.snapshot.exit_code, None);
+        assert!(
+            !effect_exists,
+            "unsupported original direct runner created a workload effect"
+        );
+        assert_eq!(capacity.available_permits(), 1);
+        Ok(())
     }
 
     async fn launch_cell(

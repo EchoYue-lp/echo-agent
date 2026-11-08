@@ -6,8 +6,8 @@
 //!
 //! ## Sandbox integration
 //!
-//! All script execution goes through [`SandboxManager`](crate::sandbox::SandboxManager), which automatically
-//! selects the best isolation level based on security policy:
+//! 有绑定 executor 时保持该 Skill source 的原执行器；SandboxManager 按原政策选择隔离层：
+//! 历史默认路由如下，不以宿主执行器替代 source executor：
 //!
 //! | Command type | Typical isolation |
 //! |-------------|-------------------|
@@ -17,7 +17,8 @@
 //!
 //! If no `SandboxManager` is configured, falls back to bare process spawning
 //! with a minimal environment whitelist (`env_clear()` + PATH / SKILL_DIR / SESSION_ID)
-//! and best-effort timeout termination (`kill_on_drop(true)`).
+//! 并复用本地进程 owner：取消、超时或调用者掉线后等待 kill／reap／drain。
+//! 原生资源准入是可选能力，策略由宿主注入，guard 只随该次物理操作保有。
 //!
 //! ## Cross-platform interpreter detection
 //!
@@ -224,6 +225,18 @@ impl RunSkillScriptTool {
                 }
                 .into());
             }
+            if executor.is_none()
+                && descriptor
+                    .sandbox
+                    .as_ref()
+                    .is_some_and(SkillSandboxPolicy::is_constraining)
+            {
+                return Err(ToolError::ExecutionFailed {
+                    tool: self.name().to_string(),
+                    message: "Skill sandbox constraints require a matching executor".to_string(),
+                }
+                .into());
+            }
             let invocation = if source.requires_executor() {
                 let manager = executor
                     .as_deref()
@@ -241,7 +254,7 @@ impl RunSkillScriptTool {
                 )
                 .await?
             } else {
-                resolve_interpreter(&script_path)
+                resolve_interpreter(&script_path, context, self.timeout_secs).await?
             };
 
             // Build argument list: [prefix_args...] <script_path> [user_args...]
@@ -253,33 +266,22 @@ impl RunSkillScriptTool {
 
             // -- Sandbox execution path --
             if let Some(ref manager) = executor {
-                let mut sandbox_cmd = SandboxCommand::program(&invocation.program, all_args)
-                    .with_working_dir(&canonical_skill_dir)
-                    .with_timeout(timeout);
+                let mut sandbox_cmd =
+                    SandboxCommand::program(&invocation.program, all_args.clone())
+                        .with_working_dir(&canonical_skill_dir)
+                        .with_timeout(timeout);
                 sandbox_cmd.resource_guards = context
                     .map(|ctx| ctx.resource_guards.clone())
                     .unwrap_or_default();
                 sandbox_cmd.cancel = context.and_then(|ctx| ctx.cancel.clone());
 
-                // Apply SkillSandboxPolicy from descriptor (if declared).
-                // Network / path restrictions go through ResourceLimits +
-                // execute_with_limits for OS-level enforcement.
-                let execution_result = if let Some(ref policy) = descriptor.sandbox
-                    && policy.is_constraining()
-                {
-                    apply_sandbox_policy(&mut sandbox_cmd, policy);
-                    manager
-                        .execute_with_limits_and_cancel(
-                            sandbox_cmd,
-                            sandbox_limits_from_policy(policy),
-                            context.and_then(|ctx| ctx.cancel.clone()),
-                        )
-                        .await
-                } else {
-                    // Supplying unrestricted limits would overwrite the
-                    // executor's existing local configuration (e.g. network).
-                    manager.execute(sandbox_cmd).await
-                };
+                let execution_result = execute_skill_sandbox_command(
+                    manager.as_ref(),
+                    sandbox_cmd,
+                    descriptor.sandbox.as_ref(),
+                    context,
+                )
+                .await;
 
                 return match execution_result {
                     Ok(result) => format_execution_result(
@@ -295,22 +297,13 @@ impl RunSkillScriptTool {
             }
 
             // -- Fallback: direct process execution (no sandbox) --
-            if descriptor
-                .sandbox
-                .as_ref()
-                .is_some_and(SkillSandboxPolicy::is_constraining)
-            {
-                return Err(ToolError::ExecutionFailed {
-                    tool: self.name().to_string(),
-                    message: "Skill sandbox constraints require a matching executor".to_string(),
-                }
-                .into());
-            }
             let mut cmd = tokio::process::Command::new(&invocation.program);
             for arg in &all_args {
                 cmd.arg(arg);
             }
             cmd.current_dir(&canonical_skill_dir);
+            // 保留原 Command::output 的关闭 stdin 语义；不能因改用原 child owner 而继承宿主输入。
+            cmd.stdin(std::process::Stdio::null());
             cmd.kill_on_drop(true);
 
             // Use minimal environment to avoid leaking sensitive variables
@@ -324,29 +317,37 @@ impl RunSkillScriptTool {
                 cmd.env(k, v);
             }
 
-            match tokio::time::timeout(timeout, cmd.output()).await {
-                Ok(Ok(output)) => {
-                    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-                    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-                    format_execution_result(
-                        &skill_name,
-                        &script_path,
-                        output.status.code().unwrap_or(-1),
-                        &stdout,
-                        &stderr,
-                        "direct",
-                    )
-                }
-                Ok(Err(e)) => Ok(ToolResult::error(format!(
-                    "Failed to execute '{}' in skill '{}': {}. \
-                     Ensure the interpreter is installed and on PATH.",
-                    script_path, skill_name, e
-                ))),
-                Err(_) => Ok(ToolResult::error(format!(
-                    "Script '{}' in skill '{}' timed out after {}s",
-                    script_path, skill_name, self.timeout_secs
-                ))),
+            let mut native_command =
+                SandboxCommand::program(&invocation.program, all_args).with_timeout(timeout);
+            native_command.resource_guards = context
+                .map(|ctx| ctx.resource_guards.clone())
+                .unwrap_or_default();
+            native_command.cancel = context.and_then(|ctx| ctx.cancel.clone());
+            if let Some(context) = context {
+                echo_core::tools::native_execution::admit_native_execution(
+                    context,
+                    &mut native_command,
+                    self.name(),
+                )
+                .await?;
             }
+            let result =
+                crate::sandbox::local::run_direct_skill_command(cmd, native_command, usize::MAX)
+                    .await?;
+            if result.timed_out {
+                return Ok(ToolResult::error(format!(
+                    "Script '{}' in skill '{}' timed out after {}s",
+                    script_path, skill_name, self.timeout_secs,
+                )));
+            }
+            format_execution_result(
+                &skill_name,
+                &script_path,
+                result.exit_code,
+                &result.stdout,
+                &result.stderr,
+                "direct",
+            )
         })
     }
 }
@@ -455,20 +456,7 @@ async fn resolve_interpreter_in_target(
             .map(|ctx| ctx.resource_guards.clone())
             .unwrap_or_default();
         command.cancel = context.and_then(|ctx| ctx.cancel.clone());
-        // Probing and actual execution inherit the same configured default;
-        // only a declared constraining policy supplies explicit overrides.
-        let result = if let Some(policy) = policy.filter(|policy| policy.is_constraining()) {
-            apply_sandbox_policy(&mut command, policy);
-            executor
-                .execute_with_limits_and_cancel(
-                    command,
-                    sandbox_limits_from_policy(policy),
-                    context.and_then(|ctx| ctx.cancel.clone()),
-                )
-                .await?
-        } else {
-            executor.execute(command).await?
-        };
+        let result = execute_skill_sandbox_command(executor, command, policy, context).await?;
         // An executor error propagates above without probing another program
         // or falling back to a local process when settlement may be unknown.
         if result.success() {
@@ -497,25 +485,29 @@ struct Invocation {
     prefix_args: Vec<String>,
 }
 
-/// Resolve the interpreter invocation for a script path, with cross-platform awareness.
-fn resolve_interpreter(script_path: &str) -> Invocation {
+/// Resolve local interpreters without blocking the async runtime; each actual probe
+/// uses the original local child owner and the same optional resource policy.
+async fn resolve_interpreter(
+    script_path: &str,
+    context: Option<&echo_core::tools::ToolContext>,
+    timeout_secs: u64,
+) -> Result<Invocation> {
     let ext = script_path
         .rsplit('.')
         .next()
         .unwrap_or("")
         .to_ascii_lowercase();
-
     match ext.as_str() {
-        "py" => resolve_python(),
-        "js" | "mjs" | "cjs" => Invocation::simple("node"),
-        "ts" | "mts" | "tsx" => resolve_typescript(),
-        "sh" | "bash" => resolve_shell(),
-        "ps1" => resolve_powershell(),
-        "rb" => Invocation::simple("ruby"),
-        "pl" => Invocation::simple("perl"),
-        "php" => Invocation::simple("php"),
-        "r" | "R" => Invocation::new("Rscript", vec![]),
-        _ => resolve_shell(), // unknown extension -> try shell
+        "py" => resolve_python(context, timeout_secs).await,
+        "js" | "mjs" | "cjs" => Ok(Invocation::simple("node")),
+        "ts" | "mts" | "tsx" => resolve_typescript(context, timeout_secs).await,
+        "sh" | "bash" => resolve_shell(context, timeout_secs).await,
+        "ps1" => resolve_powershell(context, timeout_secs).await,
+        "rb" => Ok(Invocation::simple("ruby")),
+        "pl" => Ok(Invocation::simple("perl")),
+        "php" => Ok(Invocation::simple("php")),
+        "r" => Ok(Invocation::simple("Rscript")),
+        _ => resolve_shell(context, timeout_secs).await,
     }
 }
 
@@ -526,7 +518,6 @@ impl Invocation {
             prefix_args: vec![],
         }
     }
-
     fn new(program: &str, prefix_args: Vec<&str>) -> Self {
         Self {
             program: program.into(),
@@ -535,62 +526,69 @@ impl Invocation {
     }
 }
 
-/// Python: `uv run --script` first (auto PEP 723 ephemeral env),
-/// then `python3`, then `python`, Windows `py -3`.
-fn resolve_python() -> Invocation {
-    // Tier 1: uv run --script (handles PEP 723 inline dependencies,
-    // auto ephemeral venv, no user pip install needed)
-    if which_exists("uv") {
-        return Invocation::new("uv", vec!["run", "--script"]);
+async fn resolve_python(
+    context: Option<&echo_core::tools::ToolContext>,
+    timeout_secs: u64,
+) -> Result<Invocation> {
+    if which_exists("uv", context, timeout_secs).await? {
+        return Ok(Invocation::new("uv", vec!["run", "--script"]));
     }
-    // Tier 2: bare python3 (stdlib scripts still work)
-    if which_exists("python3") {
-        return Invocation::simple("python3");
+    if which_exists("python3", context, timeout_secs).await? {
+        return Ok(Invocation::simple("python3"));
     }
-    // Tier 3: python (macOS python3 not installed, or Windows)
-    if which_exists("python") {
-        return Invocation::simple("python");
+    if which_exists("python", context, timeout_secs).await? {
+        return Ok(Invocation::simple("python"));
     }
-    // Windows fallback
-    if cfg!(target_os = "windows") && which_exists("py") {
-        return Invocation::new("py", vec!["-3"]);
+    if cfg!(target_os = "windows") && which_exists("py", context, timeout_secs).await? {
+        return Ok(Invocation::new("py", vec!["-3"]));
     }
-    // Last resort: assume python3 exists, let Command fail with clear error
-    Invocation::simple("python3")
+    Ok(Invocation::simple("python3"))
 }
 
-/// TypeScript: `bun` -> `deno run` -> `npx tsx`.
-fn resolve_typescript() -> Invocation {
-    if which_exists("bun") {
-        return Invocation::simple("bun");
+async fn resolve_typescript(
+    context: Option<&echo_core::tools::ToolContext>,
+    timeout_secs: u64,
+) -> Result<Invocation> {
+    if which_exists("bun", context, timeout_secs).await? {
+        return Ok(Invocation::simple("bun"));
     }
-    if which_exists("deno") {
-        return Invocation::new("deno", vec!["run", "--allow-read", "--allow-env"]);
+    if which_exists("deno", context, timeout_secs).await? {
+        return Ok(Invocation::new(
+            "deno",
+            vec!["run", "--allow-read", "--allow-env"],
+        ));
     }
-    Invocation::new("npx", vec!["tsx"])
+    Ok(Invocation::new("npx", vec!["tsx"]))
 }
 
-/// Shell scripts (.sh/.bash): bash on Unix, Git Bash -> PowerShell on Windows.
-fn resolve_shell() -> Invocation {
+async fn resolve_shell(
+    context: Option<&echo_core::tools::ToolContext>,
+    timeout_secs: u64,
+) -> Result<Invocation> {
     if cfg!(target_os = "windows") {
-        if let Some(git_bash) = find_git_bash() {
-            return Invocation::simple(git_bash.to_str().unwrap_or("bash"));
+        if let Some(git_bash) = find_git_bash(context, timeout_secs).await? {
+            return Ok(Invocation::simple(git_bash.to_str().unwrap_or("bash")));
         }
-        if which_exists("wsl") {
-            return Invocation::new("wsl", vec!["bash"]);
+        if which_exists("wsl", context, timeout_secs).await? {
+            return Ok(Invocation::new("wsl", vec!["bash"]));
         }
-        resolve_powershell()
+        resolve_powershell(context, timeout_secs).await
     } else {
-        Invocation::simple("bash")
+        Ok(Invocation::simple("bash"))
     }
 }
 
-/// PowerShell: `pwsh` (cross-platform PS 7+) -> `powershell` (Windows built-in).
-fn resolve_powershell() -> Invocation {
-    if which_exists("pwsh") {
-        Invocation::new("pwsh", vec!["-NoProfile", "-NonInteractive", "-File"])
+async fn resolve_powershell(
+    context: Option<&echo_core::tools::ToolContext>,
+    timeout_secs: u64,
+) -> Result<Invocation> {
+    if which_exists("pwsh", context, timeout_secs).await? {
+        Ok(Invocation::new(
+            "pwsh",
+            vec!["-NoProfile", "-NonInteractive", "-File"],
+        ))
     } else if cfg!(target_os = "windows") {
-        Invocation::new(
+        Ok(Invocation::new(
             "powershell",
             vec![
                 "-NoProfile",
@@ -599,15 +597,17 @@ fn resolve_powershell() -> Invocation {
                 "Bypass",
                 "-File",
             ],
-        )
+        ))
     } else {
-        Invocation::simple("sh")
+        Ok(Invocation::simple("sh"))
     }
 }
 
-/// Find Git Bash on Windows.
 #[cfg(target_os = "windows")]
-fn find_git_bash() -> Option<PathBuf> {
+async fn find_git_bash(
+    context: Option<&echo_core::tools::ToolContext>,
+    timeout_secs: u64,
+) -> Result<Option<PathBuf>> {
     let candidates = [
         std::env::var("ProgramFiles")
             .ok()
@@ -618,35 +618,108 @@ fn find_git_bash() -> Option<PathBuf> {
         Some(PathBuf::from(r"C:\Program Files\Git\bin\bash.exe")),
         Some(PathBuf::from(r"C:\Program Files (x86)\Git\bin\bash.exe")),
     ];
-
     for candidate in candidates.into_iter().flatten() {
         if candidate.exists() {
-            return Some(candidate);
+            return Ok(Some(candidate));
         }
     }
-
-    if which_exists("bash") {
-        return Some(PathBuf::from("bash"));
+    if which_exists("bash", context, timeout_secs).await? {
+        return Ok(Some(PathBuf::from("bash")));
     }
-
-    None
+    Ok(None)
 }
 
 #[cfg(not(target_os = "windows"))]
-fn find_git_bash() -> Option<PathBuf> {
-    None
+async fn find_git_bash(
+    _context: Option<&echo_core::tools::ToolContext>,
+    _timeout_secs: u64,
+) -> Result<Option<PathBuf>> {
+    Ok(None)
+}
+
+/// Apply policy before admission, then use the original target executor unchanged.
+async fn execute_skill_sandbox_command(
+    executor: &dyn SandboxExecutor,
+    mut command: SandboxCommand,
+    policy: Option<&SkillSandboxPolicy>,
+    context: Option<&echo_core::tools::ToolContext>,
+) -> Result<crate::sandbox::ExecutionResult> {
+    let policy = policy.filter(|policy| policy.is_constraining());
+    if let Some(policy) = policy {
+        apply_sandbox_policy(&mut command, policy);
+    }
+    if let Some(context) = context {
+        echo_core::tools::native_execution::admit_native_execution(
+            context,
+            &mut command,
+            "run_skill_script",
+        )
+        .await?;
+    }
+    command.ensure_physical_resource_ownership(executor.supports_physical_resource_ownership())?;
+    if let Some(policy) = policy {
+        let mut limits = sandbox_limits_from_policy(policy);
+        if context.is_some_and(|ctx| ctx.native_execution_admission.is_some()) {
+            limits.cpu_time_secs = None;
+        }
+        executor
+            .execute_with_limits_and_cancel(
+                command,
+                limits,
+                context.and_then(|ctx| ctx.cancel.clone()),
+            )
+            .await
+    } else {
+        executor.execute(command).await
+    }
 }
 
 // -- Utilities --
 
 /// Check if a command exists on PATH.
-fn which_exists(cmd: &str) -> bool {
-    std::process::Command::new(cmd)
-        .arg("--version")
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .is_ok_and(|s| s.success())
+async fn which_exists(
+    cmd: &str,
+    context: Option<&echo_core::tools::ToolContext>,
+    timeout_secs: u64,
+) -> Result<bool> {
+    let mut command = tokio::process::Command::new(cmd);
+    command.arg("--version");
+    let mut native = SandboxCommand::program(cmd, vec!["--version".to_string()])
+        .with_timeout(std::time::Duration::from_secs(timeout_secs));
+    native.resource_guards = context
+        .map(|ctx| ctx.resource_guards.clone())
+        .unwrap_or_default();
+    native.cancel = context.and_then(|ctx| ctx.cancel.clone());
+    if let Some(context) = context {
+        echo_core::tools::native_execution::admit_native_execution(
+            context,
+            &mut native,
+            "run_skill_script",
+        )
+        .await?;
+    }
+    match crate::sandbox::local::run_direct_skill_command(
+        command, native,
+        0, // --version 原语义是 discard；原 owner 继续排空管道，绝不先缓存全部再丢弃。
+    )
+    .await
+    {
+        Ok(result) if result.timed_out || result.cancelled => Err(ToolError::ExecutionFailed {
+            tool: "run_skill_script".to_string(),
+            message: "Local interpreter probe did not settle successfully".to_string(),
+        }
+        .into()),
+        Ok(result) => Ok(result.success()),
+        Err(echo_core::error::ReactError::Sandbox(error))
+            if matches!(
+                error.as_ref(),
+                echo_core::error::SandboxError::StartFailed(_)
+            ) =>
+        {
+            Ok(false)
+        }
+        Err(error) => Err(error),
+    }
 }
 
 /// Format execution output into a structured result.
@@ -696,9 +769,170 @@ mod tests {
     use crate::skills::registry::SkillRegistry;
     use std::collections::HashMap;
 
-    #[test]
-    fn test_resolve_python() {
-        let inv = resolve_python();
+    struct NativeAdmission {
+        capacity: Arc<tokio::sync::Semaphore>,
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl echo_core::tools::NativeExecutionResourceAdmission for NativeAdmission {
+        fn admit<'a>(
+            &'a self,
+            cancel: &'a tokio_util::sync::CancellationToken,
+            deadline: std::time::Instant,
+        ) -> BoxFuture<
+            'a,
+            std::result::Result<
+                echo_core::tools::InvocationResourceGuard,
+                echo_core::tools::NativeExecutionAdmissionError,
+            >,
+        > {
+            Box::pin(async move {
+                use echo_core::tools::NativeExecutionAdmissionError;
+                let permit = tokio::select! {
+                    biased;
+                    _ = cancel.cancelled() => return Err(NativeExecutionAdmissionError::Cancelled),
+                    _ = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)) => return Err(NativeExecutionAdmissionError::Deadline),
+                    result = self.capacity.clone().acquire_owned() => result.map_err(|_| NativeExecutionAdmissionError::Closed)?,
+                };
+                self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(echo_core::tools::InvocationResourceGuard::new(permit))
+            })
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn local_probe_and_direct_skill_share_capacity_without_retaining_the_context()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let root =
+            std::env::temp_dir().join(format!("native-direct-skill-{}", uuid::Uuid::new_v4()));
+        tokio::fs::create_dir_all(root.join("scripts")).await?;
+        tokio::fs::write(root.join("SKILL.md"), "body").await?;
+        tokio::fs::write(
+            root.join("scripts/effect.sh"),
+            "printf 'managed-direct-script-effect'\n",
+        )
+        .await?;
+        let mut registry = SkillRegistry::new();
+        registry.register_descriptor(SkillDescriptor {
+            source: None,
+            name: "direct-skill".to_string(),
+            description: "controlled direct fixture".to_string(),
+            location: root.join("SKILL.md"),
+            license: None,
+            compatibility: None,
+            metadata: HashMap::new(),
+            allowed_tools: vec![],
+            shell: None,
+            paths: vec![],
+            triggers: vec![],
+            hooks: None,
+            sandbox: None,
+            depends_on: vec![],
+        });
+        registry.mark_activated("direct-skill");
+        let capacity = Arc::new(tokio::sync::Semaphore::new(1));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let context = echo_core::tools::ToolContext {
+            native_execution_admission: Some(Arc::new(NativeAdmission {
+                capacity: capacity.clone(),
+                calls: calls.clone(),
+            })),
+            ..echo_core::tools::ToolContext::default()
+        };
+        assert!(which_exists("sh", Some(&context), 5).await?);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(capacity.available_permits(), 1);
+        let tool = RunSkillScriptTool::new(Arc::new(RwLock::new(registry)));
+        let params: ToolParameters = [
+            ("skill_name".to_string(), json!("direct-skill")),
+            ("script".to_string(), json!("scripts/effect.sh")),
+        ]
+        .into();
+        let result = tool.execute_with_context(params.clone(), &context).await?;
+        assert!(result.success);
+        assert!(result.output.contains("managed-direct-script-effect"));
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert_eq!(capacity.available_permits(), 1);
+        assert!(context.resource_guards.is_empty());
+        let mut malformed = params;
+        malformed.insert("args".to_string(), json!("'unclosed"));
+        assert!(
+            tool.execute_with_context(malformed, &context)
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            2,
+            "invalid args must not start even a native probe"
+        );
+        tokio::fs::remove_dir_all(root).await?;
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn local_interpreter_probe_is_async_cancellable_and_reaped_before_release()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        use std::os::unix::fs::PermissionsExt;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let root =
+            std::env::temp_dir().join(format!("native-probe-cancel-{}", uuid::Uuid::new_v4()));
+        tokio::fs::create_dir_all(&root).await?;
+        let probe = root.join("controlled-interpreter");
+        let pid_file = root.join("probe.pid");
+        // 真实 --version 探测入口；控制脚本只替代待测 interpreter，不替换进程 owner。
+        tokio::fs::write(
+            &probe,
+            format!("#!/bin/sh\necho $$ > '{}'\nsleep 30\n", pid_file.display()),
+        )
+        .await?;
+        tokio::fs::set_permissions(&probe, std::fs::Permissions::from_mode(0o700)).await?;
+        let capacity = Arc::new(tokio::sync::Semaphore::new(1));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let cancel = Arc::new(tokio_util::sync::CancellationToken::new());
+        let context = echo_core::tools::ToolContext {
+            native_execution_admission: Some(Arc::new(NativeAdmission {
+                capacity: capacity.clone(),
+                calls: calls.clone(),
+            })),
+            cancel: Some(cancel.clone()),
+            ..echo_core::tools::ToolContext::default()
+        };
+        let task = tokio::spawn(async move {
+            which_exists(&probe.to_string_lossy(), Some(&context), 30).await
+        });
+        let mut pid = None;
+        for _ in 0..100 {
+            if let Ok(text) = tokio::fs::read_to_string(&pid_file).await
+                && let Ok(value) = text.trim().parse::<i32>()
+            {
+                pid = Some(value);
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        cancel.cancel();
+        let result = task.await?;
+        let pid = pid.ok_or("native interpreter probe did not publish its real pid")?;
+        assert!(result.is_err());
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        // SAFETY: signal 0 checks the group created by this exact controlled probe.
+        assert!(unsafe { libc::kill(-pid, 0) } != 0);
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::ESRCH)
+        );
+        assert_eq!(capacity.available_permits(), 1);
+        tokio::fs::remove_dir_all(root).await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_resolve_python() -> Result<()> {
+        let inv = resolve_python(None, DEFAULT_TIMEOUT_SECS).await?;
         // uv 优先(P2):装了 uv 时返回 "uv",否则回退 python3/python/py
         assert!(
             inv.program == "uv"
@@ -708,21 +942,23 @@ mod tests {
             "unexpected python program: {}",
             inv.program
         );
+        Ok(())
     }
 
-    #[test]
-    fn test_resolve_typescript() {
-        let inv = resolve_typescript();
+    #[tokio::test]
+    async fn test_resolve_typescript() -> Result<()> {
+        let inv = resolve_typescript(None, DEFAULT_TIMEOUT_SECS).await?;
         assert!(
             inv.program == "bun" || inv.program == "deno" || inv.program == "npx",
             "unexpected ts program: {}",
             inv.program
         );
+        Ok(())
     }
 
-    #[test]
-    fn test_resolve_shell() {
-        let inv = resolve_shell();
+    #[tokio::test]
+    async fn test_resolve_shell() -> Result<()> {
+        let inv = resolve_shell(None, DEFAULT_TIMEOUT_SECS).await?;
         if cfg!(target_os = "windows") {
             assert!(
                 inv.program.contains("bash")
@@ -735,25 +971,53 @@ mod tests {
         } else {
             assert_eq!(inv.program, "bash");
         }
+        Ok(())
     }
 
-    #[test]
-    fn test_resolve_powershell() {
-        let inv = resolve_powershell();
+    #[tokio::test]
+    async fn test_resolve_powershell() -> Result<()> {
+        let inv = resolve_powershell(None, DEFAULT_TIMEOUT_SECS).await?;
         assert!(
             inv.program == "pwsh" || inv.program == "powershell" || inv.program == "sh",
             "unexpected ps program: {}",
             inv.program
         );
+        Ok(())
     }
 
-    #[test]
-    fn test_resolve_interpreter_extensions() {
-        assert_eq!(resolve_interpreter("test.js").program, "node");
-        assert_eq!(resolve_interpreter("test.rb").program, "ruby");
-        assert_eq!(resolve_interpreter("test.pl").program, "perl");
-        assert_eq!(resolve_interpreter("test.php").program, "php");
-        assert_eq!(resolve_interpreter("test.R").program, "Rscript");
+    #[tokio::test]
+    async fn test_resolve_interpreter_extensions() -> Result<()> {
+        assert_eq!(
+            resolve_interpreter("test.js", None, DEFAULT_TIMEOUT_SECS)
+                .await?
+                .program,
+            "node"
+        );
+        assert_eq!(
+            resolve_interpreter("test.rb", None, DEFAULT_TIMEOUT_SECS)
+                .await?
+                .program,
+            "ruby"
+        );
+        assert_eq!(
+            resolve_interpreter("test.pl", None, DEFAULT_TIMEOUT_SECS)
+                .await?
+                .program,
+            "perl"
+        );
+        assert_eq!(
+            resolve_interpreter("test.php", None, DEFAULT_TIMEOUT_SECS)
+                .await?
+                .program,
+            "php"
+        );
+        assert_eq!(
+            resolve_interpreter("test.R", None, DEFAULT_TIMEOUT_SECS)
+                .await?
+                .program,
+            "Rscript"
+        );
+        Ok(())
     }
 
     #[test]
@@ -875,8 +1139,9 @@ mod tests {
     }
 
     #[cfg(target_os = "windows")]
-    #[test]
-    fn test_find_git_bash_returns_something_or_none() {
-        let _ = find_git_bash();
+    #[tokio::test]
+    async fn test_find_git_bash_returns_something_or_none() -> Result<()> {
+        let _ = find_git_bash(None, DEFAULT_TIMEOUT_SECS).await?;
+        Ok(())
     }
 }

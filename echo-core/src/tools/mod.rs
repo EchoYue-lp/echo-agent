@@ -4,10 +4,13 @@ pub mod artifact;
 pub mod cell;
 pub mod control;
 pub mod filesystem;
+pub mod native_execution;
 pub mod pagination;
 pub mod permission;
 pub mod search;
 pub mod skill;
+
+pub use native_execution::{NativeExecutionAdmissionError, NativeExecutionResourceAdmission};
 
 pub use search::{ContentSearchOutcome, ContentSearchProvider, ContentSearchRequest};
 
@@ -1598,6 +1601,8 @@ pub struct ToolContext {
     /// `run_code` applies it only when `script_path` is used and its normalized
     /// language matches the tool call.
     pub script_execution_profile: Option<std::sync::Arc<ScriptExecutionProfile>>,
+    /// 可选原生资源准入能力。这里只传引用，已获取 guard 只属于单次物理 command。
+    pub native_execution_admission: Option<Arc<dyn NativeExecutionResourceAdmission>>,
     /// 跨 spawn 安全的取消令牌（值传递，非 task_local）。
     pub cancel: Option<std::sync::Arc<tokio_util::sync::CancellationToken>>,
     /// 跨 spawn 安全的 trace 回传（值传递）。
@@ -1636,6 +1641,13 @@ impl std::fmt::Debug for ToolContext {
             .field("has_active_message", &self.active_message.is_some())
             .field("output_artifacts", &self.output_artifacts)
             .field("tool_access", &self.tool_access)
+            .field(
+                "native_execution_admission",
+                &self
+                    .native_execution_admission
+                    .as_ref()
+                    .map(|_| "<provider>"),
+            )
             .field(
                 "visible_tool_count",
                 &self
@@ -1978,6 +1990,7 @@ mod tool_context_tests {
             tool_visibility: None,
             tool_access: None,
             script_execution_profile: None,
+            native_execution_admission: None,
             cancel: None,
             trace_sink: None,
             delegation_policy: None,
